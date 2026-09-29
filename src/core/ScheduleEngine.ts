@@ -96,10 +96,13 @@ export function isPatternIntervalInRange(
   prevTotalMin: number,
   currentTotalMin: number,
   baseMinute: number,
-  intervalMinutes: number
+  intervalMinutes: number,
+  anchorMinute?: number
 ): boolean {
   const interval = Math.max(1, intervalMinutes || 60);
-  const base = ((baseMinute % 60) + 60) % 60;
+  const base = anchorMinute !== undefined
+    ? ((anchorMinute % 1440) + 1440) % 1440
+    : ((baseMinute % 60) + 60) % 60;
 
   if (prevTotalMin === currentTotalMin) {
     const minFromBase = ((currentTotalMin - base) % interval + interval) % interval;
@@ -168,18 +171,23 @@ export function getPatternDepartureMinutes(zone: TimeZoneRule): number[] {
     firstDep += interval;
   }
 
-  let current = firstDep;
-  const maxLimit = 1440 * 2;
-  let step = 0;
+  // ゾーンの総継続時間（最大1440分）
+  const totalZoneDuration = zone.endMin >= zone.startMin
+    ? (zone.endMin - zone.startMin)
+    : (1440 - zone.startMin + zone.endMin);
+  const maxSpan = Math.min(1440, totalZoneDuration);
 
-  while (step < maxLimit) {
+  let current = firstDep;
+  while (current <= firstDep + maxSpan && (current - firstDep) < 1440) {
     const wrapped = ((current % 1440) + 1440) % 1440;
-    if (!isMinuteInZone(wrapped, zone.startMin, zone.endMin)) {
+    if (!isMinuteInZone(wrapped, zone.startMin, zone.endMin) && !(zone.endMin === 1440 && wrapped === 0)) {
+      break;
+    }
+    if (departures.includes(wrapped)) {
       break;
     }
     departures.push(wrapped);
     current += interval;
-    step++;
   }
 
   return departures;
@@ -230,12 +238,11 @@ export function evaluateStationDeparture(
       return { canDepart: true, shouldReverse: !!passZone.isReverse || initialReverse };
     }
 
-    // 2-b. パターンダイヤゾーン: 数学的に区間内跨ぎを正確に探索
+    // 2-b. パターンダイヤゾーン: タイムライン描画（getPatternDepartureMinutes）と完全に同一の基準で発車判定
     const matchedPattern = activeZones.find(z => {
       if (z.mode !== 'pattern') return false;
-      const patMin = z.patternMinute ?? (z.startMin % 60);
-      const interval = z.patternIntervalMinutes ?? 60;
-      return isPatternIntervalInRange(prevMin, currentMin, patMin, interval);
+      const deps = getPatternDepartureMinutes(z);
+      return deps.some(dep => isMinuteInRange(prevMin, currentMin, dep));
     });
     if (matchedPattern) {
       return { canDepart: true, shouldReverse: !!matchedPattern.isReverse || initialReverse };

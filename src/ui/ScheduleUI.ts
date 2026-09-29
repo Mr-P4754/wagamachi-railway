@@ -758,6 +758,10 @@ export class ScheduleUI {
           if (zone) {
             zone.startMin = mins;
             if (zone.endMin <= zone.startMin) zone.endMin = Math.min(1439, zone.startMin + 60);
+            if (zone.mode === 'pattern') {
+              // 開始時刻を変更した際、開始基準時間に確実に列車が発車するよう基準分を開始時刻の分に自動連動
+              zone.patternMinute = mins % 60;
+            }
           }
         }
         this.notifyChanged();
