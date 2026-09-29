@@ -9,8 +9,6 @@ export class ScheduleUI {
   private currentTile: TileData | null = null;
   public onScheduleChanged: (tile: TileData) => void = () => {};
 
-  // 1分=0.75px。24時間=1440分=1080pxにスリム化
-  private readonly PIXELS_PER_MIN = 0.75; 
 
   constructor(private worldMap: WorldMap) {
     this.container = document.createElement('div');
@@ -31,9 +29,10 @@ export class ScheduleUI {
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 780px;
-        max-width: 92vw;
-        max-height: 85vh;
+        width: 820px;
+        max-width: 94vw;
+        max-height: 88vh;
+        max-height: 88dvh;
         z-index: 1500;
         background: var(--bg-panel, rgba(15,23,42,0.96));
         backdrop-filter: blur(16px);
@@ -60,17 +59,32 @@ export class ScheduleUI {
       .sc-close-btn:hover { color: #fff; }
       .sc-body { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
       
-      .timeline-scroll-wrapper {
-        width: 100%; overflow-x: auto; background: rgba(0,0,0,0.5);
-        border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 20px 0; margin-bottom: 16px;
-        cursor: crosshair;
+      .timeline-container {
+        width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.55);
+        border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 12px 14px 14px 14px; margin-bottom: 16px;
+        user-select: none;
+      }
+      .tl-time-header {
+        position: relative; width: 100%; height: 18px; margin-bottom: 6px;
+      }
+      .tl-time-label {
+        position: absolute; top: 0; transform: translateX(-50%);
+        font-size: 11px; font-weight: 700; color: #cbd5e1;
+        pointer-events: none; line-height: 1; text-align: center;
       }
       .timeline-ruler {
-        position: relative; height: 40px; background: rgba(255,255,255,0.05);
-        border-top: 1px solid rgba(255,255,255,0.2); border-bottom: 1px solid rgba(255,255,255,0.2);
+        position: relative; width: 100%; box-sizing: border-box; height: 42px; background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.25); border-radius: 4px; cursor: crosshair;
       }
-      .tl-hour-mark { position: absolute; top: 0; height: 100%; border-left: 1px solid rgba(255,255,255,0.3); }
-      .tl-hour-mark span { position: absolute; top: -18px; left: 2px; font-size: 9px; color: #94a3b8; font-weight: 700; }
+      .tl-grid-line {
+        position: absolute; top: 0; height: 100%; pointer-events: none;
+      }
+      .tl-grid-line.major {
+        border-left: 1px solid rgba(255,255,255,0.35);
+      }
+      .tl-grid-line.minor {
+        border-left: 1px dashed rgba(255,255,255,0.12);
+      }
       
       /* 発車ピン: 2pxのシャープな線状表示 */
       .tl-dep-pin {
@@ -240,9 +254,12 @@ export class ScheduleUI {
           タイムラインをクリック、または下部のカードから <b>発車(ピン)</b>、<b>パターンダイヤ(毎時〇分発車)</b>、<b>通過/停車(時間帯ゾーン)</b> を設定してください。
         </div>
 
-        <div class="timeline-scroll-wrapper">
-          <div class="timeline-ruler" id="tl-ruler" style="width: ${1440 * this.PIXELS_PER_MIN}px;">
-            ${this.generateRuler()}
+        <div class="timeline-container">
+          <div class="tl-time-header">
+            ${this.generateTimeHeader()}
+          </div>
+          <div class="timeline-ruler" id="tl-ruler">
+            ${this.generateGridLines()}
             ${this.generateZones(schedule.timeZones)}
             ${this.generateDepartures(schedule.departures, schedule.reverseDepartures, schedule.splitDepartures)}
           </div>
@@ -261,11 +278,27 @@ export class ScheduleUI {
     this.attachEvents(schedule);
   }
 
-  private generateRuler(): string {
+  /** タイムライン上部の2時間とび時刻ラベルヘッダー (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24) */
+  private generateTimeHeader(): string {
+    let html = '';
+    for (let h = 0; h <= 24; h += 2) {
+      const leftPct = (h / 24) * 100;
+      html += `<div class="tl-time-label" style="left:${leftPct}%;"><span>${h}</span></div>`;
+    }
+    return html;
+  }
+
+  /** ルーラー内部の1時間ごと縦目盛り線（偶数時: 実線 / 奇数時: 破線補助線） */
+  private generateGridLines(): string {
     let html = '';
     for (let h = 0; h < 24; h++) {
-      html += `<div class="tl-hour-mark" style="left:${h * 60 * this.PIXELS_PER_MIN}px;"><span>${h}:00</span></div>`;
+      const leftPct = (h / 24) * 100;
+      const isMajor = h % 2 === 0;
+      const cls = isMajor ? 'tl-grid-line major' : 'tl-grid-line minor';
+      html += `<div class="${cls}" style="left:${leftPct}%;"></div>`;
     }
+    // 終端 24:00 目盛り線
+    html += `<div class="tl-grid-line major" style="left:100%;"></div>`;
     return html;
   }
 
@@ -277,8 +310,9 @@ export class ScheduleUI {
       const splitClass = isSplit ? ' tl-dep-pin-split' : '';
       const revTitle = isRev ? ' (折り返し)' : '';
       const splitTitle = isSplit ? ' [✂️分割]' : '';
+      const leftPct = (m / 1440) * 100;
       return `
-        <div class="tl-dep-pin${revClass}${splitClass}" style="left:${m * this.PIXELS_PER_MIN}px;" title="${this.formatTime(m)} 発車${revTitle}${splitTitle}"></div>
+        <div class="tl-dep-pin${revClass}${splitClass}" style="left:${leftPct}%;" title="${this.formatTime(m)} 発車${revTitle}${splitTitle}"></div>
       `;
     }).join('');
   }
@@ -303,22 +337,38 @@ export class ScheduleUI {
 
         const deps = getPatternDepartureMinutes(z);
         for (const m of deps) {
-          html += `<div class="tl-dep-pin-pattern${revClass}" style="left:${m * this.PIXELS_PER_MIN}px;" title="${this.formatTime(m)} パターン発車 (${intLabel})${revTitle}${splitTitle}"></div>`;
+          const leftPct = (m / 1440) * 100;
+          html += `<div class="tl-dep-pin-pattern${revClass}" style="left:${leftPct}%;" title="${this.formatTime(m)} パターン発車 (${intLabel})${revTitle}${splitTitle}"></div>`;
         }
       } else {
         // 通過 または 〇分停車: 時間帯の帯を描画
-        let w = (z.endMin - z.startMin) * this.PIXELS_PER_MIN;
-        if (z.startMin > z.endMin) {
-          w = (1440 - z.startMin + z.endMin) * this.PIXELS_PER_MIN;
-        }
         const cls = z.mode === 'pass' ? 'tl-zone-pass' : 'tl-zone-stop';
         const label = z.mode === 'pass' ? '通過' : `${z.waitMinutes || 1}分停車`;
         const revLabel = z.isReverse ? ' [折]' : '';
-        html += `
-          <div class="tl-zone ${cls}" style="left:${z.startMin * this.PIXELS_PER_MIN}px; width:${w}px;" title="${this.formatTime(z.startMin)}～${this.formatTime(z.endMin)}: ${label}${revLabel}${splitTitle}">
-            <span>${label}${revLabel}${splitLabel}</span>
-          </div>
-        `;
+
+        if (z.startMin <= z.endMin) {
+          const leftPct = (z.startMin / 1440) * 100;
+          const widthPct = Math.max(0.4, ((z.endMin - z.startMin) / 1440) * 100);
+          html += `
+            <div class="tl-zone ${cls}" style="left:${leftPct}%; width:${widthPct}%;" title="${this.formatTime(z.startMin)}～${this.formatTime(z.endMin)}: ${label}${revLabel}${splitTitle}">
+              <span>${label}${revLabel}${splitLabel}</span>
+            </div>
+          `;
+        } else {
+          // 日またぎ (例: 22:00〜05:00)
+          const leftPct1 = (z.startMin / 1440) * 100;
+          const widthPct1 = ((1440 - z.startMin) / 1440) * 100;
+          const leftPct2 = 0;
+          const widthPct2 = (z.endMin / 1440) * 100;
+          html += `
+            <div class="tl-zone ${cls}" style="left:${leftPct1}%; width:${widthPct1}%;" title="${this.formatTime(z.startMin)}～${this.formatTime(z.endMin)}: ${label}${revLabel}${splitTitle}">
+              <span>${label}${revLabel}${splitLabel}</span>
+            </div>
+            <div class="tl-zone ${cls}" style="left:${leftPct2}%; width:${widthPct2}%;" title="${this.formatTime(z.startMin)}～${this.formatTime(z.endMin)}: ${label}${revLabel}${splitTitle}">
+              <span>${label}${revLabel}${splitLabel}</span>
+            </div>
+          `;
+        }
       }
     }
     return html;
@@ -476,11 +526,12 @@ export class ScheduleUI {
   private attachEvents(schedule: StationSchedule): void {
     const ruler = this.container.querySelector('#tl-ruler') as HTMLElement;
 
-    // タイムラインをクリックして発車ピンを即座に追加
+    // タイムラインをクリックして発車ピンを即座に追加（モーダル幅に100%連動）
     ruler.addEventListener('click', (e) => {
       const rect = ruler.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const minute = Math.floor(clickX / this.PIXELS_PER_MIN);
+      if (rect.width <= 0) return;
+      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const minute = Math.min(1439, Math.floor(ratio * 1440));
       
       if (!schedule.departures.includes(minute)) {
         schedule.departures.push(minute);

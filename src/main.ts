@@ -236,7 +236,8 @@ class GameApp {
       return !!tile && tile.type !== 'empty' && this.worldMap.isTunnelSection(x, z, 1);
     });
     this.inputController = new InputController(this.cameraManager, this.renderer.renderer.domElement);
-    this.uiManager.setMobileControlsVisible(this.inputController.getIsMobileMode());
+    // 直接タップ操作方式とするため、中央十字レティクルおよび右下アクションボタンドックは非表示
+    this.uiManager.setMobileControlsVisible(false);
 
     // Phase2: ゾーニング・時間帯需要・貨物経済循環・超広大マップ用チャンク管理・ミニマップ
     this.zoneManager = new ZoneManager();
@@ -1587,8 +1588,60 @@ class GameApp {
     const dom = this.renderer.renderer.domElement;
     let mouseDownPos = { x: 0, y: 0 };
     let hasDragged = false;
+    let suppressNextMouseClick = false;
+
+    // タッチ端末（スマホ）での直接タイルタップ検出
+    let touchStartPos = { x: 0, y: 0 };
+    let touchStartTime = 0;
+    let isTouchDragging = false;
+
+    dom.addEventListener('touchstart', (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        touchStartTime = performance.now();
+        isTouchDragging = false;
+      } else {
+        isTouchDragging = true;
+      }
+    }, { passive: true });
+
+    dom.addEventListener('touchmove', (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        const dist = Math.hypot(e.touches[0].clientX - touchStartPos.x, e.touches[0].clientY - touchStartPos.y);
+        if (dist > 8) {
+          isTouchDragging = true;
+        }
+      } else {
+        isTouchDragging = true;
+      }
+    }, { passive: true });
+
+    dom.addEventListener('touchend', (e: TouchEvent) => {
+      if (this.cameraManager.viewMode === 'cab_view') return;
+      if (!isTouchDragging && e.changedTouches.length > 0) {
+        const touch = e.changedTouches[0];
+        const elapsed = performance.now() - touchStartTime;
+        // 500ms以内の短時間タップかつ移動が微小な場合のみタップ処理を実行
+        if (elapsed < 500) {
+          const target = document.elementFromPoint(touch.clientX, touch.clientY);
+          const isOverUI = target ? !!target.closest('#build-toolbar, #tool-submenu, #rotation-hint, #station-length-selector, #floor-slicer, header, aside, .modal, .modal-backdrop, #mobile-action-dock, #minimap-container') : false;
+          if (!isOverUI) {
+            // 合成マウスイベント（mousedown/click）の重複発火をブロック
+            suppressNextMouseClick = true;
+            setTimeout(() => { suppressNextMouseClick = false; }, 400);
+
+            // タップした座標で正確にレイキャストしてタイル処理を実行
+            this.inputController.updateMousePosition(touch.clientX, touch.clientY);
+            this.updateHover();
+            this.handleTileClick();
+          }
+        }
+      }
+      isTouchDragging = false;
+    }, { passive: true });
 
     dom.addEventListener('mousedown', (e) => {
+      if (suppressNextMouseClick) return;
       mouseDownPos = { x: e.clientX, y: e.clientY };
       hasDragged = false;
 
@@ -1610,6 +1663,7 @@ class GameApp {
 
     // Mouse move for hover cursor and track drag extension
     dom.addEventListener('mousemove', (e) => {
+      if (suppressNextMouseClick) return;
       this.inputController.updateMousePosition(e.clientX, e.clientY);
 
       const dragDist = Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y);
@@ -1628,8 +1682,9 @@ class GameApp {
 
     // マウスアップで一括敷設ドラッグ確定（UI要素上で離された場合はドラッグを安全にキャンセル）
     window.addEventListener('mouseup', (e: MouseEvent) => {
+      if (suppressNextMouseClick) return;
       const target = e.target as HTMLElement | null;
-      const isOverUI = target ? !!target.closest('#build-toolbar, #tool-submenu, #rotation-hint, #station-length-selector, #floor-slicer, header, aside, .modal, .modal-backdrop, #mobile-action-dock') : false;
+      const isOverUI = target ? !!target.closest('#build-toolbar, #tool-submenu, #rotation-hint, #station-length-selector, #floor-slicer, header, aside, .modal, .modal-backdrop, #mobile-action-dock, #minimap-container') : false;
 
       if (this.isDraggingTrack) {
         if (isOverUI) {
@@ -1647,10 +1702,14 @@ class GameApp {
 
     // ⑤ 左クリックで設置・選択・撤去（単一クリックアクション）
     dom.addEventListener('click', (e) => {
+      if (suppressNextMouseClick) return;
       if (hasDragged || this.isDraggingTrack) return;
       if (e.button !== 0) return;
       if (this.cameraManager.viewMode === 'cab_view') return;
 
+      // クリック位置で確実に最新座標を更新してから処理
+      this.inputController.updateMousePosition(e.clientX, e.clientY);
+      this.updateHover();
       this.handleTileClick();
     });
 
@@ -3570,10 +3629,10 @@ class GameApp {
    * 都市データの初期ロード
    */
   private initWorld() {
-    const saved = localStorage.getItem('saikyo_save_data') || localStorage.getItem('stk_3d_world');
+    const saved = localStorage.getItem('wagamachi_save_data') || localStorage.getItem('saikyo_save_data') || localStorage.getItem('stk_3d_world');
     if (saved) {
       this.worldMap.deserialize(saved);
-      const savedZones = localStorage.getItem('saikyo_zone_data');
+      const savedZones = localStorage.getItem('wagamachi_zone_data') || localStorage.getItem('saikyo_zone_data');
       if (savedZones) {
         this.zoneManager.deserialize(savedZones);
         this.refreshZoneOverlay(this.zoneManager.getAllZones().map(c => ({ x: c.x, z: c.z })));
@@ -3587,7 +3646,7 @@ class GameApp {
         }
       }
       // ゲーム内日時の復元
-      const savedTime = localStorage.getItem('saikyo_time_data');
+      const savedTime = localStorage.getItem('wagamachi_time_data') || localStorage.getItem('saikyo_time_data');
       if (savedTime) {
         try {
           const t = JSON.parse(savedTime);
@@ -3609,9 +3668,9 @@ class GameApp {
       }
 
       // ① 運行中列車および車両基地保有リストの復元
-      const savedTrains = localStorage.getItem('saikyo_trains_data');
-      const savedFleet = localStorage.getItem('saikyo_fleet_data');
-      const savedNextFleetId = localStorage.getItem('saikyo_next_fleet_id');
+      const savedTrains = localStorage.getItem('wagamachi_trains_data') || localStorage.getItem('saikyo_trains_data');
+      const savedFleet = localStorage.getItem('wagamachi_fleet_data') || localStorage.getItem('saikyo_fleet_data');
+      const savedNextFleetId = localStorage.getItem('wagamachi_next_fleet_id') || localStorage.getItem('saikyo_next_fleet_id');
       if (savedNextFleetId) {
         this.nextFleetId = parseInt(savedNextFleetId, 10) || this.nextFleetId;
       }
@@ -3701,13 +3760,12 @@ class GameApp {
 
   private saveGame() {
     const worldData = this.worldMap.serialize();
-    localStorage.setItem('saikyo_save_data', worldData);
-    localStorage.setItem('stk_3d_world', worldData);
-    localStorage.setItem('saikyo_zone_data', this.zoneManager.serialize());
+    localStorage.setItem('wagamachi_save_data', worldData);
+    localStorage.setItem('wagamachi_zone_data', this.zoneManager.serialize());
     this.economy.saveToStorage();
 
     // ① 運行中列車と保有フリートの完全永続化
-    localStorage.setItem('saikyo_trains_data', this.trainManager.serialize());
+    localStorage.setItem('wagamachi_trains_data', this.trainManager.serialize());
     const fleetData = this.fleetRegistry.map(f => ({
       id: f.id,
       name: f.name,
@@ -3718,8 +3776,8 @@ class GameApp {
       totalPassengers: f.totalPassengers,
       totalRevenue: f.totalRevenue
     }));
-    localStorage.setItem('saikyo_fleet_data', JSON.stringify(fleetData));
-    localStorage.setItem('saikyo_next_fleet_id', String(this.nextFleetId));
+    localStorage.setItem('wagamachi_fleet_data', JSON.stringify(fleetData));
+    localStorage.setItem('wagamachi_next_fleet_id', String(this.nextFleetId));
 
     // ゲーム内日時の保存
     const timeData = {
@@ -3730,10 +3788,17 @@ class GameApp {
       minute: this.timeManager.minute,
       speedLevel: this.timeManager.speedLevel
     };
-    localStorage.setItem('saikyo_time_data', JSON.stringify(timeData));
+    localStorage.setItem('wagamachi_time_data', JSON.stringify(timeData));
   }
 
   private resetGame() {
+    localStorage.removeItem('wagamachi_save_data');
+    localStorage.removeItem('wagamachi_zone_data');
+    localStorage.removeItem('wagamachi_trains_data');
+    localStorage.removeItem('wagamachi_fleet_data');
+    localStorage.removeItem('wagamachi_next_fleet_id');
+    localStorage.removeItem('wagamachi_time_data');
+    // 旧キーの完全クリーンアップ
     localStorage.removeItem('stk_3d_world');
     localStorage.removeItem('saikyo_save_data');
     localStorage.removeItem('saikyo_zone_data');

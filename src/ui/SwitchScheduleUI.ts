@@ -8,8 +8,6 @@ export class SwitchScheduleUI {
   private currentTile: TileData | null = null;
   public onScheduleChanged: (tile: TileData) => void = () => {};
 
-  // 1分=0.75px。24時間=1440分=1080pxにスリム化（駅ダイヤと共通）
-  private readonly PIXELS_PER_MIN = 0.75;
 
   constructor(private worldMap: WorldMap) {
     this.container = document.createElement('div');
@@ -37,9 +35,10 @@ export class SwitchScheduleUI {
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 780px;
-        max-width: 92vw;
-        max-height: 85vh;
+        width: 820px;
+        max-width: 94vw;
+        max-height: 88vh;
+        max-height: 88dvh;
         z-index: 1500;
         background: var(--bg-panel, rgba(15,23,42,0.96));
         backdrop-filter: blur(16px);
@@ -80,17 +79,33 @@ export class SwitchScheduleUI {
         box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
       }
       
-      .sw-timeline-scroll-wrapper {
-        width: 100%; overflow-x: auto; background: rgba(0,0,0,0.5);
-        border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 22px 0 10px 0; margin-bottom: 16px;
+      .sw-timeline-container {
+        width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.55);
+        border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 12px 14px 14px 14px; margin-bottom: 16px;
+        user-select: none;
+      }
+      .sw-tl-time-header {
+        position: relative; width: 100%; height: 18px; margin-bottom: 6px;
+      }
+      .sw-tl-time-label {
+        position: absolute; top: 0; transform: translateX(-50%);
+        font-size: 11px; font-weight: 700; color: #cbd5e1;
+        pointer-events: none; line-height: 1; text-align: center;
       }
       .sw-timeline-ruler {
-        position: relative; height: 42px; background: rgba(100, 116, 139, 0.2);
-        border-top: 1px solid rgba(255,255,255,0.2); border-bottom: 1px solid rgba(255,255,255,0.2);
+        position: relative; width: 100%; box-sizing: border-box; height: 42px; background: rgba(100, 116, 139, 0.2);
+        border: 1px solid rgba(255,255,255,0.25); border-radius: 4px;
         overflow: hidden;
       }
-      .sw-tl-hour-mark { position: absolute; top: 0; height: 100%; border-left: 1px solid rgba(255,255,255,0.25); pointer-events: none; }
-      .sw-tl-hour-mark span { position: absolute; top: -19px; left: 2px; font-size: 9px; color: #94a3b8; font-weight: 700; }
+      .sw-tl-grid-line {
+        position: absolute; top: 0; height: 100%; pointer-events: none;
+      }
+      .sw-tl-grid-line.major {
+        border-left: 1px solid rgba(255,255,255,0.35);
+      }
+      .sw-tl-grid-line.minor {
+        border-left: 1px dashed rgba(255,255,255,0.12);
+      }
       
       .sw-default-label {
         position: absolute; top: 50%; left: 12px; transform: translateY(-50%);
@@ -294,10 +309,13 @@ export class SwitchScheduleUI {
         </div>
 
         <!-- 24時間タイムラインルーラー -->
-        <div class="sw-timeline-scroll-wrapper">
-          <div class="sw-timeline-ruler" id="sw-tl-ruler" style="width: ${1440 * this.PIXELS_PER_MIN}px;">
+        <div class="sw-timeline-container">
+          <div class="sw-tl-time-header">
+            ${this.generateTimeHeader()}
+          </div>
+          <div class="sw-timeline-ruler" id="sw-tl-ruler">
             <div class="sw-default-label">DEFAULT: 直進 (STRAIGHT)</div>
-            ${this.generateRuler()}
+            ${this.generateGridLines()}
             ${sched.mode === 'timeline' ? this.generateRuleZones(sched.rules, isScissors) : ''}
           </div>
         </div>
@@ -319,11 +337,27 @@ export class SwitchScheduleUI {
     this.attachEvents(sched, isScissors);
   }
 
-  private generateRuler(): string {
+  /** タイムライン上部の2時間とび時刻ラベルヘッダー (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24) */
+  private generateTimeHeader(): string {
+    let html = '';
+    for (let h = 0; h <= 24; h += 2) {
+      const leftPct = (h / 24) * 100;
+      html += `<div class="sw-tl-time-label" style="left:${leftPct}%;"><span>${h}</span></div>`;
+    }
+    return html;
+  }
+
+  /** ルーラー内部の1時間ごと縦目盛り線（偶数時: 実線 / 奇数時: 破線補助線） */
+  private generateGridLines(): string {
     let html = '';
     for (let h = 0; h < 24; h++) {
-      html += `<div class="sw-tl-hour-mark" style="left:${h * 60 * this.PIXELS_PER_MIN}px;"><span>${h}:00</span></div>`;
+      const leftPct = (h / 24) * 100;
+      const isMajor = h % 2 === 0;
+      const cls = isMajor ? 'sw-tl-grid-line major' : 'sw-tl-grid-line minor';
+      html += `<div class="${cls}" style="left:${leftPct}%;"></div>`;
     }
+    // 終端 24:00 目盛り線
+    html += `<div class="sw-tl-grid-line major" style="left:100%;"></div>`;
     return html;
   }
 
@@ -350,17 +384,17 @@ export class SwitchScheduleUI {
       if (rule.type === 'time_range') {
         // 時間帯指定で分岐
         if (rule.startMin <= rule.endMin) {
-          const left = rule.startMin * this.PIXELS_PER_MIN;
-          const width = Math.max(2, (rule.endMin - rule.startMin) * this.PIXELS_PER_MIN);
-          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${left}px; width:${width}px;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
+          const leftPct = (rule.startMin / 1440) * 100;
+          const widthPct = Math.max(0.4, ((rule.endMin - rule.startMin) / 1440) * 100);
+          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${leftPct}%; width:${widthPct}%;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
         } else {
           // 日またぎ
-          const left1 = rule.startMin * this.PIXELS_PER_MIN;
-          const width1 = (1440 - rule.startMin) * this.PIXELS_PER_MIN;
-          const left2 = 0;
-          const width2 = rule.endMin * this.PIXELS_PER_MIN;
-          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${left1}px; width:${width1}px;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
-          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${left2}px; width:${width2}px;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
+          const leftPct1 = (rule.startMin / 1440) * 100;
+          const widthPct1 = ((1440 - rule.startMin) / 1440) * 100;
+          const leftPct2 = 0;
+          const widthPct2 = (rule.endMin / 1440) * 100;
+          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${leftPct1}%; width:${widthPct1}%;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
+          html += `<div class="sw-tl-zone ${zoneClass}" style="left:${leftPct2}%; width:${widthPct2}%;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)}: ${label}"><span>${label}</span></div>`;
         }
       } else if (rule.type === 'pattern') {
         // パターンで分岐（適用時間帯内で毎時指定分を開通）
@@ -378,9 +412,9 @@ export class SwitchScheduleUI {
           const isEndInSpan = this.isMinuteInZone(hourBase + ((patEnd === 0 ? 59 : patEnd)), rule.startMin, rule.endMin);
 
           if (isStartInSpan || isEndInSpan) {
-            const left = (zoneStartMin % 1440) * this.PIXELS_PER_MIN;
-            const width = Math.max(2, span * this.PIXELS_PER_MIN);
-            html += `<div class="sw-tl-zone ${zoneClass}" style="left:${left}px; width:${width}px;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)} (毎時${patStart}～${patEnd}分): ${label}"><span>${label}</span></div>`;
+            const leftPct = ((zoneStartMin % 1440) / 1440) * 100;
+            const widthPct = Math.max(0.4, (span / 1440) * 100);
+            html += `<div class="sw-tl-zone ${zoneClass}" style="left:${leftPct}%; width:${widthPct}%;" title="${this.formatTime(rule.startMin)}～${this.formatTime(rule.endMin)} (毎時${patStart}～${patEnd}分): ${label}"><span>${label}</span></div>`;
           }
         }
       }

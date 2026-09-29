@@ -48,10 +48,28 @@ export class MiniMap {
     this.container = document.createElement('div');
     this.container.id = 'minimap-container';
 
+    // 路線図ヘッダーバー（タイトル＋閉じるボタン）
+    const headerBar = document.createElement('div');
+    headerBar.id = 'minimap-header-bar';
+
     const label = document.createElement('div');
     label.id = 'minimap-label';
     label.textContent = '路線図';
-    this.container.appendChild(label);
+    headerBar.appendChild(label);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.id = 'minimap-close-btn';
+    closeBtn.textContent = '✕';
+    closeBtn.title = '路線図を閉じる';
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setVisible(false);
+      const toggleBtn = document.getElementById('btn-minimap-toggle');
+      if (toggleBtn) toggleBtn.classList.remove('active');
+    });
+    headerBar.appendChild(closeBtn);
+
+    this.container.appendChild(headerBar);
 
     this.canvas = document.createElement('canvas');
     this.canvas.id = 'minimap-canvas';
@@ -87,6 +105,14 @@ export class MiniMap {
     this.rebuildBackground();
   }
 
+  public setVisible(visible: boolean): void {
+    this.container.classList.toggle('hidden', !visible);
+  }
+
+  public getVisible(): boolean {
+    return !this.container.classList.contains('hidden');
+  }
+
   private injectStyle(): void {
     if (document.getElementById('minimap-style')) return;
     const style = document.createElement('style');
@@ -97,21 +123,41 @@ export class MiniMap {
         right: 14px;
         bottom: 14px;
         z-index: 40;
-        background: rgba(15, 23, 42, 0.72);
+        background: rgba(15, 23, 42, 0.85);
         border: 1px solid rgba(148, 163, 184, 0.4);
         border-radius: 10px;
         padding: 6px;
-        box-shadow: 0 4px 18px rgba(0,0,0,0.35);
-        backdrop-filter: blur(4px);
+        box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+        backdrop-filter: blur(8px);
         touch-action: none;
+      }
+      #minimap-header-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 4px;
+        padding: 0 2px;
       }
       #minimap-label {
         color: #e2e8f0;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.05em;
-        margin-bottom: 4px;
-        text-align: center;
+      }
+      #minimap-close-btn {
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        font-size: 11px;
+        cursor: pointer;
+        padding: 2px 4px;
+        border-radius: 4px;
+        line-height: 1;
+        transition: color 0.15s ease;
+      }
+      #minimap-close-btn:hover {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.1);
       }
       #minimap-canvas {
         display: block;
@@ -120,7 +166,15 @@ export class MiniMap {
         image-rendering: pixelated;
       }
       @media (max-width: 768px) {
-        #minimap-container { right: 8px; bottom: 78px; padding: 4px; }
+        #minimap-container {
+          right: 8px;
+          bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+          padding: 4px;
+        }
+        #minimap-canvas {
+          width: 130px;
+          height: 130px;
+        }
       }
     `;
     document.head.appendChild(style);

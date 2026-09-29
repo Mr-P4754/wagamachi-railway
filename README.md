@@ -57,7 +57,7 @@
 
 ## 🚀 GitHub Pages への公開手順
 
-1. 本リポジトリを GitHub の任意のリポジトリ（例: `https://github.com/<your-username>/saikyo_toshikeikaku`）に push します。
+1. 本リポジトリを GitHub の任意のリポジトリ（例: `https://github.com/<your-username>/wagamachi-railway`）に push します。
 2. GitHub のリポジトリ設定画面（**Settings** > **Pages**）を開きます。
 3. **Build and deployment** の **Source** を **GitHub Actions** に設定します。
 4. これにより、同梱されている `.github/workflows/deploy.yml` が自動実行され、数分で `https://<your-username>.github.io/<repo-name>/` にゲームが公開されます！

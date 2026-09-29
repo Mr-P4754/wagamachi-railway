@@ -34,7 +34,7 @@ export class GameState {
    */
   public hasSaveData(): boolean {
     try {
-      const data = localStorage.getItem('saikyo_save_data') || localStorage.getItem('stk_3d_world');
+      const data = localStorage.getItem('wagamachi_save_data') || localStorage.getItem('saikyo_save_data') || localStorage.getItem('stk_3d_world');
       return !!data;
     } catch {
       return false;

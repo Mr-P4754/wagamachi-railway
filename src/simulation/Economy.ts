@@ -322,7 +322,7 @@ export class Economy {
         pendingTotalTax: this.pendingTotalTax,
         lastSettledYear: this.lastSettledYear
       };
-      localStorage.setItem('stk_3d_economy', JSON.stringify(data));
+      localStorage.setItem('wagamachi_economy_data', JSON.stringify(data));
     } catch (e) {
       console.warn('LocalStorage save failed', e);
     }
@@ -330,7 +330,7 @@ export class Economy {
 
   public loadFromStorage(): boolean {
     try {
-      const raw = localStorage.getItem('stk_3d_economy');
+      const raw = localStorage.getItem('wagamachi_economy_data') || localStorage.getItem('stk_3d_economy');
       if (raw) {
         const data = JSON.parse(raw);
         this.funds = data.funds ?? 100000000;
@@ -373,6 +373,7 @@ export class Economy {
     this.pendingTotalTax = 0;
     this.lastSettledYear = 2025;
     try {
+      localStorage.removeItem('wagamachi_economy_data');
       localStorage.removeItem('stk_3d_economy');
     } catch (e) {}
   }

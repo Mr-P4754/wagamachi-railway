@@ -73,7 +73,8 @@ export class InputController {
     elevationOffsetProvider?: (x: number, z: number) => number,
     useCenterScreen: boolean = false
   ): GridIntersection | null {
-    const screenCoord = (this.isMobileMode || useCenterScreen) ? this.centerScreenPos : this.mousePos;
+    // useCenterScreen が true の場合のみ画面中央レティクルを使用し、それ以外はタップ・マウス位置を使用
+    const screenCoord = useCenterScreen ? this.centerScreenPos : this.mousePos;
     this.raycaster.setFromCamera(screenCoord, this.cameraManager.activeCamera);
 
     // 1. まず地表1F基準面 (Y = 0) または アクティブ階層の基準高さで平面交差を算出

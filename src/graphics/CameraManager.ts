@@ -357,18 +357,25 @@ export class CameraManager {
 
     // タッチ操作（スマホ用: 1本指パン、2本指ピンチズーム）
     let touchStartDist = 0;
+    let touchStartX = 0;
+    let touchStartY = 0;
     let lastTouchX = 0;
     let lastTouchY = 0;
     let isTouchPanning = false;
+    let hasMovedSignificantly = false;
 
     this.domElement.addEventListener('touchstart', (e: TouchEvent) => {
       if (this.viewMode !== 'quarter_view') return;
       if (e.touches.length === 1) {
         isTouchPanning = true;
+        hasMovedSignificantly = false;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
         lastTouchX = e.touches[0].clientX;
         lastTouchY = e.touches[0].clientY;
       } else if (e.touches.length === 2) {
         isTouchPanning = false;
+        hasMovedSignificantly = true;
         const dx = e.touches[0].clientX - e.touches[1].clientX;
         const dy = e.touches[0].clientY - e.touches[1].clientY;
         touchStartDist = Math.hypot(dx, dy);
@@ -380,6 +387,17 @@ export class CameraManager {
       if (e.touches.length === 1 && isTouchPanning) {
         const clientX = e.touches[0].clientX;
         const clientY = e.touches[0].clientY;
+        
+        // タップ判定の邪魔をしないよう、4px以上の意図的なスワイプ移動のみカメラを動かす
+        if (!hasMovedSignificantly) {
+          const totalDist = Math.hypot(clientX - touchStartX, clientY - touchStartY);
+          if (totalDist > 4) {
+            hasMovedSignificantly = true;
+          } else {
+            return;
+          }
+        }
+
         const dx = clientX - lastTouchX;
         const dy = clientY - lastTouchY;
         lastTouchX = clientX;
@@ -415,10 +433,12 @@ export class CameraManager {
     window.addEventListener('touchend', (e: TouchEvent) => {
       if (e.touches.length === 0) {
         isTouchPanning = false;
+        hasMovedSignificantly = false;
         touchStartDist = 0;
       } else if (e.touches.length === 1) {
         // 2本指から1本指に戻った場合は位置を更新して急激なジャンプを防止
         isTouchPanning = true;
+        hasMovedSignificantly = true;
         lastTouchX = e.touches[0].clientX;
         lastTouchY = e.touches[0].clientY;
       }

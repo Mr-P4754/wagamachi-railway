@@ -597,12 +597,21 @@ export class UIManager {
       this.floorSlicerEl?.classList.toggle('hidden', !slicerVisible);
     });
 
-    // 路線図ミニマップ表示切替
-    let minimapVisible = true;
+    // 路線図ミニマップ表示切替（スマホなど画面幅768px以下では画面専有を防ぐため初期状態を非表示にする）
+    const isMobileScreen = window.innerWidth <= 768;
+    let minimapVisible = !isMobileScreen;
+    if (isMobileScreen) {
+      this.minimapToggleBtn?.classList.remove('active');
+      // DOMが作成された後に非表示クラスを付与
+      setTimeout(() => {
+        document.getElementById('minimap-container')?.classList.add('hidden');
+      }, 50);
+    }
     this.minimapToggleBtn?.addEventListener('click', () => {
-      minimapVisible = !minimapVisible;
-      this.minimapToggleBtn?.classList.toggle('active', minimapVisible);
       const minimap = document.getElementById('minimap-container');
+      const currentHidden = minimap?.classList.contains('hidden') ?? !minimapVisible;
+      minimapVisible = currentHidden;
+      this.minimapToggleBtn?.classList.toggle('active', minimapVisible);
       minimap?.classList.toggle('hidden', !minimapVisible);
     });
 

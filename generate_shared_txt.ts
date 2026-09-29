@@ -100,7 +100,7 @@ function bundleFiles(target: BundleTarget): string {
   }
 
   let output = `================================================================================\n`;
-  output += `最強都市計画 (Saikyo Toshikeikaku) - Code Bundle\n`;
+  output += `わがまちレールウェイ (Wagamachi Railway) - Code Bundle\n`;
   output += `BUNDLE: ${target.name.toUpperCase()} (${target.description})\n`;
   output += `GENERATED: ${new Date().toISOString()}\n`;
   output += `TOTAL FILES: ${fileSummaries.length} files\n`;
@@ -137,7 +137,7 @@ function main() {
   }
 
   console.log('================================================================================');
-  console.log('=== 最強都市計画: 主要コードバンドル (.txt) 生成開始 ===');
+  console.log('=== わがまちレールウェイ: 主要コードバンドル (.txt) 生成開始 ===');
   console.log('================================================================================\n');
 
   const allGeneratedFiles: Array<{ name: string; path: string; fileCount: number; totalLines: number; sizeKB: string }> = [];
