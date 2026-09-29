@@ -27,13 +27,13 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     category: 'freight',
     description: 'コンテナ・物資輸送を担う電気機関車牽引編成。低速ながら着実な運賃収入と低運行費が特徴。',
     speedTilesPerMinute: 1.0, // 基準速度: 1.0 マス/分（現実1秒で1マス）
-    basePrice: 25000000,
+    basePrice: 15000000,
     baseCapacity: 0, // 貨物専用（旅客定員なし）
     maxOccupancyRate: 0,
     maxSpeed: 75,
     farePerRide: 0, // 旅客運賃なし（コンテナ輸送で運賃計上）
-    runningCostPerTripPerCar: 15000,
-    dailyRunningCostPerCar: 18000,
+    runningCostPerTripPerCar: 1000,
+    dailyRunningCostPerCar: 3000,
     bodyColor: 0x1e3a8a, // ディープブルー
     stripeColor: 0xf59e0b, // ゴールド帯
     roofColor: 0x334155
@@ -42,15 +42,15 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     id: 'commuter-train',
     name: '通勤型列車',
     category: 'commuter',
-    description: '都市部の過密輸送を支える4ドア通勤型。高定員・低廉な運賃と低い運行費が強み（最大乗車率200%）。',
+    description: '都市部の過密輸送を支える4ドア通勤型。高定員・手頃な運賃と低い運行費が強み（最大乗車率200%）。',
     speedTilesPerMinute: 1.5, // 1.5 マス/分（約0.67秒で1マス）
-    basePrice: 22000000,
+    basePrice: 12000000,
     baseCapacity: 150,
     maxOccupancyRate: 2.0, // 最大乗車率 200%（1両あたり最大300人乗車可能）
     maxSpeed: 95,
-    farePerRide: 200,
-    runningCostPerTripPerCar: 22500, // 150人 * 0.75 * 200円 = 22,500円
-    dailyRunningCostPerCar: 25000,
+    farePerRide: 250,
+    runningCostPerTripPerCar: 1500, // 1両あたり1,500円（2両3,000円、12人乗車で黒字）
+    dailyRunningCostPerCar: 4000,
     bodyColor: 0xd1d5db, // メタリックシルバー
     stripeColor: 0x10b981, // 若草エメラルドグリーン
     roofColor: 0x475569
@@ -61,13 +61,13 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     category: 'suburban',
     description: '都市とベッドタウンを結ぶセミクロスシート近郊型。乗客定員と速度のバランスが優れ、汎用性抜群（最大乗車率175%）。',
     speedTilesPerMinute: 2.0, // 2.0 マス/分（0.5秒で1マス）
-    basePrice: 32000000,
+    basePrice: 18000000,
     baseCapacity: 120,
     maxOccupancyRate: 1.75, // 最大乗車率 175%（1両あたり最大210人乗車可能）
     maxSpeed: 110,
     farePerRide: 350,
-    runningCostPerTripPerCar: 31500, // 120人 * 0.75 * 350円 = 31,500円
-    dailyRunningCostPerCar: 35000,
+    runningCostPerTripPerCar: 2200, // 1両あたり2,200円（2両4,400円、13人乗車で黒字）
+    dailyRunningCostPerCar: 6000,
     bodyColor: 0xfef9c3, // アイボリークリーム
     stripeColor: 0xe67e22, // オレンジ帯
     roofColor: 0x64748b
@@ -78,13 +78,13 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     category: 'rapid',
     description: '主要駅を結ぶ高速快速用トレイン。軽量ステンレス車体で俊敏に走行し、高い運賃収入を生み出します（最大乗車率175%）。',
     speedTilesPerMinute: 2.0, // 2.0 マス/分（0.5秒で1マス）
-    basePrice: 45000000,
+    basePrice: 25000000,
     baseCapacity: 100,
     maxOccupancyRate: 1.75, // 最大乗車率 175%（1両あたり最大175人乗車可能）
     maxSpeed: 125,
     farePerRide: 500,
-    runningCostPerTripPerCar: 37500, // 100人 * 0.75 * 500円 = 37,500円
-    dailyRunningCostPerCar: 42000,
+    runningCostPerTripPerCar: 3000, // 1両あたり3,000円（2両6,000円、12人乗車で黒字）
+    dailyRunningCostPerCar: 8000,
     bodyColor: 0xe2e8f0, // 明るいシルバー
     stripeColor: 0x0284c7, // スカイブルー
     roofColor: 0x334155
@@ -95,13 +95,13 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     category: 'express',
     description: '長距離優等列車として設計された伝統の急行型。ゆったりとした車内空間と、割高な急行運賃が魅力（最大乗車率150%）。',
     speedTilesPerMinute: 2.5, // 2.5 マス/分（0.4秒で1マス）
-    basePrice: 65000000,
+    basePrice: 40000000,
     baseCapacity: 80,
     maxOccupancyRate: 1.5, // 最大乗車率 150%（1両あたり最大120人乗車可能）
     maxSpeed: 135,
     farePerRide: 800,
-    runningCostPerTripPerCar: 48000, // 80人 * 0.75 * 800円 = 48,000円
-    dailyRunningCostPerCar: 55000,
+    runningCostPerTripPerCar: 4500, // 1両あたり4,500円（2両9,000円、12人乗車で黒字）
+    dailyRunningCostPerCar: 12000,
     bodyColor: 0x991b1b, // バーガンディ・深紅
     stripeColor: 0xfde047, // ゴールドイエロー帯
     roofColor: 0x334155
@@ -112,13 +112,13 @@ export const VEHICLE_CATALOG: VehicleModelInfo[] = [
     category: 'limited-express',
     description: '鉄道会社の威信をかけたフラッグシップ特急。最高峰の俊足走行と最高額の特急運賃で莫大な収益を実現（最大乗車率125%）。',
     speedTilesPerMinute: 3.0, // 3.0 マス/分（約0.33秒で1マス）
-    basePrice: 95000000,
+    basePrice: 60000000,
     baseCapacity: 60,
     maxOccupancyRate: 1.25, // 最大乗車率 125%（1両あたり最大75人乗車可能）
     maxSpeed: 160,
     farePerRide: 1400,
-    runningCostPerTripPerCar: 63000, // 60人 * 0.75 * 1400円 = 63,000円
-    dailyRunningCostPerCar: 70000,
+    runningCostPerTripPerCar: 7000, // 1両あたり7,000円（2両14,000円、10人乗車で黒字）
+    dailyRunningCostPerCar: 18000,
     bodyColor: 0x0f172a, // ナイトネイビー
     stripeColor: 0x38bdf8, // ネオンシアン帯
     roofColor: 0x0284c7
@@ -137,10 +137,10 @@ export function getRunningCostPerDay(model: VehicleModelInfo, carCount: number):
 }
 
 /**
- * 1区間（発着）走行あたりの運行費用（乗車率75%で損益分岐）
+ * 1区間（発着）走行あたりの運行費用
  */
 export function getRunningCostPerTrip(model: VehicleModelInfo, carCount: number): number {
-  return (model.runningCostPerTripPerCar ?? Math.round(model.baseCapacity * 0.75 * model.farePerRide)) * carCount;
+  return (model.runningCostPerTripPerCar ?? Math.round(model.baseCapacity * 0.1 * (model.farePerRide || 200))) * carCount;
 }
 
 /**

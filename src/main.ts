@@ -396,13 +396,13 @@ class GameApp {
       this.economy.syncDate(year, month, this.timeManager.day);
       const allTiles = this.worldMap.getAllTiles();
       const trackCount = allTiles.filter(t => isTrackLikeType(t.type)).length;
-      // 駅および信号場の月額維持管理費（ホーム数×20万円、信号場×2万円）を集計
+      // 駅および信号場の月額維持管理費（ホーム数×5万円、信号場×1万円）を集計
       const stationMaintenance = this.worldMap.stationManager.getStations().reduce(
         (sum, s) => sum + s.maintenance,
         0
       );
-      // ※列車運行維持費は1区間走行ごとに乗車率75%損益分岐モデルでリアルタイム計上されるため、月次は線路・駅維持費を計上
-      const maint = trackCount * 500000 + stationMaintenance;
+      // 線路維持費（1マス月額1万円）＋駅維持費
+      const maint = trackCount * 10000 + stationMaintenance;
       this.economy.spendFunds(maint, false);
       // 【今期収支インフレ解消】月替わりで当期収支アキュムレータをリセット
       this.economy.resetPeriodStats();

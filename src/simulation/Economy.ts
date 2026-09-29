@@ -153,10 +153,10 @@ export class Economy {
     // 法人税: 課税所得が黒字の場合のみ30%。設備投資で再投資した場合は0円（節税成功）
     const corporateTax = taxableIncome > 0 ? Math.floor(taxableIncome * 0.3) : 0;
 
-    // 固定資産税: 線路1マス5万円、駅ホーム1マス20万円、車両1両50万円
-    const trackTax = trackTiles * 50000;
-    const stationTax = stationTiles * 200000;
-    const carTax = totalCars * 500000;
+    // 固定資産税: 線路1マス1万円、駅ホーム1マス5万円、車両1両15万円
+    const trackTax = trackTiles * 10000;
+    const stationTax = stationTiles * 50000;
+    const carTax = totalCars * 150000;
     const propertyTax = trackTax + stationTax + carTax;
 
     const totalTax = corporateTax + propertyTax;

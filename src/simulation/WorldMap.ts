@@ -1360,7 +1360,7 @@ export class WorldMap {
       tile.dailyPassengers = tile.dailyPassengers ?? 0;
       tile.totalPassengers = tile.totalPassengers ?? 0;
       tile.totalRevenue = tile.totalRevenue ?? 0;
-      tile.stationMaintenance = type.startsWith('cargo_station') ? 50000 : (type === 'signal_yard' ? 20000 : 200000);
+      tile.stationMaintenance = type.startsWith('cargo_station') ? 25000 : (type === 'signal_yard' ? 10000 : 50000);
       tile.stationNetProfit = (tile.totalRevenue ?? 0) - (tile.stationMaintenance ?? 0);
       tile.stationTargetLength = this.getStationRunLength(x, z);
 
@@ -2096,7 +2096,7 @@ export class WorldMap {
       tile.dailyPassengers = 0;
       tile.totalPassengers = 0;
       tile.totalRevenue = 0;
-      tile.stationMaintenance = isSignalYard ? 20000 * length : (isCargoStation ? 50000 * length : 150000 * length);
+      tile.stationMaintenance = isSignalYard ? 10000 * length : (isCargoStation ? 25000 * length : 50000 * length);
       tile.stationNetProfit = 0;
       tile.stationSchedule = isCargoStation ? createDefaultCargoStationSchedule() : createDefaultStationSchedule();
       if (isCargoStation) {

@@ -140,7 +140,7 @@ export class StationManager {
             : `第${this.nextStationNumber++}駅`)
       );
 
-      const baseMaintenance = isSignalYard ? 20000 : (isCargo ? 50000 : 200000);
+      const baseMaintenance = isSignalYard ? 10000 : (isCargo ? 25000 : 50000);
       targetStation = {
         id: stationId,
         name: defaultName,
