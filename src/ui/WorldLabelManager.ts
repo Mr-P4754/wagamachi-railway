@@ -6,13 +6,27 @@ import { layerToHeight } from '../core/Grid3D';
 import { getMaxCapacity } from '../simulation/VehicleCatalog';
 
 /**
+ * ラベルDOM要素および前回フレームの状態キャッシュ
+ */
+interface LabelState {
+  element: HTMLElement;
+  lastText: string;
+  lastVisible: boolean;
+  lastX: number;
+  lastY: number;
+  isFull?: boolean;
+}
+
+/**
  * 3D空間内の駅および旅客列車の真上に、現在の乗客数を数字のみで追従表示するマネージャークラス
  */
 export class WorldLabelManager {
   private container: HTMLElement;
-  private stationLabels: Map<string, HTMLElement> = new Map();
-  private trainLabels: Map<number, HTMLElement> = new Map();
+  private containerVisible: boolean = true;
+  private stationLabels: Map<string, LabelState> = new Map();
+  private trainLabels: Map<number, LabelState> = new Map();
   private tempVec = new THREE.Vector3();
+  private lastCamera: THREE.Camera | null = null;
 
   constructor(containerId: string = 'world-labels-container') {
     let el = document.getElementById(containerId);
@@ -35,12 +49,20 @@ export class WorldLabelManager {
     worldMap: WorldMap,
     trainManager: TrainManager
   ): void {
+    this.lastCamera = camera;
+
     // 全体視点（quarter_view）以外（車窓モード中など）はすべて非表示
     if (viewMode !== 'quarter_view') {
-      this.container.style.display = 'none';
+      if (this.containerVisible) {
+        this.container.style.visibility = 'hidden';
+        this.containerVisible = false;
+      }
       return;
     }
-    this.container.style.display = 'block';
+    if (!this.containerVisible) {
+      this.container.style.visibility = 'visible';
+      this.containerVisible = true;
+    }
 
     const width = window.innerWidth;
     const height = window.innerHeight;
@@ -106,33 +128,55 @@ export class WorldLabelManager {
         this.tempVec.project(camera);
 
         // 視野内判定
-        let labelEl = this.stationLabels.get(pKey);
-        if (!labelEl) {
-          labelEl = document.createElement('div');
+        let labelState = this.stationLabels.get(pKey);
+        if (!labelState) {
+          const labelEl = document.createElement('div');
           labelEl.className = 'world-badge station-badge';
           this.container.appendChild(labelEl);
-          this.stationLabels.set(pKey, labelEl);
+          labelState = {
+            element: labelEl,
+            lastText: '',
+            lastVisible: false,
+            lastX: -9999,
+            lastY: -9999
+          };
+          this.stationLabels.set(pKey, labelState);
         }
 
         if (this.isOutOfScreen(this.tempVec)) {
-          labelEl.style.display = 'none';
+          if (labelState.lastVisible) {
+            labelState.element.style.visibility = 'hidden';
+            labelState.lastVisible = false;
+          }
         } else {
-          const screenX = (this.tempVec.x * 0.5 + 0.5) * screenWidth;
-          const screenY = (-(this.tempVec.y * 0.5) + 0.5) * screenHeight;
+          if (!labelState.lastVisible) {
+            labelState.element.style.visibility = 'visible';
+            labelState.lastVisible = true;
+          }
 
-          labelEl.style.left = `${Math.round(screenX)}px`;
-          labelEl.style.top = `${Math.round(screenY)}px`;
-          labelEl.style.display = 'block';
-          // 数字のみ表示
-          labelEl.textContent = maxPassengers.toLocaleString();
+          const screenX = Math.round((this.tempVec.x * 0.5 + 0.5) * screenWidth);
+          const screenY = Math.round((-(this.tempVec.y * 0.5) + 0.5) * screenHeight);
+
+          if (screenX !== labelState.lastX || screenY !== labelState.lastY) {
+            labelState.element.style.transform = `translate3d(${screenX}px, ${screenY}px, 0) translate(-50%, -100%)`;
+            labelState.lastX = screenX;
+            labelState.lastY = screenY;
+          }
+
+          // 数字のみ表示（差分がある場合のみ代入）
+          const text = maxPassengers.toLocaleString();
+          if (labelState.lastText !== text) {
+            labelState.element.textContent = text;
+            labelState.lastText = text;
+          }
         }
       }
     }
 
     // 撤去された駅ホームのラベルをDOMから除去
-    for (const [key, el] of this.stationLabels.entries()) {
+    for (const [key, state] of this.stationLabels.entries()) {
       if (!activeStationKeys.has(key)) {
-        el.remove();
+        state.element.remove();
         this.stationLabels.delete(key);
       }
     }
@@ -172,38 +216,63 @@ export class WorldLabelManager {
       this.tempVec.set(worldX, worldY, worldZ);
       this.tempVec.project(camera);
 
-      let labelEl = this.trainLabels.get(train.id);
-      if (!labelEl) {
-        labelEl = document.createElement('div');
+      let labelState = this.trainLabels.get(train.id);
+      if (!labelState) {
+        const labelEl = document.createElement('div');
         labelEl.className = 'world-badge train-badge';
         this.container.appendChild(labelEl);
-        this.trainLabels.set(train.id, labelEl);
+        labelState = {
+          element: labelEl,
+          lastText: '',
+          lastVisible: false,
+          lastX: -9999,
+          lastY: -9999,
+          isFull: false
+        };
+        this.trainLabels.set(train.id, labelState);
       }
 
       if (this.isOutOfScreen(this.tempVec)) {
-        labelEl.style.display = 'none';
+        if (labelState.lastVisible) {
+          labelState.element.style.visibility = 'hidden';
+          labelState.lastVisible = false;
+        }
       } else {
-        const screenX = (this.tempVec.x * 0.5 + 0.5) * screenWidth;
-        const screenY = (-(this.tempVec.y * 0.5) + 0.5) * screenHeight;
+        if (!labelState.lastVisible) {
+          labelState.element.style.visibility = 'visible';
+          labelState.lastVisible = true;
+        }
 
-        labelEl.style.left = `${Math.round(screenX)}px`;
-        labelEl.style.top = `${Math.round(screenY)}px`;
-        labelEl.style.display = 'block';
+        const screenX = Math.round((this.tempVec.x * 0.5 + 0.5) * screenWidth);
+        const screenY = Math.round((-(this.tempVec.y * 0.5) + 0.5) * screenHeight);
 
-        // 満車（最大乗車人数到達）時はハイライトスタイルを適用
+        if (screenX !== labelState.lastX || screenY !== labelState.lastY) {
+          labelState.element.style.transform = `translate3d(${screenX}px, ${screenY}px, 0) translate(-50%, -100%)`;
+          labelState.lastX = screenX;
+          labelState.lastY = screenY;
+        }
+
+        // 満車（最大乗車人数到達）時はハイライトスタイルを適用（差分がある場合のみtoggle）
         const maxCap = getMaxCapacity(train.model, train.carCount);
-        const isFull = maxCap > 0 && train.passengers >= maxCap;
-        labelEl.classList.toggle('full', isFull);
+        const isFull = maxCap > 0 && (train.passengers ?? 0) >= maxCap;
+        if (labelState.isFull !== isFull) {
+          labelState.element.classList.toggle('full', isFull);
+          labelState.isFull = isFull;
+        }
 
-        // 数字のみ表示
-        labelEl.textContent = (train.passengers ?? 0).toLocaleString();
+        // 数字のみ表示（差分がある場合のみ代入）
+        const text = (train.passengers ?? 0).toLocaleString();
+        if (labelState.lastText !== text) {
+          labelState.element.textContent = text;
+          labelState.lastText = text;
+        }
       }
     }
 
     // 撤去・回送された列車のラベルをDOMから除去
-    for (const [id, el] of this.trainLabels.entries()) {
+    for (const [id, state] of this.trainLabels.entries()) {
       if (!activeTrainIds.has(id)) {
-        el.remove();
+        state.element.remove();
         this.trainLabels.delete(id);
       }
     }
@@ -230,14 +299,67 @@ export class WorldLabelManager {
    * 全ラベルのクリア・破棄
    */
   public clear(): void {
-    for (const el of this.stationLabels.values()) {
-      el.remove();
+    for (const state of this.stationLabels.values()) {
+      state.element.remove();
     }
     this.stationLabels.clear();
 
-    for (const el of this.trainLabels.values()) {
-      el.remove();
+    for (const state of this.trainLabels.values()) {
+      state.element.remove();
     }
     this.trainLabels.clear();
+
+    // フローティングバッジもすべて破棄
+    const badges = this.container.querySelectorAll('.cargo-floating-toast');
+    badges.forEach(b => b.remove());
+  }
+
+  /**
+   * 貨物列車によるコンテナ納品・販売完了時のワールド内フローティング通知バッジ生成
+   * （荷降ろし駅の3D位置からフワッと浮き上がって1.8秒でフェードアウト消去）
+   */
+  public spawnCargoFloatingBadge(
+    worldMap: WorldMap,
+    tileX: number,
+    tileZ: number,
+    layer: GridLayer,
+    containers: number,
+    revenue: number
+  ): void {
+    if (!this.lastCamera) return;
+
+    // 駅・ホームの3Dワールド座標を算出
+    const baseH = layerToHeight(layer);
+    const elevY = (layer === 1) ? worldMap.getElevationOffset(tileX, tileZ) : 0;
+    const worldX = tileX * WorldMap.TILE_SIZE;
+    const worldY = baseH + elevY + 2.5; // ホーム上空
+    const worldZ = tileZ * WorldMap.TILE_SIZE;
+
+    this.tempVec.set(worldX, worldY, worldZ);
+    this.tempVec.project(this.lastCamera);
+
+    // カメラ視野外（背後）なら生成しない
+    if (this.tempVec.z < -1 || this.tempVec.z > 1) return;
+
+    const screenWidth = window.innerWidth;
+    const screenHeight = window.innerHeight;
+    const screenX = (this.tempVec.x * 0.5 + 0.5) * screenWidth;
+    const screenY = (-(this.tempVec.y * 0.5) + 0.5) * screenHeight;
+
+    const badge = document.createElement('div');
+    badge.className = 'cargo-floating-toast';
+    badge.innerHTML = `📦 ${containers}個納品 (+¥${revenue.toLocaleString()}) 魅力度UP!`;
+    badge.style.left = `${Math.round(screenX)}px`;
+    badge.style.top = `${Math.round(screenY)}px`;
+    this.container.appendChild(badge);
+
+    // アニメーション完了後にDOMから確実に削除
+    badge.addEventListener('animationend', () => {
+      badge.remove();
+    });
+    // フォールバックタイマー（アニメーションイベント未発火対策）
+    setTimeout(() => {
+      if (badge.parentNode) badge.remove();
+    }, 2000);
   }
 }

@@ -27,6 +27,15 @@ export class ZoneManager {
   private static readonly BUCKET_SIZE = 8;
   private buckets = new Map<string, ZoneCell[]>();
 
+  /** 変更検知ダーティフラグとシリアライズキャッシュ */
+  public isDirty: boolean = true;
+  private cachedSerialized: string | null = null;
+
+  public markDirty(): void {
+    this.isDirty = true;
+    this.cachedSerialized = null;
+  }
+
   private key(x: number, z: number): string {
     return `${x},${z}`;
   }
@@ -114,10 +123,14 @@ export class ZoneManager {
         painted.push(cell);
       }
     }
+    if (painted.length > 0) {
+      this.markDirty();
+    }
     return painted;
   }
 
   public clearZone(x: number, z: number, radius: number = 2): void {
+    let clearedCount = 0;
     for (let dx = -radius; dx <= radius; dx++) {
       for (let dz = -radius; dz <= radius; dz++) {
         if (Math.hypot(dx, dz) > radius + 0.4) continue;
@@ -126,8 +139,12 @@ export class ZoneManager {
         if (cell) {
           this.removeFromBucket(cell);
           this.zones.delete(k);
+          clearedCount++;
         }
       }
+    }
+    if (clearedCount > 0) {
+      this.markDirty();
     }
   }
 
@@ -276,7 +293,12 @@ export class ZoneManager {
   }
 
   public serialize(): string {
-    return JSON.stringify(Array.from(this.zones.values()));
+    if (!this.isDirty && this.cachedSerialized !== null) {
+      return this.cachedSerialized;
+    }
+    this.cachedSerialized = JSON.stringify(Array.from(this.zones.values()));
+    this.isDirty = false;
+    return this.cachedSerialized;
   }
 
   public deserialize(json: string): void {
@@ -290,10 +312,12 @@ export class ZoneManager {
     } catch {
       // ignore malformed save data
     }
+    this.markDirty();
   }
 
   public clearAll(): void {
     this.zones.clear();
     this.buckets.clear();
+    this.markDirty();
   }
 }

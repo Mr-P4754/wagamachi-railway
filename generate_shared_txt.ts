@@ -19,6 +19,16 @@ const targets: BundleTarget[] = [
     ]
   },
   {
+    name: 'controllers',
+    description: 'プレースメント・フリート・入力調停コントローラー',
+    sourceDirs: ['src/controllers']
+  },
+  {
+    name: 'services',
+    description: 'データ永続化（セーブ/ロード）・ワールド初期生成サービス',
+    sourceDirs: ['src/services']
+  },
+  {
     name: 'core',
     description: 'コアエンジン・ゲーム状態・ダイヤ・閉塞信号・需要計算・ゾーン・駅・輸送システム',
     sourceDirs: ['src/core']
@@ -171,8 +181,33 @@ function main() {
     console.log(`[出力完了] ${outPath} (${count} ファイル / ${lines.toLocaleString()} 行 / ${sizeKB} KB)`);
   }
 
+  // 全ターゲットを結合した単一の完全プロジェクトバンドル (full_project.txt) も生成
+  const fullTarget: BundleTarget = {
+    name: 'full_project',
+    description: 'わがまちレールウェイ プロジェクト全コード（HTML/CSS/全TSソース）統合バンドル',
+    specificFiles: ['src/main.ts', 'index.html', 'src/style.css'],
+    sourceDirs: [
+      'src/controllers',
+      'src/services',
+      'src/core',
+      'src/engine',
+      'src/graphics',
+      'src/models',
+      'src/simulation',
+      'src/ui'
+    ]
+  };
+
+  const fullBundledText = bundleFiles(fullTarget);
+  const fullFileName = 'full_project.txt';
+  const fullOutPath = path.join(outDir, fullFileName);
+  fs.writeFileSync(fullOutPath, fullBundledText, 'utf-8');
+  const fullSizeKB = (Buffer.byteLength(fullBundledText, 'utf-8') / 1024).toFixed(1);
+  const fullLines = fullBundledText.split('\n').length;
+  console.log(`[出力完了] ${fullOutPath} (プロジェクト全体 / ${fullLines.toLocaleString()} 行 / ${fullSizeKB} KB)`);
+
   console.log('\n================================================================================');
-  console.log(`すべての主要コードバンドルが ${outDir}/ に正常に出力されました！`);
+  console.log(`すべてのコードバンドル（ドメイン別9ファイル ＋ 全統合1ファイル）が ${outDir}/ に正常に出力されました！`);
   console.log('================================================================================\n');
 }
 

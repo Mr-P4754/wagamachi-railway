@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GameMaterials } from '../materials';
+import { BuildingBakery } from './BuildingBakery';
 
 /**
  * 道路・住宅・商業ビル・樹木等の都市構造物メッシュ生成ビルダー
@@ -40,8 +41,21 @@ export class StructureMeshBuilder {
 
   /**
    * 住宅系建築物（Lv.1 戸建て, Lv.2 低層アパート, Lv.3 中層マンション, Lv.4 高層タワーマンション）
+   * マテリアル単位に焼き込まれた共有ジオメトリを用いる（1棟あたり数ドローコール）
    */
   public static createHouse(type: number = 0, level: number = 1): THREE.Group {
+    const safeLevel = Math.max(1, Math.min(4, level));
+    // 外壁・屋根マテリアルが変化するのは Lv.1 のみ（Lv.2 以降は屋根色のみ影響）
+    const wallIdx = type % (GameMaterials.wallMats.length - 1);
+    const roofIdx = type % GameMaterials.roofMats.length;
+    const key = `house_${safeLevel}_${wallIdx}_${roofIdx}`;
+    return BuildingBakery.build(key, () => this.buildHouseSource(type, safeLevel));
+  }
+
+  /**
+   * 住宅系建築物の原型（多パーツ構成）を生成する（焼き込み元）
+   */
+  private static buildHouseSource(type: number = 0, level: number = 1): THREE.Group {
     const group = new THREE.Group();
     const safeLevel = Math.max(1, Math.min(4, level));
     const wallMat = GameMaterials.wallMats[type % (GameMaterials.wallMats.length - 1)];
@@ -175,8 +189,17 @@ export class StructureMeshBuilder {
 
   /**
    * 商業ビル・オフィスビル（Lv.1 個人商店・低層店舗, Lv.2 中型テナントビル, Lv.3 大型オフィスビル, Lv.4 超高層ランドマークタワー）
+   * マテリアル単位に焼き込まれた共有ジオメトリを用いる（1棟あたり数ドローコール）
    */
   public static createCommercialBuilding(level: number = 1): THREE.Group {
+    const safeLevel = Math.max(1, Math.min(4, level));
+    return BuildingBakery.build(`commercial_${safeLevel}`, () => this.buildCommercialSource(safeLevel));
+  }
+
+  /**
+   * 商業ビルの原型（多パーツ構成）を生成する（焼き込み元）
+   */
+  private static buildCommercialSource(level: number = 1): THREE.Group {
     const group = new THREE.Group();
     const safeLevel = Math.max(1, Math.min(4, level));
 
@@ -274,9 +297,18 @@ export class StructureMeshBuilder {
 
   /**
    * 工業系建物（工場・倉庫・コンビナート）
+   * マテリアル単位に焼き込まれた共有ジオメトリを用いる（1棟あたり数ドローコール）
    * @param level 発展レベル (1: 小型倉庫/作業所, 2: 中規模製造工場/サイロ, 3: 大型重化学コンビナート)
    */
   public static createIndustrialBuilding(level: number = 1): THREE.Group {
+    const safeLevel = Math.max(1, Math.min(3, level));
+    return BuildingBakery.build(`industrial_${safeLevel}`, () => this.buildIndustrialSource(safeLevel));
+  }
+
+  /**
+   * 工業系建物の原型（多パーツ構成）を生成する（焼き込み元）
+   */
+  private static buildIndustrialSource(level: number = 1): THREE.Group {
     const group = new THREE.Group();
     const safeLevel = Math.max(1, Math.min(3, level));
 

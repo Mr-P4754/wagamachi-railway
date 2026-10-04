@@ -76,6 +76,12 @@
 
         <!-- クイックアクションバー -->
         <div class="header-right" id="quick-actions">
+          <button id="btn-undo" class="icon-action-btn disabled" title="元に戻す (Ctrl+Z)" disabled>
+            <svg class="action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M3 7v6h6"></path>
+              <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path>
+            </svg>
+          </button>
           <button id="btn-cam-view" class="icon-action-btn" title="視点切替">
             <svg class="action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
@@ -155,6 +161,14 @@
               <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
               <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
             </svg>
+          </button>
+          <button id="btn-graphics-toggle" class="icon-action-btn" title="画質切替: 高画質 (クリックで高→中→低)">
+            <svg class="action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+            <span id="graphics-quality-badge" class="time-mode-badge">高</span>
           </button>
         </div>
       </header>
@@ -265,7 +279,7 @@
       </div>
       <div id="cab-view-overlay" class="hidden">
         <div class="cab-hud">
-          <div class="cab-title">前面展望モード</div>
+          <div class="cab-title" id="cab-hud-title">前面展望モード</div>
           <div class="cab-train-name" id="cab-train-name">列車 1号</div>
           <div class="cab-speed-meter">
             <span class="cab-speed-val" id="cab-speed-val">65</span>
@@ -273,8 +287,9 @@
           </div>
           <div class="cab-train-controls">
             <button id="btn-cab-prev" class="cab-nav-btn" title="前の列車に切替">◀</button>
-            <button id="btn-cab-change" class="cab-nav-btn change" title="乗車列車を選択">列車選択</button>
+            <button id="btn-cab-change" class="cab-nav-btn change" title="対象列車を選択">列車選択</button>
             <button id="btn-cab-next" class="cab-nav-btn" title="次の列車に切替">▶</button>
+            <button id="btn-cab-toggle-mode" class="cab-nav-btn mode-toggle" title="前面展望 / 追従カメラ 切替">🎥 視点切替</button>
           </div>
           <button id="btn-exit-cab" class="exit-cab-btn">全体視点に戻る</button>
         </div>
@@ -531,34 +546,135 @@
 
       <!-- 財務状況・決算報告モーダル -->
       <div id="report-modal" class="modal-overlay hidden">
-        <div class="modal-card">
+        <div class="modal-card report-modal-card">
           <div class="modal-header">
             <h3>財務状況・決算報告</h3>
             <button id="btn-close-report" class="close-btn">✕</button>
           </div>
-          <div class="modal-body">
-            <div class="report-section">
-              <h4>今期収支</h4>
-              <div class="report-row"><span>運賃収入:</span><span id="rep-fare-income" class="positive">¥0</span></div>
-              <div class="report-row"><span>不動産・地価価値:</span><span id="rep-land-value">¥0</span></div>
-              <div class="report-row"><span>建設・拡張費用:</span><span id="rep-construction-cost" class="negative">¥0</span></div>
-              <div class="report-row"><span>運行・維持管理費:</span><span id="rep-maintenance-cost" class="negative">¥0</span></div>
-              <div class="report-divider"></div>
-              <div class="report-row total"><span>純利益:</span><span id="rep-net-profit">¥0</span></div>
+
+          <!-- 財務タブセレクター -->
+          <div class="report-tab-bar" id="report-tabs">
+            <button class="report-tab-btn active" data-tab="current">今期決算</button>
+            <button class="report-tab-btn" data-tab="monthly">月次推移 (1年)</button>
+            <button class="report-tab-btn" data-tab="yearly">年次推移 (長期)</button>
+          </div>
+
+          <div class="modal-body report-modal-body">
+            <!-- タブ1: 今期決算 -->
+            <div id="report-tab-current" class="report-tab-pane active">
+              <div class="report-section">
+                <h4>今期収支</h4>
+                <div class="report-row"><span>旅客運賃収入:</span><span id="rep-fare-income" class="positive">¥0</span></div>
+                <div class="report-row"><span>貨物輸送収入:</span><span id="rep-cargo-income" class="positive">¥0</span></div>
+                <div class="report-row"><span>不動産・地価価値:</span><span id="rep-land-value">¥0</span></div>
+                <div class="report-row"><span>建設・拡張費用:</span><span id="rep-construction-cost" class="negative">¥0</span></div>
+                <div class="report-row"><span>運行・維持管理費:</span><span id="rep-maintenance-cost" class="negative">¥0</span></div>
+                <div class="report-divider"></div>
+                <div class="report-row total"><span>純利益:</span><span id="rep-net-profit">¥0</span></div>
+              </div>
+              <div class="report-section">
+                <h4>都市指標</h4>
+                <div class="report-row"><span>総人口:</span><span id="rep-total-pop">0人</span></div>
+                <div class="report-row"><span>鉄道総延長:</span><span id="rep-track-length">0 km</span></div>
+                <div class="report-row"><span>運行列車数:</span><span id="rep-train-count">0 編成</span></div>
+                <div class="report-row"><span>設置駅数:</span><span id="rep-station-count">0 駅</span></div>
+              </div>
+              <div class="save-load-section">
+                <h4>データ管理・環境設定</h4>
+                <div class="graphics-setting-row">
+                  <label for="select-graphics-quality" class="setting-label">
+                    <svg class="setting-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                      <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                      <line x1="8" y1="21" x2="16" y2="21"></line>
+                      <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                    <span>画質設定:</span>
+                  </label>
+                  <select id="select-graphics-quality" class="graphics-select">
+                    <option value="high">高画質 (PC標準・シャドウON・高精細)</option>
+                    <option value="medium">標準 (バランス・軽量影・標準解像度)</option>
+                    <option value="low">軽量 (モバイル推奨・シャドウOFF・低負荷)</option>
+                  </select>
+                </div>
+                <div class="save-load-buttons">
+                  <button id="btn-save-game" class="action-btn">ゲームを保存</button>
+                  <button id="btn-infinite-funds" class="action-btn">資金無限モード切替</button>
+                  <button id="btn-reset-city" class="danger-btn">都市を初期化</button>
+                </div>
+              </div>
             </div>
-            <div class="report-section">
-              <h4>都市指標</h4>
-              <div class="report-row"><span>総人口:</span><span id="rep-total-pop">0人</span></div>
-              <div class="report-row"><span>鉄道総延長:</span><span id="rep-track-length">0 km</span></div>
-              <div class="report-row"><span>運行列車数:</span><span id="rep-train-count">0 編成</span></div>
-              <div class="report-row"><span>設置駅数:</span><span id="rep-station-count">0 駅</span></div>
+
+            <!-- タブ2: 月次推移 -->
+            <div id="report-tab-monthly" class="report-tab-pane hidden">
+              <div class="chart-header-row">
+                <h4>月次収支・人口推移</h4>
+                <div class="chart-legend">
+                  <span class="legend-item"><span class="legend-dot" style="background:#10b981;"></span>旅客運賃</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span>貨物運賃</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span>維持費</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#38bdf8;"></span>純利益</span>
+                  <span class="legend-item"><span class="legend-dot dashed" style="background:#a855f7;"></span>人口</span>
+                </div>
+              </div>
+              <div class="chart-container-wrapper">
+                <canvas id="monthly-chart-canvas" class="financial-chart-canvas"></canvas>
+                <div id="monthly-chart-tooltip" class="chart-tooltip hidden"></div>
+              </div>
+              <div class="history-table-container">
+                <table class="financial-history-table">
+                  <thead>
+                    <tr>
+                      <th>年月</th>
+                      <th>旅客運賃</th>
+                      <th>貨物収入</th>
+                      <th>維持管理費</th>
+                      <th>建設投資費</th>
+                      <th>純利益</th>
+                      <th>人口</th>
+                      <th>路線規模</th>
+                    </tr>
+                  </thead>
+                  <tbody id="monthly-history-tbody">
+                    <!-- 動的生成 -->
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div class="save-load-section">
-              <h4>データ管理</h4>
-              <div class="save-load-buttons">
-                <button id="btn-save-game" class="action-btn">ゲームを保存</button>
-                <button id="btn-infinite-funds" class="action-btn">資金無限モード切替</button>
-                <button id="btn-reset-city" class="danger-btn">都市を初期化</button>
+
+            <!-- タブ3: 年次推移 -->
+            <div id="report-tab-yearly" class="report-tab-pane hidden">
+              <div class="chart-header-row">
+                <h4>年度別決算・資産推移</h4>
+                <div class="chart-legend">
+                  <span class="legend-item"><span class="legend-dot" style="background:#10b981;"></span>年間旅客運賃</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span>年間貨物収入</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span>年間維持費</span>
+                  <span class="legend-item"><span class="legend-dot" style="background:#38bdf8;"></span>年間純利益</span>
+                  <span class="legend-item"><span class="legend-dot dashed" style="background:#a855f7;"></span>人口</span>
+                </div>
+              </div>
+              <div class="chart-container-wrapper">
+                <canvas id="yearly-chart-canvas" class="financial-chart-canvas"></canvas>
+                <div id="yearly-chart-tooltip" class="chart-tooltip hidden"></div>
+              </div>
+              <div class="history-table-container">
+                <table class="financial-history-table">
+                  <thead>
+                    <tr>
+                      <th>年度</th>
+                      <th>年間旅客運賃</th>
+                      <th>年間貨物収入</th>
+                      <th>年間維持費</th>
+                      <th>建設投資費</th>
+                      <th>納税額</th>
+                      <th>年間純利益</th>
+                      <th>人口</th>
+                    </tr>
+                  </thead>
+                  <tbody id="yearly-history-tbody">
+                    <!-- 動的生成 -->
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>

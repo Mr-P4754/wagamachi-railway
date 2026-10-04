@@ -150,24 +150,46 @@ export class GameMaterials {
  */
 export function disposeHierarchy(obj: THREE.Object3D | null | undefined): void {
   if (!obj) return;
+
   obj.traverse((child) => {
+    // 1. InstancedMesh の破棄
+    if ((child as any).isInstancedMesh && typeof (child as any).dispose === 'function') {
+      (child as any).dispose();
+    }
+
     if ((child as THREE.Mesh).isMesh) {
       const mesh = child as THREE.Mesh;
-      if (mesh.geometry) {
+
+      // 2. ジオメトリの解放（アーキタイプ等の共有物 keepAlive 以外）
+      if (mesh.geometry && !mesh.geometry.userData?.keepAlive) {
         mesh.geometry.dispose();
       }
+
+      // 3. マテリアルおよび全テクスチャの完全解放
       if (mesh.material) {
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         for (const mat of mats) {
-          // 共有マテリアルや保護フラグ (keepAlive) の付いたマテリアルは解放しない
-          if (!GameMaterials.isShared(mat) && !(mat as any).userData?.keepAlive) {
-            mat.dispose();
-            for (const key of Object.keys(mat)) {
-              const val = (mat as any)[key];
-              if (val && typeof val === 'object' && val.isTexture) {
-                val.dispose();
-              }
+          if (!mat) continue;
+
+          // マテリアルが保持するすべてのテクスチャを走査・解放
+          // （共有マテリアルであっても、マテリアル本体は残しつつ個別テクスチャが破棄対象なら解放）
+          const textureKeys = [
+            'map', 'alphaMap', 'aoMap', 'bumpMap', 'displacementMap',
+            'emissiveMap', 'envMap', 'lightMap', 'metalnessMap',
+            'normalMap', 'roughnessMap'
+          ];
+
+          for (const key of textureKeys) {
+            const tex = (mat as any)[key] as THREE.Texture | undefined;
+            if (tex && tex.isTexture && !tex.userData?.keepAlive) {
+              tex.dispose();
+              (mat as any)[key] = null;
             }
+          }
+
+          // 共有マテリアルや保護フラグが付いていない動的マテリアル自体を解放
+          if (!GameMaterials.isShared(mat) && !mat.userData?.keepAlive) {
+            mat.dispose();
           }
         }
       }

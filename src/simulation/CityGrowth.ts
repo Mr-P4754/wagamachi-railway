@@ -49,34 +49,32 @@ export class CityGrowth {
     }
 
     let totalNewPop = 0;
-    const GROUND_LAYER: GridLayer = 1;
 
     for (const st of stationGroups.values()) {
       const agg = this.worldMap.getStationAggregateData(st.x, st.z, (st.layer ?? 1) as GridLayer);
       const isCargoStation = st.type.startsWith('cargo_station');
 
       // 直近2日間の利用人数（前日 d1、前々日 d2）
-      let d1 = agg ? agg.previousDayPassengers : (st.previousDayPassengers ?? 0);
-      let d2 = agg ? agg.twoDaysAgoPassengers : (st.twoDaysAgoPassengers ?? 0);
+      let d1 = agg ? agg.previousDayPassengers : 0;
+      let d2 = agg ? agg.twoDaysAgoPassengers : 0;
 
-      // ゲーム開始初期などで過去データが未蓄積の場合は、当日の実績や待機乗客で補完
-      const currentActive = agg
-        ? Math.max(agg.dailyPassengers, st.stationPassengers ?? 0)
-        : Math.max(st.dailyPassengers ?? 0, st.stationPassengers ?? 0);
+      // ゲーム開始初期などで過去データが未蓄積の場合は、当日の乗降客実績で補完
+      // ※待機乗客（st.stationPassengers）は列車に乗降していないため判定から除外
+      const currentDaily = agg ? agg.dailyPassengers : 0;
 
       if (d1 === 0 && d2 === 0) {
-        d1 = currentActive;
-        d2 = currentActive;
+        d1 = currentDaily;
+        d2 = currentDaily;
       } else if (d2 === 0) {
         d2 = d1;
       }
 
-      // ユーザー要件に基づく「2日続けて」の利用人数判定
-      let maxAllowedLevel = 1;
-      let maxDailyGrowthCount = 2;
+      // ユーザー要件に基づく乗降客数・発展上限判定
+      let maxAllowedLevel = 0;
+      let maxDailyGrowthCount = 0;
 
       if (isCargoStation) {
-        // 貨物駅（コンテナヤード）: 取扱コンテナ数に応じた上限設定
+        // 貨物駅（コンテナヤード）: 取扱コンテナ数に応じた上限設定（未取扱時は発展しない）
         const containers = (agg?.cargoContainers ?? st.cargoContainers ?? 0);
         if (containers >= 30) {
           maxAllowedLevel = 3;
@@ -84,16 +82,20 @@ export class CityGrowth {
         } else if (containers >= 10) {
           maxAllowedLevel = 2;
           maxDailyGrowthCount = 3;
-        } else {
+        } else if (containers >= 1) {
           maxAllowedLevel = 1;
           maxDailyGrowthCount = 2;
+        } else {
+          maxAllowedLevel = 0;
+          maxDailyGrowthCount = 0;
         }
       } else {
-        // 旅客駅: 1日の利用人数が2日続けて〜
+        // 旅客駅: 列車の乗降客が最低1日100人以上ないと発展しない
         // ① 10000人以上 ➔ Lv4が上限、建物8つが上限
         // ② 5000人以上10000人未満 ➔ Lv3が上限、建物6つが上限
         // ③ 1000人以上5000人未満 ➔ Lv2が上限、建物4つが上限
-        // ④ 1000人未満 ➔ Lv1が上限、建物2つが上限
+        // ④ 100人以上1000人未満 ➔ Lv1が上限、建物2つが上限
+        // ⑤ 100人未満（列車未運行含む） ➔ 発展しない（上限0）
         if (d1 >= 10000 && d2 >= 10000) {
           maxAllowedLevel = 4;
           maxDailyGrowthCount = 8;
@@ -103,10 +105,18 @@ export class CityGrowth {
         } else if (d1 >= 1000 && d2 >= 1000) {
           maxAllowedLevel = 2;
           maxDailyGrowthCount = 4;
-        } else {
+        } else if (d1 >= 100 && d2 >= 100) {
           maxAllowedLevel = 1;
           maxDailyGrowthCount = 2;
+        } else {
+          maxAllowedLevel = 0;
+          maxDailyGrowthCount = 0;
         }
+      }
+
+      // 乗降客が1日100人未満などで発展条件を満たさない場合はこの駅の発展処理をスキップ
+      if (maxDailyGrowthCount <= 0 || maxAllowedLevel <= 0) {
+        continue;
       }
 
       // 駅ごとの影響半径（駅規模に応じて適正化）
@@ -134,22 +144,25 @@ export class CityGrowth {
 
         const tx = st.x + dx;
         const tz = st.z + dz;
-        const tile = this.worldMap.getTile(tx, tz, GROUND_LAYER);
-        if (!tile) continue;
+
+        // マップ境界外ならスキップ
+        if (!this.worldMap.isInBounds(tx, tz)) continue;
 
         if (this.gridManager && this.gridManager.isWaterAtGroundLevel(tx, tz)) continue;
-        if (this.gridManager) {
-          const cell = this.gridManager.getCell(tx, 1, tz);
-          if (cell && cell.elevation > 1) continue;
-        }
 
-        const hasRoadAdjacent = this.hasNeighborOfType(tx, tz, 'road', GROUND_LAYER);
+        const cell = this.gridManager ? this.gridManager.getCell(tx, 1, tz) : null;
+        const surfaceElevation = cell ? cell.elevation : 1;
+        const targetLayer = surfaceElevation as GridLayer;
+
+        const tile = this.worldMap.getTile(tx, tz, targetLayer);
+        const hasRoadAdjacent = this.hasNeighborOfType(tx, tz, 'road', targetLayer);
         const residentialZoned = this.zoneManager && this.zoneManager.hasAnyZoneOfType('residential');
         const commercialZoned = this.zoneManager && this.zoneManager.hasAnyZoneOfType('commercial');
         const zoneHere = this.zoneManager ? this.zoneManager.getZone(tx, tz) : undefined;
 
         // 1. 更地タイルの新規建築（Lv.1）
-        if (tile.type === 'empty') {
+        // 疎マップ構造のため、未建築マス（!tile）または明示的な 'empty' を更地として扱う
+        if (!tile || tile.type === 'empty') {
           const isComZone = zoneHere?.type === 'commercial';
           const isIndZone = zoneHere?.type === 'industrial';
           const isResZone = zoneHere?.type === 'residential' || (!residentialZoned && !commercialZoned && !isIndZone);
@@ -159,15 +172,15 @@ export class CityGrowth {
 
           if (Math.random() < baseChance) {
             if (isComZone) {
-              this.worldMap.setTile(tx, tz, 'commercial', 0, 1, 'right', GROUND_LAYER);
+              this.worldMap.setTile(tx, tz, 'commercial', 0, 1, 'right', targetLayer);
               developedCount++;
               totalNewPop += Math.floor(Math.random() * 20 + 15);
             } else if (isIndZone) {
-              this.worldMap.setTile(tx, tz, 'industrial', 0, 1, 'right', GROUND_LAYER);
+              this.worldMap.setTile(tx, tz, 'industrial', 0, 1, 'right', targetLayer);
               developedCount++;
               totalNewPop += Math.floor(Math.random() * 15 + 10);
             } else if (isResZone) {
-              this.worldMap.setTile(tx, tz, 'residence', 0, 1, 'right', GROUND_LAYER);
+              this.worldMap.setTile(tx, tz, 'residence', 0, 1, 'right', targetLayer);
               developedCount++;
               totalNewPop += Math.floor(Math.random() * 15 + 10);
             }
@@ -183,7 +196,7 @@ export class CityGrowth {
             if (allowedByZone && Math.random() < 0.15) {
               // 商業Lvも maxAllowedLevel を上限とする
               const nextLvl = Math.min(maxAllowedLevel, tile.level);
-              this.worldMap.setTile(tx, tz, 'commercial', 0, nextLvl, 'right', GROUND_LAYER);
+              this.worldMap.setTile(tx, tz, 'commercial', 0, nextLvl, 'right', targetLayer);
               developedCount++;
               totalNewPop += Math.floor(Math.random() * 25 + 20);
               actionTaken = true;
@@ -203,7 +216,7 @@ export class CityGrowth {
               const upgradeChance = ((radius - dist + 1) / (radius + 1)) * 0.25;
               if (Math.random() < Math.max(0.1, upgradeChance)) {
                 const nextLevel = tile.level + 1;
-                this.worldMap.setTile(tx, tz, 'residence', tile.rotation, nextLevel, 'right', GROUND_LAYER);
+                this.worldMap.setTile(tx, tz, 'residence', tile.rotation, nextLevel, 'right', targetLayer);
                 developedCount++;
                 const popGains = [0, 15, 30, 60, 100];
                 totalNewPop += popGains[nextLevel] || 25;
@@ -224,7 +237,7 @@ export class CityGrowth {
               const upgradeChance = ((radius - dist + 1) / (radius + 1)) * 0.22;
               if (Math.random() < Math.max(0.1, upgradeChance)) {
                 const nextLevel = tile.level + 1;
-                this.worldMap.setTile(tx, tz, 'commercial', tile.rotation, nextLevel, 'right', GROUND_LAYER);
+                this.worldMap.setTile(tx, tz, 'commercial', tile.rotation, nextLevel, 'right', targetLayer);
                 developedCount++;
                 const popGains = [0, 20, 40, 70, 120];
                 totalNewPop += popGains[nextLevel] || 30;
@@ -237,7 +250,7 @@ export class CityGrowth {
           if (tile.level < Math.min(3, maxAllowedLevel) && developedCount < maxDailyGrowthCount) {
             if (Math.random() < 0.15) {
               const nextLevel = tile.level + 1;
-              this.worldMap.setTile(tx, tz, 'industrial', tile.rotation, nextLevel, 'right', GROUND_LAYER);
+              this.worldMap.setTile(tx, tz, 'industrial', tile.rotation, nextLevel, 'right', targetLayer);
               developedCount++;
               totalNewPop += Math.floor(Math.random() * 20 + 15);
             }

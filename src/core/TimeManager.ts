@@ -67,9 +67,13 @@ export class TimeManager {
    * @param deltaTimeSec 前フレームからの経過時間（現実秒）
    */
   public update(deltaTimeSec: number): void {
+    // 【フレームドロップ耐性】高負荷・描画遅延時でも最大0.05秒（20fps相当）にクランプし、
+    // 極端なワープや時間スキップによるシミュレーション破綻を防止
+    const clampedDt = Math.min(Math.max(0, deltaTimeSec), 0.05);
+
     // 1. コロン点滅の更新（稼働時は0.5秒周期、停止時は常時点灯）
     if (this.speedLevel > 0) {
-      this.colonTimer += deltaTimeSec;
+      this.colonTimer += clampedDt;
       if (this.colonTimer >= 0.5) {
         this.colonTimer -= 0.5;
         this.isColonVisible = !this.isColonVisible;
@@ -85,7 +89,7 @@ export class TimeManager {
 
     // 【時間のズレ解消】カハン加算（Kahan summation algorithm）による誤差補正加算
     // 毎フレームの微小な小数加算（0.016666...）に伴う浮動小数点丸め誤差（情報落ち）を完全に相殺
-    const deltaMin = deltaTimeSec * minPerSec;
+    const deltaMin = clampedDt * minPerSec;
     const y = deltaMin - this.minuteAccumulatorCompensation;
     const t = this.minuteAccumulator + y;
     this.minuteAccumulatorCompensation = (t - this.minuteAccumulator) - y;

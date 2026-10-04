@@ -1,7 +1,19 @@
 /**
  * Web Audio API based Railway & City Audio Synthesizer
  * Fully procedural: no external asset files needed, completely reliable & offline.
+ * 
+ * ボイスリミッター（同時発音数制限）、距離カリング、ノード切断・解放管理を統合
  */
+
+interface ActiveVoice {
+  id: number;
+  category: 'joint' | 'se';
+  startTime: number;
+  volume: number;
+  gainNode?: GainNode;
+  nodes: Array<AudioNode | { stop?: () => void; disconnect: () => void }>;
+}
+
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private isMuted: boolean = false;
@@ -13,6 +25,12 @@ export class AudioManager {
   private cabRumbleSource: AudioBufferSourceNode | null = null;
   private cabRumbleGain: GainNode | null = null;
   private isCabActive: boolean = false;
+
+  // ボイスリミッター（同時発音数制限）
+  private static readonly MAX_TOTAL_VOICES = 8;
+  private static readonly MAX_JOINT_VOICES = 3;
+  private nextVoiceId = 1;
+  private activeVoices: Map<number, ActiveVoice> = new Map();
 
   constructor() {
     // AudioContext will be initialized on first user interaction
@@ -31,6 +49,103 @@ export class AudioManager {
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
     }
+  }
+
+  /**
+   * ボイス枠の取得・上限管理
+   * 上限に達している場合は優先度の低い音（最古または音量の小さいもの）を短時間フェードアウト停止して入れ替える
+   */
+  private acquireVoice(category: 'joint' | 'se', volume: number): number | null {
+    if (!this.ctx || volume < 0.005) return null;
+
+    // 1. カテゴリごとの上限チェック（走行ジョイント音）
+    if (category === 'joint') {
+      const jointVoices: ActiveVoice[] = [];
+      for (const v of this.activeVoices.values()) {
+        if (v.category === 'joint') jointVoices.push(v);
+      }
+      if (jointVoices.length >= AudioManager.MAX_JOINT_VOICES) {
+        jointVoices.sort((a, b) => a.startTime - b.startTime);
+        const oldest = jointVoices[0];
+        this.terminateVoice(oldest, 0.015);
+      }
+    }
+
+    // 2. 全体の同時発音数上限チェック
+    if (this.activeVoices.size >= AudioManager.MAX_TOTAL_VOICES) {
+      const all = Array.from(this.activeVoices.values());
+      all.sort((a, b) => {
+        // ジョイント音を優先して停止（SEを維持）
+        if (a.category !== b.category) {
+          return a.category === 'joint' ? -1 : 1;
+        }
+        // 音量が小さい方を優先停止
+        if (Math.abs(a.volume - b.volume) > 0.05) {
+          return a.volume - b.volume;
+        }
+        // 最も古い発音を優先停止
+        return a.startTime - b.startTime;
+      });
+
+      const victim = all[0];
+      this.terminateVoice(victim, 0.015);
+    }
+
+    // 枠が空かない場合はスキップ
+    if (this.activeVoices.size >= AudioManager.MAX_TOTAL_VOICES) {
+      return null;
+    }
+
+    return this.nextVoiceId++;
+  }
+
+  /**
+   * ボイスの登録
+   */
+  private registerVoice(voiceId: number, voice: ActiveVoice): void {
+    this.activeVoices.set(voiceId, voice);
+  }
+
+  /**
+   * ボイスの強制フェードアウト停止・ノード切断
+   */
+  private terminateVoice(voice: ActiveVoice, fadeSec: number = 0.015): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    try {
+      if (voice.gainNode) {
+        voice.gainNode.gain.cancelScheduledValues(now);
+        voice.gainNode.gain.setValueAtTime(voice.gainNode.gain.value, now);
+        voice.gainNode.gain.linearRampToValueAtTime(0.0001, now + fadeSec);
+      }
+      setTimeout(() => {
+        for (const node of voice.nodes) {
+          try {
+            if ('stop' in node && typeof (node as any).stop === 'function') {
+              (node as any).stop();
+            }
+            node.disconnect();
+          } catch (_) {}
+        }
+        this.activeVoices.delete(voice.id);
+      }, fadeSec * 1000 + 10);
+    } catch (_) {
+      this.activeVoices.delete(voice.id);
+    }
+  }
+
+  /**
+   * 再生完了時のボイス解放
+   */
+  private releaseVoice(voiceId: number): void {
+    this.activeVoices.delete(voiceId);
+  }
+
+  /**
+   * 前面展望中かどうかの取得
+   */
+  public getIsCabActive(): boolean {
+    return this.isCabActive;
   }
 
   /**
@@ -73,7 +188,8 @@ export class AudioManager {
     isSwitch: boolean = false,
     distanceFactor: number = 1.0
   ) {
-    if (this.isMuted || distanceFactor <= 0.01) return;
+    // 距離カリング: 0.04未満の場合はノードを生成せず早期リターン
+    if (this.isMuted || distanceFactor < 0.04) return;
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
@@ -86,6 +202,12 @@ export class AudioManager {
     // 通常: 自然な低域（ローパス480Hz）
     const playClick = (offset: number, pitch: number, vol: number) => {
       if (!this.ctx || !this.masterGain) return;
+      const effectiveVol = vol * 0.4 * Math.min(1.0, distanceFactor);
+      if (effectiveVol < 0.005) return;
+
+      const voiceId = this.acquireVoice('joint', effectiveVol);
+      if (voiceId === null) return;
+
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       const filter = this.ctx.createBiquadFilter();
@@ -107,7 +229,6 @@ export class AudioManager {
       osc.frequency.setValueAtTime(pitch, t + offset);
       osc.frequency.exponentialRampToValueAtTime(environment === 'bridge' ? 45 : 30, t + offset + 0.06);
 
-      const effectiveVol = vol * 0.4 * Math.min(1.0, distanceFactor);
       gain.gain.setValueAtTime(effectiveVol, t + offset);
       gain.gain.exponentialRampToValueAtTime(0.001, t + offset + 0.08);
 
@@ -115,17 +236,37 @@ export class AudioManager {
       filter.connect(gain);
       gain.connect(this.masterGain);
 
-      osc.start(t + offset);
-      osc.stop(t + offset + 0.09);
-
+      let echoGain: GainNode | null = null;
       // トンネル内の反響ディレイ音（閉塞空間リバーブ）
       if (environment === 'tunnel') {
-        const echoGain = this.ctx.createGain();
+        echoGain = this.ctx.createGain();
         echoGain.gain.setValueAtTime(effectiveVol * 0.4, t + offset + 0.045);
         echoGain.gain.exponentialRampToValueAtTime(0.001, t + offset + 0.12);
         filter.connect(echoGain);
         echoGain.connect(this.masterGain);
       }
+
+      const nodes: AudioNode[] = [osc, filter, gain];
+      if (echoGain) nodes.push(echoGain);
+
+      this.registerVoice(voiceId, {
+        id: voiceId,
+        category: 'joint',
+        startTime: t + offset,
+        volume: effectiveVol,
+        gainNode: gain,
+        nodes
+      });
+
+      osc.onended = () => {
+        for (const n of nodes) {
+          try { n.disconnect(); } catch (_) {}
+        }
+        this.releaseVoice(voiceId);
+      };
+
+      osc.start(t + offset);
+      osc.stop(t + offset + 0.09);
     };
 
     // 前台車
@@ -147,7 +288,15 @@ export class AudioManager {
    * 分岐器（ポイント）通過時の金属フランジ通過音
    */
   private playSwitchClack(t: number, distanceFactor: number) {
+    if (this.isMuted || distanceFactor < 0.04) return;
     if (!this.ctx || !this.masterGain) return;
+
+    const vol = 0.25 * Math.min(1.0, distanceFactor);
+    if (vol < 0.005) return;
+
+    const voiceId = this.acquireVoice('joint', vol);
+    if (voiceId === null) return;
+
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
     const filter = this.ctx.createBiquadFilter();
@@ -160,13 +309,29 @@ export class AudioManager {
     filter.frequency.setValueAtTime(550, t);
     filter.Q.setValueAtTime(3.0, t);
 
-    const vol = 0.25 * Math.min(1.0, distanceFactor);
     gain.gain.setValueAtTime(vol, t);
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
 
     osc.connect(filter);
     filter.connect(gain);
     gain.connect(this.masterGain);
+
+    const nodes: AudioNode[] = [osc, filter, gain];
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'joint',
+      startTime: t,
+      volume: vol,
+      gainNode: gain,
+      nodes
+    });
+
+    osc.onended = () => {
+      for (const n of nodes) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
 
     osc.start(t);
     osc.stop(t + 0.06);
@@ -176,12 +341,18 @@ export class AudioManager {
    * 車両連結音（ガチャン！重厚な密着連結器の金属衝撃音）
    */
   public playCouplingSound(distanceFactor: number = 1.0) {
-    if (this.isMuted || distanceFactor <= 0.01) return;
+    if (this.isMuted || distanceFactor < 0.04) return;
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
     const t = this.ctx.currentTime;
     const vol = 0.5 * Math.min(1.0, distanceFactor);
+    if (vol < 0.005) return;
+
+    const voiceId = this.acquireVoice('se', vol);
+    if (voiceId === null) return;
+
+    const nodesToDisconnect: AudioNode[] = [];
 
     // 1. 低周波の重厚な打撃衝撃波
     const oscImpact = this.ctx.createOscillator();
@@ -195,6 +366,8 @@ export class AudioManager {
 
     oscImpact.connect(gainImpact);
     gainImpact.connect(this.masterGain);
+    nodesToDisconnect.push(oscImpact, gainImpact);
+
     oscImpact.start(t);
     oscImpact.stop(t + 0.15);
 
@@ -214,6 +387,7 @@ export class AudioManager {
       noiseSource.connect(noiseFilter);
       noiseFilter.connect(noiseGain);
       noiseGain.connect(this.masterGain);
+      nodesToDisconnect.push(noiseSource, noiseFilter, noiseGain);
 
       noiseSource.start(t);
       noiseSource.stop(t + 0.1);
@@ -232,6 +406,24 @@ export class AudioManager {
 
     oscRing.connect(gainRing);
     gainRing.connect(this.masterGain);
+    nodesToDisconnect.push(oscRing, gainRing);
+
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'se',
+      startTime: t,
+      volume: vol,
+      gainNode: gainImpact,
+      nodes: nodesToDisconnect
+    });
+
+    oscRing.onended = () => {
+      for (const n of nodesToDisconnect) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
+
     oscRing.start(t + 0.02);
     oscRing.stop(t + 0.23);
   }
@@ -240,12 +432,18 @@ export class AudioManager {
    * 切り離し音（ブレーキ管空気緩解 プシュー音）
    */
   public playDecouplingSound(distanceFactor: number = 1.0) {
-    if (this.isMuted || distanceFactor <= 0.01) return;
+    if (this.isMuted || distanceFactor < 0.04) return;
     this.initContext();
     if (!this.ctx || !this.masterGain || !this.noiseBuffer) return;
 
     const t = this.ctx.currentTime;
     const vol = 0.4 * Math.min(1.0, distanceFactor);
+    if (vol < 0.005) return;
+
+    const voiceId = this.acquireVoice('se', vol);
+    if (voiceId === null) return;
+
+    const nodesToDisconnect: AudioNode[] = [];
 
     // ホワイトノイズ＋バンドパス下降スウィープ（エアー排気）
     const noiseSource = this.ctx.createBufferSource();
@@ -265,6 +463,7 @@ export class AudioManager {
     noiseSource.connect(filter);
     filter.connect(gain);
     gain.connect(this.masterGain);
+    nodesToDisconnect.push(noiseSource, filter, gain);
 
     noiseSource.start(t);
     noiseSource.stop(t + 0.4);
@@ -281,6 +480,24 @@ export class AudioManager {
 
     oscLever.connect(gainLever);
     gainLever.connect(this.masterGain);
+    nodesToDisconnect.push(oscLever, gainLever);
+
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'se',
+      startTime: t,
+      volume: vol,
+      gainNode: gain,
+      nodes: nodesToDisconnect
+    });
+
+    noiseSource.onended = () => {
+      for (const n of nodesToDisconnect) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
+
     oscLever.start(t);
     oscLever.stop(t + 0.07);
   }
@@ -396,6 +613,9 @@ export class AudioManager {
 
     tones.forEach(freq => {
       if (!this.ctx || !this.masterGain) return;
+      const voiceId = this.acquireVoice('se', 0.2);
+      if (voiceId === null) return;
+
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = 'sawtooth';
@@ -408,6 +628,23 @@ export class AudioManager {
 
       osc.connect(gain);
       gain.connect(this.masterGain);
+
+      const nodes: AudioNode[] = [osc, gain];
+      this.registerVoice(voiceId, {
+        id: voiceId,
+        category: 'se',
+        startTime: t,
+        volume: 0.2,
+        gainNode: gain,
+        nodes
+      });
+
+      osc.onended = () => {
+        for (const n of nodes) {
+          try { n.disconnect(); } catch (_) {}
+        }
+        this.releaseVoice(voiceId);
+      };
 
       osc.start(t);
       osc.stop(t + 0.95);
@@ -427,6 +664,9 @@ export class AudioManager {
 
     notes.forEach((freq, idx) => {
       if (!this.ctx || !this.masterGain) return;
+      const voiceId = this.acquireVoice('se', 0.25);
+      if (voiceId === null) return;
+
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = 'sine';
@@ -437,6 +677,23 @@ export class AudioManager {
 
       osc.connect(gain);
       gain.connect(this.masterGain);
+
+      const nodes: AudioNode[] = [osc, gain];
+      this.registerVoice(voiceId, {
+        id: voiceId,
+        category: 'se',
+        startTime: t + idx * 0.14,
+        volume: 0.25,
+        gainNode: gain,
+        nodes
+      });
+
+      osc.onended = () => {
+        for (const n of nodes) {
+          try { n.disconnect(); } catch (_) {}
+        }
+        this.releaseVoice(voiceId);
+      };
 
       osc.start(t + idx * 0.14);
       osc.stop(t + idx * 0.14 + 0.45);
@@ -451,6 +708,9 @@ export class AudioManager {
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
 
+    const voiceId = this.acquireVoice('se', 0.3);
+    if (voiceId === null) return;
+
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
@@ -464,6 +724,23 @@ export class AudioManager {
     osc.connect(gain);
     gain.connect(this.masterGain);
 
+    const nodes: AudioNode[] = [osc, gain];
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'se',
+      startTime: t,
+      volume: 0.3,
+      gainNode: gain,
+      nodes
+    });
+
+    osc.onended = () => {
+      for (const n of nodes) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
+
     osc.start(t);
     osc.stop(t + 0.12);
   }
@@ -475,6 +752,9 @@ export class AudioManager {
     if (this.isMuted) return;
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
+
+    const voiceId = this.acquireVoice('se', 0.35);
+    if (voiceId === null) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -489,6 +769,23 @@ export class AudioManager {
     osc.connect(gain);
     gain.connect(this.masterGain);
 
+    const nodes: AudioNode[] = [osc, gain];
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'se',
+      startTime: t,
+      volume: 0.35,
+      gainNode: gain,
+      nodes
+    });
+
+    osc.onended = () => {
+      for (const n of nodes) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
+
     osc.start(t);
     osc.stop(t + 0.2);
   }
@@ -500,6 +797,9 @@ export class AudioManager {
     if (this.isMuted) return;
     this.initContext();
     if (!this.ctx || !this.masterGain) return;
+
+    const voiceId = this.acquireVoice('se', 0.2);
+    if (voiceId === null) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -513,6 +813,23 @@ export class AudioManager {
 
     osc.connect(gain);
     gain.connect(this.masterGain);
+
+    const nodes: AudioNode[] = [osc, gain];
+    this.registerVoice(voiceId, {
+      id: voiceId,
+      category: 'se',
+      startTime: t,
+      volume: 0.2,
+      gainNode: gain,
+      nodes
+    });
+
+    osc.onended = () => {
+      for (const n of nodes) {
+        try { n.disconnect(); } catch (_) {}
+      }
+      this.releaseVoice(voiceId);
+    };
 
     osc.start(t);
     osc.stop(t + 0.07);

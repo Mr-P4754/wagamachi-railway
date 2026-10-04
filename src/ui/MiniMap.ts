@@ -28,6 +28,8 @@ export class MiniMap {
   private cameraManager: CameraManager;
   private trainManager: TrainManager;
 
+  public isLogisticsMode: boolean = false; // 物流サプライチェーンオーバーレイ表示フラグ
+
   public onJumpWorld: (worldX: number, worldZ: number) => void = () => {};
 
   constructor(deps: {
@@ -48,7 +50,7 @@ export class MiniMap {
     this.container = document.createElement('div');
     this.container.id = 'minimap-container';
 
-    // 路線図ヘッダーバー（タイトル＋閉じるボタン）
+    // 路線図ヘッダーバー（タイトル＋物流切替ボタン＋閉じるボタン）
     const headerBar = document.createElement('div');
     headerBar.id = 'minimap-header-bar';
 
@@ -56,6 +58,19 @@ export class MiniMap {
     label.id = 'minimap-label';
     label.textContent = '路線図';
     headerBar.appendChild(label);
+
+    const cargoBtn = document.createElement('button');
+    cargoBtn.id = 'minimap-cargo-btn';
+    cargoBtn.className = 'minimap-header-btn';
+    cargoBtn.textContent = '📦 物流';
+    cargoBtn.title = '物流サプライチェーン（物資在庫・需要先・貨物列車）強調表示の切替';
+    cargoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.isLogisticsMode = !this.isLogisticsMode;
+      cargoBtn.classList.toggle('active', this.isLogisticsMode);
+      this.requestStaticUpdate();
+    });
+    headerBar.appendChild(cargoBtn);
 
     const closeBtn = document.createElement('button');
     closeBtn.id = 'minimap-close-btn';
@@ -144,6 +159,27 @@ export class MiniMap {
         font-weight: 600;
         letter-spacing: 0.05em;
       }
+      .minimap-header-btn {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #94a3b8;
+        font-size: 10px;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+        line-height: 1.2;
+        transition: all 0.15s ease;
+      }
+      .minimap-header-btn:hover {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .minimap-header-btn.active {
+        background: rgba(245, 158, 11, 0.25);
+        border-color: #f59e0b;
+        color: #fbbf24;
+        font-weight: 700;
+      }
       #minimap-close-btn {
         background: transparent;
         border: none;
@@ -167,13 +203,16 @@ export class MiniMap {
       }
       @media (max-width: 768px) {
         #minimap-container {
+          top: calc(52px + env(safe-area-inset-top, 0px));
           right: 8px;
-          bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+          bottom: auto;
+          left: auto;
           padding: 4px;
+          z-index: 45;
         }
         #minimap-canvas {
-          width: 130px;
-          height: 130px;
+          width: 110px;
+          height: 110px;
         }
       }
     `;
@@ -306,15 +345,76 @@ export class MiniMap {
     ctx.drawImage(this.bgCanvas, 0, 0);
     ctx.drawImage(this.staticCanvas, 0, 0);
 
-    // 列車
-    ctx.fillStyle = '#ef4444';
+    // 物流サプライチェーンオーバーレイ（物流表示モード有効時）
+    if (this.isLogisticsMode) {
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.007);
+
+      // 1. 工業ゾーン（生産拠点）: 在庫コンテナありマスの点滅強調
+      // 2. 商業ゾーン（消費・需要先）: 受け入れ余力ありマスのシアン枠線強調
+      for (const zone of this.zoneManager.getAllZones()) {
+        if (zone.type === 'industrial' && (zone.industrialStock ?? 0) > 0) {
+          const { px, py } = this.tileToPx(zone.x, zone.z);
+          ctx.strokeStyle = `rgba(249, 115, 22, ${0.4 + 0.6 * pulse})`;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(px - 1.5, py - 1.5, 3, 3);
+          ctx.fillStyle = `rgba(249, 115, 22, ${0.35 * pulse})`;
+          ctx.fillRect(px - 1, py - 1, 2, 2);
+        } else if (zone.type === 'commercial' && (zone.commercialAttractiveness ?? 0) < 100) {
+          const { px, py } = this.tileToPx(zone.x, zone.z);
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = 0.9;
+          ctx.strokeRect(px - 1.5, py - 1.5, 3, 3);
+        }
+      }
+
+      // 3. コンテナを保管中の貨物駅（コンテナヤード）のマーカー表示
+      const allTiles = this.worldMap.getAllTiles();
+      for (const t of allTiles) {
+        if (t.isCargoYard || t.type.startsWith('cargo_station')) {
+          const containers = t.cargoContainers ?? 0;
+          if (containers > 0) {
+            const { px, py } = this.tileToPx(t.x, t.z);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(px - 2, py - 2, 4, 4);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(px - 2, py - 2, 4, 4);
+          }
+        }
+      }
+    }
+
+    // 列車マーカー描画（物流モード時はコンテナ積載中貨物列車をアンバー/オレンジで強調）
     for (const train of this.trainManager.getTrains()) {
       const tileX = train.frontPosition.x / WorldMap.TILE_SIZE;
       const tileZ = train.frontPosition.z / WorldMap.TILE_SIZE;
       const { px, py } = this.tileToPx(tileX, tileZ);
-      ctx.beginPath();
-      ctx.arc(px, py, 1.6, 0, Math.PI * 2);
-      ctx.fill();
+
+      const isFreight = train.model.category === 'freight';
+      const hasCargo = (train.cargoLoad ?? 0) > 0;
+
+      if (this.isLogisticsMode && isFreight && hasCargo) {
+        // コンテナ積載中の貨物列車: アンバー/オレンジ（#f59e0b）で拡大描画
+        ctx.fillStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(px, py, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+      } else if (this.isLogisticsMode && isFreight) {
+        // 回送中の貨物列車: 落ち着いたアンバー
+        ctx.fillStyle = '#d97706';
+        ctx.beginPath();
+        ctx.arc(px, py, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // 通常旅客列車
+        ctx.fillStyle = this.isLogisticsMode ? 'rgba(239, 68, 68, 0.45)' : '#ef4444';
+        ctx.beginPath();
+        ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     // 【UIの嘘解消】カメラ視野範囲（クォータービューの幾何学的に正確な回転ひし形枠）

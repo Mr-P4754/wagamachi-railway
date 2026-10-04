@@ -81,9 +81,10 @@ export class ModelFactory {
     part: 'single' | 'start' | 'mid' | 'end' = 'single',
     platformSide: 'left' | 'right' = 'right',
     stationName: string = '駅',
-    pierHeight: number = 3.0
+    pierHeight: number = 3.0,
+    isGhost: boolean = false
   ): THREE.Group {
-    return StationMeshBuilder.createStation(rotation, isElevated, part, platformSide, stationName, pierHeight);
+    return StationMeshBuilder.createStation(rotation, isElevated, part, platformSide, stationName, pierHeight, isGhost);
   }
 
   public static updateStationSign(mesh: THREE.Object3D, newName: string): void {

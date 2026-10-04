@@ -1,5 +1,6 @@
 export interface FinancialReportData {
-  fareIncome: number;
+  fareIncome: number; // 旅客運賃収入
+  cargoIncome: number; // 貨物輸送収入
   constructionCost: number;
   maintenanceCost: number;
   netProfit: number;
@@ -10,7 +11,28 @@ export interface FinancialReportData {
   stationCount: number;
 }
 
+/**
+ * 財務・経営データの時点スナップショット（月次・年次推移用）
+ */
+export interface FinancialSnapshot {
+  year: number;
+  month: number; // 月次: 1-12, 年次: 0 (通年)
+  fareIncome: number; // 旅客運賃収入（または総運賃収入）
+  cargoIncome?: number; // 貨物運賃収入
+  maintenanceCost: number; // 運行・維持管理費
+  constructionCost: number; // 建設・設備投資費
+  netProfit: number; // 純利益
+  population: number; // 総人口
+  trackLength: number; // 鉄道総延長 (km)
+  trainCount: number; // 運行列車数
+  stationCount: number; // 駅数
+  taxAmount?: number; // 確定税額（年次決算時のみ）
+}
+
 export class Economy {
+  public static readonly MAX_MONTHLY_HISTORY = 24;
+  public static readonly MAX_YEARLY_HISTORY = 10;
+
   public funds: number = 100000000; // 初期資金: ¥100,000,000
   public population: number = 0;
 
@@ -24,11 +46,13 @@ export class Economy {
 
   // 当期（直近月）の収支
   public periodFareIncome: number = 0;
+  public periodCargoIncome: number = 0;
   public periodConstructionCost: number = 0;
   public periodMaintenanceCost: number = 0;
 
   // 年間（前年度/当年度）会計用アキュムレータ
   public fiscalYearFareIncome: number = 0;
+  public fiscalYearCargoIncome: number = 0;
   public fiscalYearMaintenanceCost: number = 0;
   public fiscalYearConstructionCost: number = 0;
 
@@ -37,6 +61,11 @@ export class Economy {
   public pendingPropertyTax: number = 0;
   public pendingTotalTax: number = 0;
   public lastSettledYear: number = 2025;
+
+  // 月次財務履歴（直近最大24ヶ月）
+  public monthlyHistory: FinancialSnapshot[] = [];
+  // 年次財務履歴（直近最大10年）
+  public yearlyHistory: FinancialSnapshot[] = [];
 
   // 開発テスト用: 資金無限モード
   public isInfiniteFunds: boolean = false;
@@ -67,6 +96,17 @@ export class Economy {
   }
 
   /**
+   * 貨物輸送運賃の加算（旅客運賃と分離して独立計上）
+   */
+  public addCargoIncome(amount: number) {
+    this.funds += amount;
+    if (amount > 0) {
+      this.periodCargoIncome += amount;
+      this.fiscalYearCargoIncome += amount;
+    }
+  }
+
+  /**
    * ② 営業収入（運賃売上）に計上しない、純粋な資金返金・資産売却代金
    * （車両減車売却や仮置きキャンセル等の返金に使用し、売上過剰課税から除外する）
    */
@@ -80,6 +120,7 @@ export class Economy {
    */
   public resetPeriodStats(): void {
     this.periodFareIncome = 0;
+    this.periodCargoIncome = 0;
     this.periodConstructionCost = 0;
     this.periodMaintenanceCost = 0;
   }
@@ -141,8 +182,9 @@ export class Economy {
     const fiscalYear = this.year;
     this.lastSettledYear = fiscalYear;
 
-    // 営業黒字（運賃収入 - 維持費）
-    const operatingProfit = this.fiscalYearFareIncome - this.fiscalYearMaintenanceCost;
+    // 営業黒字（運賃収入[旅客+貨物] - 維持費）
+    const totalOperatingRevenue = this.fiscalYearFareIncome + this.fiscalYearCargoIncome;
+    const operatingProfit = totalOperatingRevenue - this.fiscalYearMaintenanceCost;
 
     // 設備投資額（建設費・車両購入費等）
     const constructionCost = this.fiscalYearConstructionCost;
@@ -167,6 +209,7 @@ export class Economy {
 
     // 新年度に向けて年間会計アキュムレータをリセット
     this.fiscalYearFareIncome = 0;
+    this.fiscalYearCargoIncome = 0;
     this.fiscalYearMaintenanceCost = 0;
     this.fiscalYearConstructionCost = 0;
 
@@ -289,9 +332,11 @@ export class Economy {
   }
 
   public getFinancialReport(trackTiles: number, trainCount: number, stationCount: number): FinancialReportData {
-    const netProfit = this.periodFareIncome - (this.periodConstructionCost + this.periodMaintenanceCost);
+    const totalIncome = this.periodFareIncome + this.periodCargoIncome;
+    const netProfit = totalIncome - (this.periodConstructionCost + this.periodMaintenanceCost);
     return {
       fareIncome: this.periodFareIncome,
+      cargoIncome: this.periodCargoIncome,
       constructionCost: this.periodConstructionCost,
       maintenanceCost: this.periodMaintenanceCost,
       netProfit,
@@ -303,6 +348,36 @@ export class Economy {
     };
   }
 
+  /**
+   * 月次財務スナップショットを記録する（上限24件、古い順に自動破棄）
+   */
+  public recordMonthlySnapshot(snapshot: FinancialSnapshot): void {
+    this.monthlyHistory.push(snapshot);
+    while (this.monthlyHistory.length > Economy.MAX_MONTHLY_HISTORY) {
+      this.monthlyHistory.shift();
+    }
+    this.saveToStorage();
+  }
+
+  /**
+   * 年次財務スナップショットを記録する（上限10件、古い順に自動破棄）
+   */
+  public recordYearlySnapshot(snapshot: FinancialSnapshot): void {
+    this.yearlyHistory.push(snapshot);
+    while (this.yearlyHistory.length > Economy.MAX_YEARLY_HISTORY) {
+      this.yearlyHistory.shift();
+    }
+    this.saveToStorage();
+  }
+
+  public getMonthlyHistory(): FinancialSnapshot[] {
+    return [...this.monthlyHistory];
+  }
+
+  public getYearlyHistory(): FinancialSnapshot[] {
+    return [...this.yearlyHistory];
+  }
+
   public saveToStorage() {
     try {
       const data = {
@@ -312,15 +387,19 @@ export class Economy {
         month: this.month,
         day: this.day,
         periodFareIncome: this.periodFareIncome,
+        periodCargoIncome: this.periodCargoIncome,
         periodConstructionCost: this.periodConstructionCost,
         periodMaintenanceCost: this.periodMaintenanceCost,
         fiscalYearFareIncome: this.fiscalYearFareIncome,
+        fiscalYearCargoIncome: this.fiscalYearCargoIncome,
         fiscalYearMaintenanceCost: this.fiscalYearMaintenanceCost,
         fiscalYearConstructionCost: this.fiscalYearConstructionCost,
         pendingCorporateTax: this.pendingCorporateTax,
         pendingPropertyTax: this.pendingPropertyTax,
         pendingTotalTax: this.pendingTotalTax,
-        lastSettledYear: this.lastSettledYear
+        lastSettledYear: this.lastSettledYear,
+        monthlyHistory: this.monthlyHistory,
+        yearlyHistory: this.yearlyHistory
       };
       localStorage.setItem('wagamachi_economy_data', JSON.stringify(data));
     } catch (e) {
@@ -333,21 +412,34 @@ export class Economy {
       const raw = localStorage.getItem('wagamachi_economy_data') || localStorage.getItem('stk_3d_economy');
       if (raw) {
         const data = JSON.parse(raw);
-        this.funds = data.funds ?? 100000000;
-        this.population = data.population ?? 0;
-        this.year = data.year && data.year >= 2026 ? data.year : 2026;
-        this.month = data.month ?? 4;
-        this.day = data.day ?? 1;
-        this.periodFareIncome = data.periodFareIncome ?? 0;
-        this.periodConstructionCost = data.periodConstructionCost ?? 0;
-        this.periodMaintenanceCost = data.periodMaintenanceCost ?? 0;
-        this.fiscalYearFareIncome = data.fiscalYearFareIncome ?? 0;
-        this.fiscalYearMaintenanceCost = data.fiscalYearMaintenanceCost ?? 0;
-        this.fiscalYearConstructionCost = data.fiscalYearConstructionCost ?? 0;
-        this.pendingCorporateTax = data.pendingCorporateTax ?? 0;
-        this.pendingPropertyTax = data.pendingPropertyTax ?? 0;
-        this.pendingTotalTax = data.pendingTotalTax ?? 0;
-        this.lastSettledYear = data.lastSettledYear ?? 2025;
+        const safeNum = (v: any, def: number) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
+        this.funds = safeNum(data.funds, 100000000);
+        this.population = safeNum(data.population, 0);
+        this.year = safeNum(data.year, 2026) >= 2026 ? data.year : 2026;
+        this.month = safeNum(data.month, 4);
+        this.day = safeNum(data.day, 1);
+        this.periodFareIncome = safeNum(data.periodFareIncome, 0);
+        this.periodCargoIncome = safeNum(data.periodCargoIncome, 0);
+        this.periodConstructionCost = safeNum(data.periodConstructionCost, 0);
+        this.periodMaintenanceCost = safeNum(data.periodMaintenanceCost, 0);
+        this.fiscalYearFareIncome = safeNum(data.fiscalYearFareIncome, 0);
+        this.fiscalYearCargoIncome = safeNum(data.fiscalYearCargoIncome, 0);
+        this.fiscalYearMaintenanceCost = safeNum(data.fiscalYearMaintenanceCost, 0);
+        this.fiscalYearConstructionCost = safeNum(data.fiscalYearConstructionCost, 0);
+        this.pendingCorporateTax = safeNum(data.pendingCorporateTax, 0);
+        this.pendingPropertyTax = safeNum(data.pendingPropertyTax, 0);
+        this.pendingTotalTax = safeNum(data.pendingTotalTax, 0);
+        this.lastSettledYear = safeNum(data.lastSettledYear, 2025);
+        if (Array.isArray(data.monthlyHistory)) {
+          this.monthlyHistory = data.monthlyHistory.filter((s: any) => s && typeof s.year === 'number');
+        } else {
+          this.monthlyHistory = [];
+        }
+        if (Array.isArray(data.yearlyHistory)) {
+          this.yearlyHistory = data.yearlyHistory.filter((s: any) => s && typeof s.year === 'number');
+        } else {
+          this.yearlyHistory = [];
+        }
         return true;
       }
     } catch (e) {
@@ -363,15 +455,19 @@ export class Economy {
     this.month = 4;
     this.day = 1;
     this.periodFareIncome = 0;
+    this.periodCargoIncome = 0;
     this.periodConstructionCost = 0;
     this.periodMaintenanceCost = 0;
     this.fiscalYearFareIncome = 0;
+    this.fiscalYearCargoIncome = 0;
     this.fiscalYearMaintenanceCost = 0;
     this.fiscalYearConstructionCost = 0;
     this.pendingCorporateTax = 0;
     this.pendingPropertyTax = 0;
     this.pendingTotalTax = 0;
     this.lastSettledYear = 2025;
+    this.monthlyHistory = [];
+    this.yearlyHistory = [];
     try {
       localStorage.removeItem('wagamachi_economy_data');
       localStorage.removeItem('stk_3d_economy');

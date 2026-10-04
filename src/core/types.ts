@@ -40,7 +40,7 @@ export interface TimetableEntry {
 }
 
 /** カメラ視界モード */
-export type CameraViewMode = 'quarter_view' | 'cab_view';
+export type CameraViewMode = 'quarter_view' | 'cab_view' | 'chase_view';
 
 /** クォータービューの4方向角度 (0度, 90度, 180度, 270度) */
 export type QuarterViewDirection = 0 | 1 | 2 | 3;

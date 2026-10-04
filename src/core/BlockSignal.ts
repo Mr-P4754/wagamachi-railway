@@ -98,42 +98,46 @@ export class BlockSignalManager {
       isDeadlocked?: boolean;
       speed: number;
     }>,
-    deltaTime: number
+    deltaTime: number,
+    hasOccupancyChanged: boolean = true
   ): void {
-    // 1. 各閉塞区間の占有状態をリセット
-    for (const section of this.blockSections.values()) {
-      section.occupiedTrainId = null;
-      section.signalState = 'green';
-    }
+    // 占有状態に変化があった場合のみ、閉塞区間リセット・再割当・信号機ビジュアル更新を実行
+    if (hasOccupancyChanged) {
+      // 1. 各閉塞区間の占有状態をリセット
+      for (const section of this.blockSections.values()) {
+        section.occupiedTrainId = null;
+        section.signalState = 'green';
+      }
 
-    // 2. 各列車の占有タイル（最大10マス以上）をチェックし、該当閉塞区間をロック
-    for (const train of trains) {
-      const occupiedSections = new Set<string>();
+      // 2. 各列車の占有タイル（最大10マス以上）をチェックし、該当閉塞区間をロック
+      for (const train of trains) {
+        const occupiedSections = new Set<string>();
 
-      for (const tile of train.occupiedTiles) {
-        const key = this.makeTileKey(tile.x, tile.z, tile.layer);
-        const sectionId = this.tileToSectionId.get(key);
-        if (sectionId) {
-          occupiedSections.add(sectionId);
+        for (const tile of train.occupiedTiles) {
+          const key = this.makeTileKey(tile.x, tile.z, tile.layer);
+          const sectionId = this.tileToSectionId.get(key);
+          if (sectionId) {
+            occupiedSections.add(sectionId);
+          }
+        }
+
+        for (const sId of occupiedSections) {
+          const section = this.blockSections.get(sId);
+          if (section) {
+            section.occupiedTrainId = train.id;
+            section.signalState = 'red';
+          }
         }
       }
 
-      for (const sId of occupiedSections) {
-        const section = this.blockSections.get(sId);
-        if (section) {
-          section.occupiedTrainId = train.id;
-          section.signalState = 'red';
-        }
-      }
-    }
-
-    // 3. 信号機ビジュアルの状態を閉塞区間に連動更新
-    for (const section of this.blockSections.values()) {
-      for (const sig of section.entrySignals) {
-        const key = this.makeSignalKey(sig.x, sig.z, sig.layer, sig.directionIdx);
-        const sigVisual = this.signals.get(key);
-        if (sigVisual) {
-          sigVisual.state = section.signalState;
+      // 3. 信号機ビジュアルの状態を閉塞区間に連動更新
+      for (const section of this.blockSections.values()) {
+        for (const sig of section.entrySignals) {
+          const key = this.makeSignalKey(sig.x, sig.z, sig.layer, sig.directionIdx);
+          const sigVisual = this.signals.get(key);
+          if (sigVisual) {
+            sigVisual.state = section.signalState;
+          }
         }
       }
     }

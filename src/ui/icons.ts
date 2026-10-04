@@ -14,6 +14,7 @@ export const UI_ICONS = {
   railTunnel: createSvg('<path d="M4 21V10a8 8 0 0 1 16 0v11"/><path d="M8 21v-8a4 4 0 0 1 8 0v8"/><line x1="2" y1="21" x2="22" y2="21"/>'),
   pointSwitch: createSvg('<line x1="4" y1="19" x2="20" y2="19"/><path d="M4 19c6 0 10-6 16-12"/>'),
   scissorsCrossing: createSvg('<line x1="4" y1="4" x2="20" y2="20"/><line x1="4" y1="20" x2="20" y2="4"/>'),
+  levelCrossing: createSvg('<line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>'),
   station: createSvg('<rect x="3" y="6" width="18" height="15" rx="2"/><path d="M3 10h18M8 6v4M16 6v4"/>'),
   stationElevated: createSvg('<rect x="4" y="4" width="16" height="10" rx="2"/><line x1="6" y1="14" x2="6" y2="21"/><line x1="18" y1="14" x2="18" y2="21"/><line x1="4" y1="9" x2="20" y2="9"/>'),
   road: createSvg('<rect x="4" y="3" width="16" height="18" rx="2"/><line x1="12" y1="6" x2="12" y2="8"/><line x1="12" y1="11" x2="12" y2="13"/><line x1="12" y1="16" x2="12" y2="18"/>'),
@@ -32,5 +33,6 @@ export const UI_ICONS = {
   sunset: createSvg('<path d="M17 18a5 5 0 0 0-10 0"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="4.22" y1="10.22" x2="5.64" y2="11.64"/><line x1="1" y1="18" x2="3" y2="18"/><line x1="21" y1="18" x2="23" y2="18"/><line x1="18.36" y1="11.64" x2="19.78" y2="10.22"/><line x1="23" y1="22" x2="1" y2="22"/>'),
   moon: createSvg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
   volumeHigh: createSvg('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>'),
-  volumeMute: createSvg('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>')
+  volumeMute: createSvg('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>'),
+  undo: createSvg('<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>')
 } as const;

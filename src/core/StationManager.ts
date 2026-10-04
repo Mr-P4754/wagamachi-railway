@@ -43,6 +43,22 @@ export interface StationSaveData {
   nextYardNumber: number;
 }
 
+/** 旅客駅ホームの月額維持管理費: ¥200,000/ホーム */
+export const STATION_MAINTENANCE_PASSENGER = 200000;
+/** 貨物駅ホームの月額維持管理費: ¥50,000/ホーム */
+export const STATION_MAINTENANCE_CARGO = 50000;
+/** 信号場・留置線ホームの月額維持管理費: ¥20,000/ホーム */
+export const STATION_MAINTENANCE_YARD = 20000;
+
+/**
+ * 施設種別に応じた1ホームあたりの月額維持管理費を返却
+ */
+export function getBaseStationMaintenance(isSignalYard: boolean, isCargoStation: boolean = false): number {
+  if (isSignalYard) return STATION_MAINTENANCE_YARD;
+  if (isCargoStation) return STATION_MAINTENANCE_CARGO;
+  return STATION_MAINTENANCE_PASSENGER;
+}
+
 /**
  * 複数ホーム構造（1番線・2番線…）および信号場・留置線を統括管理するマネージャークラス
  */
@@ -140,7 +156,7 @@ export class StationManager {
             : `第${this.nextStationNumber++}駅`)
       );
 
-      const baseMaintenance = isSignalYard ? 10000 : (isCargo ? 25000 : 50000);
+      const baseMaintenance = getBaseStationMaintenance(isSignalYard, isCargo);
       targetStation = {
         id: stationId,
         name: defaultName,
@@ -195,7 +211,7 @@ export class StationManager {
     }
 
     // 駅の維持管理費を更新（ホーム数に比例、信号場:2万、貨物駅:5万、旅客駅:20万）
-    const baseMaintenance = isSignalYard ? 20000 : (isCargo ? 50000 : 200000);
+    const baseMaintenance = getBaseStationMaintenance(isSignalYard, isCargo);
     targetStation.maintenance = targetStation.platforms.length * baseMaintenance;
     targetStation.netProfit = targetStation.totalRevenue - targetStation.maintenance;
 
@@ -360,7 +376,7 @@ export class StationManager {
     if (station.platforms.length === 0) {
       this.stations.delete(station.id);
     } else {
-      const baseMaintenance = station.isSignalYard ? 20000 : (station.isCargoStation ? 50000 : 200000);
+      const baseMaintenance = getBaseStationMaintenance(station.isSignalYard, !!station.isCargoStation);
       station.maintenance = station.platforms.length * baseMaintenance;
       station.netProfit = station.totalRevenue - station.maintenance;
     }

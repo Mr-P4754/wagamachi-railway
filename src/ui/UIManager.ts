@@ -3,13 +3,13 @@ import {
   TileData,
   createDefaultSwitchSchedule
 } from '../simulation/WorldMap';
-import { FinancialReportData } from '../simulation/Economy';
+import { FinancialReportData, FinancialSnapshot, Economy } from '../simulation/Economy';
 import { CameraMode } from '../graphics/CameraManager';
 import { VEHICLE_CATALOG, VehicleModelInfo, getMaxCapacity } from '../simulation/VehicleCatalog';
 import { TrainInstance } from '../simulation/TrainManager';
 import { UI_ICONS } from './icons';
 import { MapSize, TerrainType, GridLayer, DeadlockEvent } from '../core/types';
-import { TimeLightingMode, TimeOfDay } from '../engine/Renderer';
+import { TimeLightingMode, TimeOfDay, GraphicsQuality } from '../engine/Renderer';
 
 export type ActiveTool =
   | 'select'
@@ -20,6 +20,7 @@ export type ActiveTool =
   | 'point-switch-elevated'
   | 'scissors-crossing'
   | 'scissors-crossing-elevated'
+  | 'level-crossing'
   | 'rail-slope'
   | 'rail-slope-underground'
   | 'rail-tunnel'
@@ -52,6 +53,7 @@ export const TOOL_CONFIG: Record<ActiveTool, { cost: number; tileType: TileType 
   'rail-elevated': { cost: 1500000, tileType: 'rail_elevated', name: '高架線路', icon: UI_ICONS.railElevated },
   'rail-curve': { cost: 800000, tileType: null, name: '曲線線路', icon: UI_ICONS.railCurve },
   'rail-curve-elevated': { cost: 2400000, tileType: null, name: '高架曲線', icon: UI_ICONS.railCurve },
+  'level-crossing': { cost: 800000, tileType: 'level_crossing', name: '踏切', icon: UI_ICONS.levelCrossing },
   'rail-slope': { cost: 1500000, tileType: 'rail_slope', name: '勾配線路', icon: UI_ICONS.railSlope },
   'rail-slope-underground': { cost: 2000000, tileType: 'rail_slope_underground', name: '地下勾配線路', icon: UI_ICONS.railSlopeUnderground },
   'rail-tunnel': { cost: 1200000, tileType: 'rail_ground', name: 'トンネル線路', icon: UI_ICONS.railTunnel },
@@ -98,7 +100,7 @@ export const TOOL_CATEGORIES: ToolCategory[] = [
     name: '線路',
     icon: UI_ICONS.railStraight,
     tools: [
-      'rail-straight', 'rail-curve', 'rail-slope', 'rail-slope-underground',
+      'rail-straight', 'level-crossing', 'rail-curve', 'rail-slope', 'rail-slope-underground',
       'point-switch', 'scissors-crossing'
     ],
     demolishTool: 'demolish-track'
@@ -177,7 +179,25 @@ export class UIManager {
   private reportBtn = document.getElementById('btn-report')!;
   private reportModal = document.getElementById('report-modal')!;
   private closeReportBtn = document.getElementById('btn-close-report')!;
+  private reportTabBtns = document.querySelectorAll<HTMLButtonElement>('.report-tab-btn');
+  private reportTabCurrent = document.getElementById('report-tab-current');
+  private reportTabMonthly = document.getElementById('report-tab-monthly');
+  private reportTabYearly = document.getElementById('report-tab-yearly');
+  private monthlyChartCanvas = document.getElementById('monthly-chart-canvas') as HTMLCanvasElement | null;
+  private monthlyChartTooltip = document.getElementById('monthly-chart-tooltip');
+  private monthlyHistoryTbody = document.getElementById('monthly-history-tbody');
+  private yearlyChartCanvas = document.getElementById('yearly-chart-canvas') as HTMLCanvasElement | null;
+  private yearlyChartTooltip = document.getElementById('yearly-chart-tooltip');
+  private yearlyHistoryTbody = document.getElementById('yearly-history-tbody');
+  private activeReportTab: 'current' | 'monthly' | 'yearly' = 'current';
 
+  // 画質設定 references
+  private graphicsQualitySelect = document.getElementById('select-graphics-quality') as HTMLSelectElement | null;
+  private graphicsToggleBtn = document.getElementById('btn-graphics-toggle') as HTMLButtonElement | null;
+  private graphicsQualityBadge = document.getElementById('graphics-quality-badge') as HTMLElement | null;
+  public onGraphicsQualityChanged?: (level: GraphicsQuality) => void;
+
+  private undoBtn = document.getElementById('btn-undo') as HTMLButtonElement | null;
   private camViewBtn = document.getElementById('btn-cam-view')!;
   private camViewText = document.getElementById('cam-view-text');
   private timeToggleBtn = document.getElementById('btn-time-toggle')!;
@@ -188,14 +208,19 @@ export class UIManager {
   private slicerToggleBtn = document.getElementById('btn-slicer-toggle');
   private minimapToggleBtn = document.getElementById('btn-minimap-toggle');
   private floorSlicerEl = document.getElementById('floor-slicer');
+  private buildToolbar = document.getElementById('build-toolbar');
+  private sideControlsDock = document.getElementById('side-controls-dock');
+  private minimapContainer = document.getElementById('minimap-container');
 
   private cabOverlay = document.getElementById('cab-view-overlay')!;
+  private cabHudTitle = document.getElementById('cab-hud-title');
   private cabTrainName = document.getElementById('cab-train-name');
   private cabSpeedVal = document.getElementById('cab-speed-val')!;
   private exitCabBtn = document.getElementById('btn-exit-cab')!;
   private btnCabPrev = document.getElementById('btn-cab-prev');
   private btnCabNext = document.getElementById('btn-cab-next');
   private btnCabChange = document.getElementById('btn-cab-change');
+  private btnCabToggleMode = document.getElementById('btn-cab-toggle-mode');
 
   private cabSelectModal = document.getElementById('cab-select-modal');
   private closeCabSelectBtn = document.getElementById('btn-close-cab-select');
@@ -247,6 +272,10 @@ export class UIManager {
   private inspectRenameInput = document.getElementById('inspect-rename-input') as HTMLInputElement | null;
   private btnApplyRename = document.getElementById('btn-apply-rename');
 
+  // 財務・経営レポートデータプロバイダ
+  public getFinancialReportData?: () => FinancialReportData;
+  public getEconomy?: () => Economy;
+
   // ①② 分岐器ダイヤ設定モーダル（10分刻み）用プロパティ
   public getCurrentHour?: () => number;
   public getCurrentMinute?: () => number;
@@ -297,6 +326,9 @@ export class UIManager {
   public onTimeToggled: () => void = () => {};
   public onGridToggled: (visible: boolean) => void = () => {};
   public onCameraModeToggled: () => void = () => {};
+  public onCabToggleModeRequested?: () => void;
+  public onChaseTrainRequested?: (trainId: number) => void;
+  public onCabTrainRequested?: (trainId: number) => void;
   public onCabPrevRequested: () => void = () => {};
   public onCabNextRequested: () => void = () => {};
   public onCabSelectRequested: () => void = () => {};
@@ -628,6 +660,9 @@ export class UIManager {
     this.btnCabChange?.addEventListener('click', () => {
       this.onCabSelectRequested();
     });
+    this.btnCabToggleMode?.addEventListener('click', () => {
+      this.onCabToggleModeRequested?.();
+    });
 
     // 車窓列車選択モーダル
     this.closeCabSelectBtn?.addEventListener('click', () => {
@@ -641,16 +676,75 @@ export class UIManager {
 
     // Report modal
     this.reportBtn.addEventListener('click', () => {
-      this.reportModal.classList.remove('hidden');
+      this.openFinancialReportModal();
     });
     this.closeReportBtn.addEventListener('click', () => {
       this.reportModal.classList.add('hidden');
+    });
+
+    // 財務モーダル タブ切り替え
+    this.reportTabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab as 'current' | 'monthly' | 'yearly';
+        if (tab) {
+          this.switchReportTab(tab);
+        }
+      });
+    });
+
+    // 財務推移チャートのインタラクション（ホバー・ツールチップ）初期化
+    this.initFinancialChartInteractions();
+
+    // ウィンドウリサイズ時の財務チャート再描画
+    window.addEventListener('resize', () => {
+      if (!this.reportModal.classList.contains('hidden')) {
+        this.renderActiveReportTab();
+      }
+    });
+
+    // 画質設定イベント（セレクトボックス & クイックトグルボタン）
+    this.graphicsQualitySelect?.addEventListener('change', () => {
+      const level = this.graphicsQualitySelect?.value as GraphicsQuality;
+      if (level) {
+        this.setGraphicsQualityUI(level);
+        this.onGraphicsQualityChanged?.(level);
+        const toastMsg: Record<GraphicsQuality, string> = {
+          high: '画質設定を「高画質（シャドウON・PC標準）」に変更しました。',
+          medium: '画質設定を「標準（軽量シャドウ・バランス）」に変更しました。',
+          low: '画質設定を「軽量（シャドウOFF・低負荷）」に変更しました。'
+        };
+        this.showToast('画質変更', toastMsg[level], 'info');
+      }
+    });
+
+    this.graphicsToggleBtn?.addEventListener('click', () => {
+      const current = (this.graphicsQualitySelect?.value as GraphicsQuality) || 'high';
+      const next: GraphicsQuality = current === 'high' ? 'medium' : (current === 'medium' ? 'low' : 'high');
+      this.setGraphicsQualityUI(next);
+      this.onGraphicsQualityChanged?.(next);
+      const toastMsg: Record<GraphicsQuality, string> = {
+        high: '画質設定を「高画質（シャドウON・PC標準）」に変更しました。',
+        medium: '画質設定を「標準（軽量シャドウ・バランス）」に変更しました。',
+        low: '画質設定を「軽量（シャドウOFF・低負荷）」に変更しました。'
+      };
+      this.showToast('画質変更', toastMsg[next], 'info');
     });
 
     // Inspector
     this.closeInspectBtn.addEventListener('click', () => {
       this.closeInspector();
     });
+
+    // インスペクターのヘッダー／グラブバータップによる折りたたみ・展開トグル（アコーディオン）
+    const panelHeader = this.inspectorPanel.querySelector('.panel-header');
+    if (panelHeader) {
+      panelHeader.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('#btn-close-inspect')) {
+          return;
+        }
+        this.inspectorPanel.classList.toggle('minimized');
+      });
+    }
 
     // インスペクターパネル内の操作が背後の3Dキャンバスに伝播して誤作動するのを防止
     this.inspectorPanel.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -715,7 +809,7 @@ export class UIManager {
     // Save & Reset
     document.getElementById('btn-save-game')?.addEventListener('click', () => {
       this.onSaveRequested();
-      alert('ゲームデータを保存しました。');
+      this.showToast('セーブ完了', 'ゲームデータを保存しました。', 'success');
     });
 
     // 都市を初期化: ブラウザのダイアログブロックに影響されないインライン2段階確認UI
@@ -800,6 +894,7 @@ export class UIManager {
       const config = TOOL_CONFIG[tool];
       const btn = document.createElement('button');
       btn.className = `tool-btn submenu-tool-btn ${this.activeTool === tool ? 'active' : ''}`;
+      btn.setAttribute('data-tool', tool);
       btn.innerHTML = `
         <span class="tool-icon">${config.icon}</span>
         <span class="tool-name">${config.name}</span>
@@ -816,6 +911,7 @@ export class UIManager {
     const demoConfig = TOOL_CONFIG[category.demolishTool];
     const demoBtn = document.createElement('button');
     demoBtn.className = `tool-btn submenu-tool-btn delete-tool ${this.activeTool === category.demolishTool ? 'active' : ''}`;
+    demoBtn.setAttribute('data-tool', category.demolishTool);
     demoBtn.innerHTML = `
       <span class="tool-icon">${demoConfig.icon}</span>
       <span class="tool-name">${demoConfig.name}</span>
@@ -876,7 +972,7 @@ export class UIManager {
   /**
    * ツール選択の共通処理（最上段ボタン／サブメニュー双方から呼ばれる）
    */
-  private selectTool(tool: ActiveTool) {
+  public selectTool(tool: ActiveTool): void {
     // ツール変更時は前の設置作業（仮置き・ドラッグ・列車配置等）を完全にキャンセル
     this.onCancelPlacement();
 
@@ -894,8 +990,10 @@ export class UIManager {
     this.categoryBtns.forEach(b => b.classList.toggle('active', ownerCategory?.id === b.getAttribute('data-category')));
 
     // ④ 駅・信号場・貨物駅ツールの場合はホーム有効長セレクターを表示
+    // （ただしサブメニュー展開中は排他制御により非表示を維持）
     const isStationTool = this.isStationTool(tool);
-    this.stationLengthSelector.classList.toggle('hidden', !isStationTool);
+    const shouldShowStationSelector = isStationTool && this.activeCategoryId === null;
+    this.stationLengthSelector.classList.toggle('hidden', !shouldShowStationSelector);
 
     this.onToolChanged(tool);
   }
@@ -956,6 +1054,32 @@ export class UIManager {
 
   public setAudioMuted(isMuted: boolean) {
     this.audioToggleBtn.innerHTML = isMuted ? UI_ICONS.volumeMute : UI_ICONS.volumeHigh;
+  }
+
+  /**
+   * 画質設定UI（セレクトボックス・クイックバッジ・ツールチップ）を同期更新
+   */
+  public setGraphicsQualityUI(level: GraphicsQuality): void {
+    if (this.graphicsQualitySelect) {
+      this.graphicsQualitySelect.value = level;
+    }
+    if (this.graphicsQualityBadge) {
+      const labelMap: Record<GraphicsQuality, string> = {
+        high: '高',
+        medium: '中',
+        low: '低'
+      };
+      this.graphicsQualityBadge.textContent = labelMap[level] || '高';
+      this.graphicsQualityBadge.className = `time-mode-badge quality-${level}`;
+    }
+    if (this.graphicsToggleBtn) {
+      const titleMap: Record<GraphicsQuality, string> = {
+        high: '画質切替: 高画質 (クリックで「中」に変更)',
+        medium: '画質切替: 標準 (クリックで「低」に変更)',
+        low: '画質切替: 軽量 (クリックで「高」に変更)'
+      };
+      this.graphicsToggleBtn.title = titleMap[level] || '画質切替';
+    }
   }
 
   /**
@@ -1215,7 +1339,9 @@ export class UIManager {
    * ⑧ 現在選択中のツールの回転バーを表示/更新する
    */
   public setRotationHint(visible: boolean, label: string = '') {
-    this.rotationHint.classList.toggle('hidden', !visible);
+    // サブメニュー展開中、またはインスペクター表示中は排他制御により回転ヒントを非表示
+    const shouldShow = visible && this.activeCategoryId === null && this.inspectorPanel.classList.contains('hidden');
+    this.rotationHint.classList.toggle('hidden', !shouldShow);
     if (visible) {
       this.rotationValueEl.textContent = label;
     }
@@ -1362,7 +1488,7 @@ export class UIManager {
             ` : `
               <button class="fleet-btn-deploy" data-id="${item.id}">線路に配置</button>
             `}
-            <button class="fleet-btn-sell" data-id="${item.id}" title="列車を売却して資金を回収します">売却 (¥${Math.floor(item.model.basePrice * item.cars * 0.5).toLocaleString()})</button>
+            <button class="fleet-btn-sell" data-id="${item.id}" title="列車を売却して資金を回収します">売却 (¥${Math.floor((item.model?.basePrice ?? 12000000) * item.cars * 0.5).toLocaleString()})</button>
           </div>
         `;
 
@@ -1395,10 +1521,48 @@ export class UIManager {
           this.onTrackFleetTrain(item.id);
         });
 
-        const sellBtn = card.querySelector('.fleet-btn-sell');
+        const sellBtn = card.querySelector<HTMLButtonElement>('.fleet-btn-sell');
+        let sellConfirmTimer: number | null = null;
+        const refundAmount = Math.floor((item.model?.basePrice ?? 12000000) * item.cars * 0.5);
+        const normalSellText = `売却 (¥${refundAmount.toLocaleString()})`;
+
         sellBtn?.addEventListener('click', (e) => {
           e.stopPropagation();
-          this.onSellFleetTrain(item.id);
+          if (!sellBtn) return;
+
+          if (sellBtn.classList.contains('confirming')) {
+            // 2回目のクリック：確定実行
+            if (sellConfirmTimer) {
+              window.clearTimeout(sellConfirmTimer);
+              sellConfirmTimer = null;
+            }
+            sellBtn.classList.remove('confirming');
+            sellBtn.disabled = true;
+            sellBtn.textContent = '売却処理中...';
+            this.onSellFleetTrain(item.id);
+          } else {
+            // 他のカードで確認中になっているボタンがあればリセット
+            this.fleetList.querySelectorAll<HTMLButtonElement>('.fleet-btn-sell.confirming').forEach((btn) => {
+              btn.classList.remove('confirming');
+              const origText = btn.dataset.origText;
+              if (origText) btn.textContent = origText;
+            });
+
+            // 1回目のクリック：確認状態へ遷移
+            sellBtn.classList.add('confirming');
+            sellBtn.dataset.origText = normalSellText;
+            sellBtn.textContent = isDeployed
+              ? `撤去＆売却する？ (¥${refundAmount.toLocaleString()})`
+              : `本当に売却？ (¥${refundAmount.toLocaleString()})`;
+
+            sellConfirmTimer = window.setTimeout(() => {
+              if (sellBtn && sellBtn.classList.contains('confirming')) {
+                sellBtn.classList.remove('confirming');
+                sellBtn.textContent = normalSellText;
+              }
+              sellConfirmTimer = null;
+            }, 4000);
+          }
         });
 
         this.fleetList.appendChild(card);
@@ -1459,14 +1623,35 @@ export class UIManager {
   }
 
   public setCameraModeUI(mode: CameraMode) {
-    if (mode === 'cab') {
+    if (mode === 'cab' || mode === 'chase') {
       this.cabOverlay.classList.remove('hidden');
-      if (this.camViewText) this.camViewText.textContent = '前面展望';
+      if (this.camViewText) {
+        this.camViewText.textContent = mode === 'cab' ? '前面展望' : '追従視点';
+      }
+      if (this.cabHudTitle) {
+        this.cabHudTitle.textContent = mode === 'cab' ? '前面展望モード（Cab）' : '列車追従カメラ（Chase）';
+      }
       this.camViewBtn.classList.add('active');
+
+      // 車窓・追従視点時: HUDに集中させるため、周囲の建設・管理UIを非表示
+      this.buildToolbar?.classList.add('hidden');
+      this.floorSlicerEl?.classList.add('hidden');
+      this.sideControlsDock?.classList.add('hidden');
+      this.minimapContainer?.classList.add('hidden');
+      this.closeInspector();
+      this.closeSubmenu();
+      this.rotationHint.classList.add('hidden');
+      this.stationLengthSelector.classList.add('hidden');
     } else {
       this.cabOverlay.classList.add('hidden');
       if (this.camViewText) this.camViewText.textContent = '自由視点';
       this.camViewBtn.classList.remove('active');
+
+      // 通常視点復帰時はUIを再表示
+      this.buildToolbar?.classList.remove('hidden');
+      this.floorSlicerEl?.classList.remove('hidden');
+      this.sideControlsDock?.classList.remove('hidden');
+      this.minimapContainer?.classList.remove('hidden');
     }
   }
 
@@ -1550,6 +1735,7 @@ export class UIManager {
    */
   public closeInspector() {
     this.inspectorPanel.classList.add('hidden');
+    this.inspectorPanel.classList.remove('minimized');
     this.inspectedTileCoords = null;
     this.inspectedTrainId = null;
     if (this.inspectRenameRow) {
@@ -1584,7 +1770,14 @@ export class UIManager {
       cargoContainers?: number;
     } | null
   ) {
+    // ツールが select 以外の状態でインスペクターが開かれた場合は自動で select に戻す（排他制御）
+    if (this.activeTool !== 'select') {
+      this.selectTool('select');
+    }
     this.closeSubmenu();
+    this.rotationHint.classList.add('hidden');
+    this.stationLengthSelector.classList.add('hidden');
+    this.inspectorPanel.classList.remove('minimized');
     this.inspectorPanel.classList.remove('hidden');
     this.inspectedTileCoords = { x: tile.x, z: tile.z, layer: (tile.layer ?? 1) as GridLayer };
     this.inspectedTrainId = null;
@@ -1806,7 +1999,14 @@ export class UIManager {
    * ① ⑤ 列車（編成）詳細情報・収支・撤去インスペクター表示
    */
   public showTrainInspector(train: TrainInstance) {
+    // ツールが select 以外の状態でインスペクターが開かれた場合は自動で select に戻す（排他制御）
+    if (this.activeTool !== 'select') {
+      this.selectTool('select');
+    }
     this.closeSubmenu();
+    this.rotationHint.classList.add('hidden');
+    this.stationLengthSelector.classList.add('hidden');
+    this.inspectorPanel.classList.remove('minimized');
     this.inspectorPanel.classList.remove('hidden');
     this.inspectedTrainId = train.id;
     this.inspectedTileCoords = null;
@@ -1837,9 +2037,15 @@ export class UIManager {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
+      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載（回送中）';
+      const runTiles = train.cargoTraveledTiles ?? 0;
+      const estRevenue = cargoLoad > 0 ? Math.round(Math.max(1, runTiles) * cargoLoad * 4200) : 0;
       this.inspectFinancialBox.innerHTML = `
-        <div class="fin-title">貨物列車 財務・運行状況</div>
+        <div class="fin-title">貨物列車 運行・財務状況</div>
         <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 (${cargoRate}%)</span></div>
+        <div class="fin-row"><span class="fin-label">積込拠点:</span><span class="fin-val">${pickupLoc}</span></div>
+        <div class="fin-row"><span class="fin-label">輸送走行マス数:</span><span class="fin-val">${runTiles}マス</span></div>
+        <div class="fin-row"><span class="fin-label">全量納品見込売上:</span><span class="fin-val positive">約 ¥${estRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計貨物取扱量:</span><span class="fin-val">${(train.totalPassengers ?? 0).toLocaleString()}個</span></div>
         <div class="fin-row"><span class="fin-label">累計貨物運賃収入:</span><span class="fin-val positive">+¥${train.totalRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計運行維持費:</span><span class="fin-val negative">-¥${train.totalCost.toLocaleString()}</span></div>
@@ -1859,6 +2065,26 @@ export class UIManager {
     }
 
     this.inspectActions.innerHTML = '';
+
+    // 1. 追従カメラ（Chase）ボタン
+    const chaseBtn = document.createElement('button');
+    chaseBtn.className = 'switch-toggle-btn train-chase-btn';
+    chaseBtn.innerHTML = '🎥 追従カメラ';
+    chaseBtn.addEventListener('click', () => {
+      this.onChaseTrainRequested?.(train.id);
+    });
+    this.inspectActions.appendChild(chaseBtn);
+
+    // 2. 前面展望（Cab）ボタン
+    const cabBtn = document.createElement('button');
+    cabBtn.className = 'switch-toggle-btn train-cab-btn';
+    cabBtn.innerHTML = '🚊 前面展望';
+    cabBtn.addEventListener('click', () => {
+      this.onCabTrainRequested?.(train.id);
+    });
+    this.inspectActions.appendChild(cabBtn);
+
+    // 3. 列車撤去ボタン
     const removeBtn = document.createElement('button');
     removeBtn.className = 'switch-toggle-btn train-remove-btn';
     removeBtn.textContent = '列車を撤去';
@@ -1981,9 +2207,15 @@ export class UIManager {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
+      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載（回送中）';
+      const runTiles = train.cargoTraveledTiles ?? 0;
+      const estRevenue = cargoLoad > 0 ? Math.round(Math.max(1, runTiles) * cargoLoad * 4200) : 0;
       this.inspectFinancialBox.innerHTML = `
-        <div class="fin-title">貨物列車 財務・運行状況</div>
+        <div class="fin-title">貨物列車 運行・財務状況</div>
         <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 (${cargoRate}%)</span></div>
+        <div class="fin-row"><span class="fin-label">積込拠点:</span><span class="fin-val">${pickupLoc}</span></div>
+        <div class="fin-row"><span class="fin-label">輸送走行マス数:</span><span class="fin-val">${runTiles}マス</span></div>
+        <div class="fin-row"><span class="fin-label">全量納品見込売上:</span><span class="fin-val positive">約 ¥${estRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計貨物取扱量:</span><span class="fin-val">${(train.totalPassengers ?? 0).toLocaleString()}個</span></div>
         <div class="fin-row"><span class="fin-label">累計貨物運賃収入:</span><span class="fin-val positive">+¥${train.totalRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計運行維持費:</span><span class="fin-val negative">-¥${train.totalCost.toLocaleString()}</span></div>
@@ -2004,19 +2236,565 @@ export class UIManager {
   }
 
   public updateFinancialReport(rep: FinancialReportData) {
-    document.getElementById('rep-fare-income')!.textContent = '¥' + rep.fareIncome.toLocaleString();
-    document.getElementById('rep-land-value')!.textContent = '¥' + rep.landValue.toLocaleString();
-    document.getElementById('rep-construction-cost')!.textContent = '-¥' + rep.constructionCost.toLocaleString();
-    document.getElementById('rep-maintenance-cost')!.textContent = '-¥' + rep.maintenanceCost.toLocaleString();
+    const fareElem = document.getElementById('rep-fare-income');
+    if (fareElem) fareElem.textContent = '¥' + rep.fareIncome.toLocaleString();
+    const cargoElem = document.getElementById('rep-cargo-income');
+    if (cargoElem) cargoElem.textContent = '¥' + (rep.cargoIncome ?? 0).toLocaleString();
+    const landElem = document.getElementById('rep-land-value');
+    if (landElem) landElem.textContent = '¥' + rep.landValue.toLocaleString();
+    const constElem = document.getElementById('rep-construction-cost');
+    if (constElem) constElem.textContent = '-¥' + rep.constructionCost.toLocaleString();
+    const maintElem = document.getElementById('rep-maintenance-cost');
+    if (maintElem) maintElem.textContent = '-¥' + rep.maintenanceCost.toLocaleString();
 
-    const netElem = document.getElementById('rep-net-profit')!;
-    netElem.textContent = (rep.netProfit >= 0 ? '+' : '') + '¥' + rep.netProfit.toLocaleString();
-    netElem.className = rep.netProfit >= 0 ? 'positive' : 'negative';
+    const netElem = document.getElementById('rep-net-profit');
+    if (netElem) {
+      netElem.textContent = (rep.netProfit >= 0 ? '+' : '') + '¥' + rep.netProfit.toLocaleString();
+      netElem.className = rep.netProfit >= 0 ? 'positive' : 'negative';
+    }
 
-    document.getElementById('rep-total-pop')!.textContent = rep.totalPopulation.toLocaleString() + '人';
-    document.getElementById('rep-track-length')!.textContent = rep.trackLength + ' km';
-    document.getElementById('rep-train-count')!.textContent = rep.trainCount + ' 編成';
-    document.getElementById('rep-station-count')!.textContent = rep.stationCount + ' 駅';
+    const popElem = document.getElementById('rep-total-pop');
+    if (popElem) popElem.textContent = rep.totalPopulation.toLocaleString() + '人';
+    const trackElem = document.getElementById('rep-track-length');
+    if (trackElem) trackElem.textContent = rep.trackLength + ' km';
+    const trainElem = document.getElementById('rep-train-count');
+    if (trainElem) trainElem.textContent = rep.trainCount + ' 編成';
+    const stationElem = document.getElementById('rep-station-count');
+    if (stationElem) stationElem.textContent = rep.stationCount + ' 駅';
+  }
+
+  /**
+   * 財務・決算報告モーダルを開き、最新データを取得・反映
+   */
+  public openFinancialReportModal(): void {
+    this.reportModal.classList.remove('hidden');
+
+    if (this.getFinancialReportData) {
+      this.updateFinancialReport(this.getFinancialReportData());
+    }
+
+    // モーダル表示後のDOMレイアウト確定に合わせてチャートを描画
+    requestAnimationFrame(() => {
+      this.renderActiveReportTab();
+    });
+  }
+
+  /**
+   * 財務モーダルのタブ切り替え（今期決算 / 月次推移 / 年次推移）
+   */
+  public switchReportTab(tab: 'current' | 'monthly' | 'yearly'): void {
+    this.activeReportTab = tab;
+
+    this.reportTabBtns.forEach(btn => {
+      if (btn.dataset.tab === tab) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    });
+
+    if (this.reportTabCurrent) {
+      if (tab === 'current') {
+        this.reportTabCurrent.classList.remove('hidden');
+        this.reportTabCurrent.classList.add('active');
+      } else {
+        this.reportTabCurrent.classList.add('hidden');
+        this.reportTabCurrent.classList.remove('active');
+      }
+    }
+
+    if (this.reportTabMonthly) {
+      if (tab === 'monthly') {
+        this.reportTabMonthly.classList.remove('hidden');
+        this.reportTabMonthly.classList.add('active');
+      } else {
+        this.reportTabMonthly.classList.add('hidden');
+        this.reportTabMonthly.classList.remove('active');
+      }
+    }
+
+    if (this.reportTabYearly) {
+      if (tab === 'yearly') {
+        this.reportTabYearly.classList.remove('hidden');
+        this.reportTabYearly.classList.add('active');
+      } else {
+        this.reportTabYearly.classList.add('hidden');
+        this.reportTabYearly.classList.remove('active');
+      }
+    }
+
+    // 表示ペインのサイズ確定後にチャートを描画
+    requestAnimationFrame(() => {
+      this.renderActiveReportTab();
+    });
+  }
+
+  /**
+   * アクティブなタブに応じたチャート＆テーブル描画
+   */
+  public renderActiveReportTab(): void {
+    if (!this.getEconomy) return;
+    const eco = this.getEconomy();
+
+    if (this.activeReportTab === 'monthly') {
+      const monthly = eco.getMonthlyHistory();
+      if (this.monthlyChartCanvas && this.monthlyChartTooltip) {
+        this.renderFinancialChart(this.monthlyChartCanvas, this.monthlyChartTooltip, monthly, false);
+      }
+      if (this.monthlyHistoryTbody) {
+        this.renderFinancialHistoryTable(this.monthlyHistoryTbody, monthly, false);
+      }
+    } else if (this.activeReportTab === 'yearly') {
+      const yearly = eco.getYearlyHistory();
+      if (this.yearlyChartCanvas && this.yearlyChartTooltip) {
+        this.renderFinancialChart(this.yearlyChartCanvas, this.yearlyChartTooltip, yearly, true);
+      }
+      if (this.yearlyHistoryTbody) {
+        this.renderFinancialHistoryTable(this.yearlyHistoryTbody, yearly, true);
+      }
+    }
+  }
+
+  /**
+   * 財務チャートのホバー・タップ・ツールチップのイベント設定
+   */
+  private initFinancialChartInteractions(): void {
+    const setupCanvas = (
+      canvas: HTMLCanvasElement | null,
+      tooltip: HTMLElement | null,
+      isYearly: boolean
+    ) => {
+      if (!canvas || !tooltip) return;
+
+      const handleMove = (clientX: number, clientY: number) => {
+        if (!this.getEconomy) return;
+        const history = isYearly ? this.getEconomy().getYearlyHistory() : this.getEconomy().getMonthlyHistory();
+        if (history.length === 0) {
+          tooltip.classList.add('hidden');
+          return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = clientX - rect.left;
+        const mouseY = clientY - rect.top;
+
+        const padLeft = 70;
+        const padRight = 60;
+        const chartW = rect.width - padLeft - padRight;
+        if (chartW <= 0) return;
+
+        // 最寄りのデータ点インデックスを探索
+        let closestIdx = 0;
+        let minDiff = Infinity;
+        for (let i = 0; i < history.length; i++) {
+          const x = history.length === 1 ? padLeft + chartW / 2 : padLeft + (i / (history.length - 1)) * chartW;
+          const diff = Math.abs(mouseX - x);
+          if (diff < minDiff) {
+            minDiff = diff;
+            closestIdx = i;
+          }
+        }
+
+        const d = history[closestIdx];
+        if (!d) return;
+
+        // ガイド線付きでチャートを更新
+        this.renderFinancialChart(canvas, tooltip, history, isYearly);
+        this.renderChartCursor(canvas, closestIdx, history);
+
+        // ツールチップHTML生成
+        const title = isYearly ? `${d.year}年度 決算` : `${d.year}年${d.month}月`;
+        const netColor = d.netProfit >= 0 ? '#38bdf8' : '#ef4444';
+        const netSign = d.netProfit >= 0 ? '+' : '';
+
+        const cIncome = d.cargoIncome ?? 0;
+        tooltip.innerHTML = `
+          <div class="tooltip-title" style="font-weight:700; border-bottom:1px solid rgba(255,255,255,0.15); padding-bottom:4px; margin-bottom:6px;">${title}</div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#10b981;"><span>旅客運賃:</span><span>¥${d.fareIncome.toLocaleString()}</span></div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#f59e0b;"><span>貨物運賃:</span><span>¥${cIncome.toLocaleString()}</span></div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#ef4444;"><span>維持管理費:</span><span>-¥${d.maintenanceCost.toLocaleString()}</span></div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#f87171;"><span>建設投資費:</span><span>-¥${d.constructionCost.toLocaleString()}</span></div>
+          ${d.taxAmount !== undefined && d.taxAmount > 0 ? `<div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#f87171;"><span>納税額:</span><span>-¥${d.taxAmount.toLocaleString()}</span></div>` : ''}
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:${netColor}; font-weight:700; margin-top:2px; border-top:1px dashed rgba(255,255,255,0.1); padding-top:2px;">
+            <span>純利益:</span><span>${netSign}¥${d.netProfit.toLocaleString()}</span>
+          </div>
+          <div class="tooltip-divider" style="height:1px; background:rgba(255,255,255,0.1); margin:4px 0;"></div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#c084fc;"><span>総人口:</span><span>${d.population.toLocaleString()}人</span></div>
+          <div class="tooltip-row" style="display:flex; justify-content:space-between; gap:12px; color:#94a3b8; font-size:10px;"><span>路線規模:</span><span>${d.trackLength}km / ${d.stationCount}駅 / ${d.trainCount}編成</span></div>
+        `;
+
+        tooltip.classList.remove('hidden');
+
+        // ツールチップ位置決め（Canvas領域内からはみ出さないよう調整）
+        let tipX = mouseX + 14;
+        let tipY = mouseY - 10;
+        const tipW = tooltip.offsetWidth || 190;
+        const tipH = tooltip.offsetHeight || 150;
+
+        if (tipX + tipW > rect.width) {
+          tipX = mouseX - tipW - 14;
+        }
+        if (tipY + tipH > rect.height) {
+          tipY = rect.height - tipH - 6;
+        }
+        if (tipY < 6) tipY = 6;
+
+        tooltip.style.left = `${Math.max(6, tipX)}px`;
+        tooltip.style.top = `${tipY}px`;
+      };
+
+      const handleLeave = () => {
+        tooltip.classList.add('hidden');
+        if (!this.getEconomy) return;
+        const history = isYearly ? this.getEconomy().getYearlyHistory() : this.getEconomy().getMonthlyHistory();
+        this.renderFinancialChart(canvas, tooltip, history, isYearly);
+      };
+
+      canvas.addEventListener('mousemove', (e) => handleMove(e.clientX, e.clientY));
+      canvas.addEventListener('mouseleave', handleLeave);
+
+      canvas.addEventListener('touchmove', (e) => {
+        if (e.touches.length > 0) {
+          handleMove(e.touches[0].clientX, e.touches[0].clientY);
+        }
+      }, { passive: true });
+      canvas.addEventListener('touchend', handleLeave);
+    };
+
+    setupCanvas(this.monthlyChartCanvas, this.monthlyChartTooltip, false);
+    setupCanvas(this.yearlyChartCanvas, this.yearlyChartTooltip, true);
+  }
+
+  /**
+   * ゼロ依存 Canvas 2D API による財務・経営推移チャートの描画
+   */
+  private renderFinancialChart(
+    canvas: HTMLCanvasElement,
+    _tooltipEl: HTMLElement,
+    history: FinancialSnapshot[],
+    isYearly: boolean
+  ): void {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // HiDPI解像度対応
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const width = rect.width > 0 ? rect.width : 680;
+    const height = rect.height > 0 ? rect.height : 250;
+
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    if (history.length === 0) {
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const msg = isYearly
+        ? '年次決算データがまだありません（毎年3月31日 決算時に自動記録されます）'
+        : '月次推移データがまだありません（毎月末の集計時に自動記録されます）';
+      ctx.fillText(msg, width / 2, height / 2);
+      ctx.restore();
+      return;
+    }
+
+    // チャート表示領域マージン
+    const padLeft = 70;
+    const padRight = 60;
+    const padTop = 25;
+    const padBottom = 35;
+    const chartW = width - padLeft - padRight;
+    const chartH = height - padTop - padBottom;
+
+    if (chartW <= 0 || chartH <= 0) {
+      ctx.restore();
+      return;
+    }
+
+    // 1. 金額レンジおよび人口レンジの計算
+    let minFin = 0;
+    let maxFin = 0;
+    let maxPop = 0;
+
+    for (const item of history) {
+      const cInc = item.cargoIncome ?? 0;
+      minFin = Math.min(minFin, item.fareIncome, cInc, item.maintenanceCost, item.netProfit);
+      maxFin = Math.max(maxFin, item.fareIncome, cInc, item.maintenanceCost, item.netProfit);
+      maxPop = Math.max(maxPop, item.population);
+    }
+
+    // 0ラインが必ず含まれるようにマージンを設定
+    if (maxFin === 0 && minFin === 0) {
+      maxFin = 1000000;
+      minFin = -500000;
+    } else {
+      const range = maxFin - minFin;
+      const margin = Math.max(range * 0.12, 100000);
+      maxFin += margin;
+      if (minFin < 0) {
+        minFin -= margin;
+      }
+    }
+
+    if (maxPop <= 0) {
+      maxPop = 100;
+    } else {
+      maxPop = Math.ceil(maxPop * 1.25);
+    }
+
+    // 座標計算関数
+    const getYFin = (val: number): number => {
+      const ratio = (val - minFin) / (maxFin - minFin);
+      return padTop + chartH - ratio * chartH;
+    };
+
+    const getYPop = (pop: number): number => {
+      const ratio = pop / maxPop;
+      return padTop + chartH - ratio * chartH;
+    };
+
+    const getX = (idx: number): number => {
+      if (history.length === 1) return padLeft + chartW / 2;
+      return padLeft + (idx / (history.length - 1)) * chartW;
+    };
+
+    // 2. 背景水平グリッド線および軸ラベル
+    const yTicks = 5;
+    for (let i = 0; i <= yTicks; i++) {
+      const val = minFin + ((maxFin - minFin) * i) / yTicks;
+      const y = getYFin(val);
+
+      // グリッド線
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
+      ctx.lineWidth = 1;
+      ctx.moveTo(padLeft, y);
+      ctx.lineTo(padLeft + chartW, y);
+      ctx.stroke();
+
+      // 金額ラベル（左Y軸）
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(this.formatMoneyShort(val), padLeft - 8, y);
+
+      // 人口ラベル（右Y軸）
+      const popVal = Math.round((maxPop * i) / yTicks);
+      ctx.fillStyle = '#c084fc';
+      ctx.textAlign = 'left';
+      ctx.fillText(this.formatPopShort(popVal), padLeft + chartW + 8, y);
+    }
+
+    // 3. ゼロライン基準線
+    if (minFin <= 0 && maxFin >= 0) {
+      const y0 = getYFin(0);
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.lineWidth = 1.5;
+      ctx.moveTo(padLeft, y0);
+      ctx.lineTo(padLeft + chartW, y0);
+      ctx.stroke();
+    }
+
+    // 4. X軸目盛りラベル（年月・年度）
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+
+    const maxLabels = Math.min(history.length, width < 500 ? 6 : 12);
+    const step = Math.ceil(history.length / maxLabels);
+
+    for (let i = 0; i < history.length; i++) {
+      if (i % step === 0 || i === history.length - 1) {
+        const x = getX(i);
+        const item = history[i];
+        const label = isYearly
+          ? `${item.year}年度`
+          : `${item.year.toString().slice(-2)}/${item.month < 10 ? '0' + item.month : item.month}`;
+        ctx.fillText(label, x, padTop + chartH + 8);
+      }
+    }
+
+    // 5. 各データ系列の折れ線描画
+    const drawSeries = (
+      color: string,
+      lineWidth: number,
+      dash: number[],
+      valGetter: (d: FinancialSnapshot) => number,
+      yCalc: (v: number) => number,
+      pointRadius: number
+    ) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.setLineDash(dash);
+
+      for (let i = 0; i < history.length; i++) {
+        const x = getX(i);
+        const y = yCalc(valGetter(history[i]));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // データ点マーカー
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      for (let i = 0; i < history.length; i++) {
+        const x = getX(i);
+        const y = yCalc(valGetter(history[i]));
+        ctx.beginPath();
+        ctx.arc(x, y, pointRadius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#0f172a';
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    // 人口（紫破線・右軸）
+    drawSeries('#a855f7', 2, [4, 4], d => d.population, getYPop, 3);
+    // 旅客運賃（緑実線）
+    drawSeries('#10b981', 2.5, [], d => d.fareIncome, getYFin, 3.5);
+    // 貨物運賃（アンバー実線）
+    drawSeries('#f59e0b', 2, [], d => d.cargoIncome ?? 0, getYFin, 3);
+    // 維持管理費（赤実線）
+    drawSeries('#ef4444', 2.5, [], d => d.maintenanceCost, getYFin, 3.5);
+    // 純利益（青実線）
+    drawSeries('#38bdf8', 2.5, [], d => d.netProfit, getYFin, 3.5);
+
+    ctx.restore();
+  }
+
+  /**
+   * チャートホバー時の垂直カーソル線描画
+   */
+  private renderChartCursor(
+    canvas: HTMLCanvasElement,
+    highlightIdx: number,
+    history: FinancialSnapshot[]
+  ): void {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const width = rect.width > 0 ? rect.width : 680;
+    const height = rect.height > 0 ? rect.height : 250;
+
+    const padLeft = 70;
+    const padRight = 60;
+    const padTop = 25;
+    const padBottom = 35;
+    const chartW = width - padLeft - padRight;
+    const chartH = height - padTop - padBottom;
+
+    const getX = (idx: number): number => {
+      if (history.length === 1) return padLeft + chartW / 2;
+      return padLeft + (idx / (history.length - 1)) * chartW;
+    };
+
+    const x = getX(highlightIdx);
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.moveTo(x, padTop);
+    ctx.lineTo(x, padTop + chartH);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  /**
+   * 財務履歴テーブルの動的生成
+   */
+  private renderFinancialHistoryTable(
+    tbody: HTMLElement,
+    history: FinancialSnapshot[],
+    isYearly: boolean
+  ): void {
+    tbody.innerHTML = '';
+
+    if (history.length === 0) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td colspan="8" class="empty-cell">履歴データがまだありません</td>`;
+      tbody.appendChild(tr);
+      return;
+    }
+
+    // 最新月/年度が上に来るよう降順に反転
+    const reversed = [...history].reverse();
+
+    for (const snap of reversed) {
+      const tr = document.createElement('tr');
+      const netClass = snap.netProfit >= 0 ? 'val-pos' : 'val-neg';
+      const netSign = snap.netProfit >= 0 ? '+' : '';
+      const cIncome = snap.cargoIncome ?? 0;
+
+      if (isYearly) {
+        tr.innerHTML = `
+          <td><strong>${snap.year}年度</strong></td>
+          <td class="val-num val-pos">¥${snap.fareIncome.toLocaleString()}</td>
+          <td class="val-num" style="color:#fbbf24;">¥${cIncome.toLocaleString()}</td>
+          <td class="val-num val-neg">-¥${snap.maintenanceCost.toLocaleString()}</td>
+          <td class="val-num val-neg">-¥${snap.constructionCost.toLocaleString()}</td>
+          <td class="val-num val-neg">${snap.taxAmount !== undefined && snap.taxAmount > 0 ? `-¥${snap.taxAmount.toLocaleString()}` : '¥0'}</td>
+          <td class="val-num ${netClass}"><strong>${netSign}¥${snap.netProfit.toLocaleString()}</strong></td>
+          <td class="val-num">${snap.population.toLocaleString()}人</td>
+        `;
+      } else {
+        tr.innerHTML = `
+          <td><strong>${snap.year}年${snap.month}月</strong></td>
+          <td class="val-num val-pos">¥${snap.fareIncome.toLocaleString()}</td>
+          <td class="val-num" style="color:#fbbf24;">¥${cIncome.toLocaleString()}</td>
+          <td class="val-num val-neg">-¥${snap.maintenanceCost.toLocaleString()}</td>
+          <td class="val-num val-neg">-¥${snap.constructionCost.toLocaleString()}</td>
+          <td class="val-num ${netClass}"><strong>${netSign}¥${snap.netProfit.toLocaleString()}</strong></td>
+          <td class="val-num">${snap.population.toLocaleString()}人</td>
+          <td class="val-num">${snap.trackLength}km / ${snap.stationCount}駅 / ${snap.trainCount}編成</td>
+        `;
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  /**
+   * 金額の短縮フォーマット（万・億表記）
+   */
+  private formatMoneyShort(val: number): string {
+    const sign = val < 0 ? '-' : '';
+    const abs = Math.abs(val);
+    if (abs >= 100000000) {
+      return `${sign}¥${(abs / 100000000).toFixed(1)}億`;
+    }
+    if (abs >= 10000) {
+      return `${sign}¥${Math.round(abs / 10000)}万`;
+    }
+    return `${sign}¥${Math.round(abs).toLocaleString()}`;
+  }
+
+  /**
+   * 人口の短縮フォーマット
+   */
+  private formatPopShort(val: number): string {
+    if (val >= 10000) {
+      return `${(val / 10000).toFixed(1)}万人`;
+    }
+    return `${val.toLocaleString()}人`;
   }
 
   /**
@@ -2346,4 +3124,27 @@ export class UIManager {
       }
     }
   }
+
+  /**
+   * Undoボタンの有効/無効状態を更新する
+   */
+  public updateUndoButton(canUndo: boolean): void {
+    if (!this.undoBtn) return;
+    this.undoBtn.disabled = !canUndo;
+    if (canUndo) {
+      this.undoBtn.classList.remove('disabled');
+    } else {
+      this.undoBtn.classList.add('disabled');
+    }
+  }
+
+  /**
+   * Undoボタンクリック時のコールバックを設定する
+   */
+  public setUndoHandler(handler: () => void): void {
+    if (this.undoBtn) {
+      this.undoBtn.addEventListener('click', () => handler());
+    }
+  }
 }
+

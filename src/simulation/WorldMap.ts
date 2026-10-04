@@ -5,6 +5,7 @@ import { Grid3D, layerToHeight } from '../core/Grid3D';
 import { StationManager, StationSaveData } from '../core/StationManager';
 import { disposeHierarchy } from '../graphics/materials';
 import { InstancedMeshManager } from '../graphics/InstancedMeshManager';
+import { RenderBucketRegistry } from '../graphics/RenderBucketRegistry';
 
 export type TileType =
   | 'empty'
@@ -68,28 +69,15 @@ export interface TileData {
   // ① 駅舎ホームの配置方向 ('right': 線路進行右側 / 'left': 線路進行左側)
   stationPlatformSide?: 'left' | 'right';
 
-  // ⑤ 駅の詳細情報・収支・有効長設定
-  stationName?: string;
-  dailyPassengers?: number;
-  previousDayPassengers?: number;
-  twoDaysAgoPassengers?: number;
-  dailyLoadedCargo?: number;
-  dailyUnloadedCargo?: number;
-  previousDayLoadedCargo?: number;
-  previousDayUnloadedCargo?: number;
-  totalPassengers?: number;
-  totalRevenue?: number;
-  stationMaintenance?: number;
-  stationNetProfit?: number;
-  stationTargetLength?: number;
+  // ⑤ 駅・ホーム参照ポインタ（StationManager を正本とする）
+  stationGroupId?: string; // StationData.id に対応
+  stationPlatformId?: string; // PlatformData.id に対応
+  stationPart?: 'single' | 'start' | 'mid' | 'end'; // 3Dメッシュ形状用
+  stationName?: string; // 看板・UI用キャッシュ名称
+  stationSchedule?: StationSchedule; // ダイヤ設定
+
   passengerAccumulator?: number;
 
-  // ⑤ 駅グループ識別子（複数マス駅を単一駅として扱う）
-  stationGroupId?: string;
-  stationPart?: 'single' | 'start' | 'mid' | 'end';
-
-  // ① 駅ダイヤ設定（24時間タイムラインバー方式: 停車、待避、通過、折り返し）
-  stationSchedule?: StationSchedule;
 
   // ① 分岐器ダイヤ設定（24時間タイムラインバー方式: 直進、分岐、交互切替）
   switchSchedule?: SwitchSchedule;
@@ -161,6 +149,52 @@ export interface StationSchedule {
   // ⑤ 折り返し・分割設定（既存機能の互換維持）
   reverseDelayMinutes?: number; 
   splitConfig?: SplitConfig;
+}
+
+/** 路線・系統単位で再利用可能なダイヤ設定テンプレート */
+export interface RouteScheduleTemplate {
+  templateId: string;
+  templateName: string;
+  color: string;
+  schedule: StationSchedule;
+}
+
+/**
+ * 運行系統テンプレート用のプリセット識別カラーパレット
+ */
+export const ROUTE_COLORS: string[] = [
+  '#38bdf8', // シアン (本線普通)
+  '#f59e0b', // アンバー (快速)
+  '#ef4444', // レッド (特急)
+  '#10b981', // エメラルド (支線・環状線)
+  '#8b5cf6', // パープル (空港アクセス)
+  '#ec4899', // ピンク (観光列車)
+  '#06b6d4', // ターコイズ
+  '#84cc16'  // ライム
+];
+
+/**
+ * StationSchedule の完全なディープコピーを生成するヘルパー
+ * （配列や子オブジェクトの参照を完全に切り離し、他駅やテンプレートへの予期せぬ変更伝播を防止）
+ */
+export function cloneStationSchedule(src: StationSchedule): StationSchedule {
+  return {
+    departures: [...(src.departures || [])],
+    timeZones: (src.timeZones || []).map(tz => ({ ...tz })),
+    reverseDepartures: src.reverseDepartures ? [...src.reverseDepartures] : [],
+    splitDepartures: src.splitDepartures ? [...src.splitDepartures] : [],
+    reverseDelayMinutes: src.reverseDelayMinutes,
+    splitConfig: src.splitConfig
+      ? {
+          enabled: src.splitConfig.enabled,
+          frontCars: src.splitConfig.frontCars,
+          rearCars: src.splitConfig.rearCars,
+          frontDeparture: { ...src.splitConfig.frontDeparture },
+          rearDeparture: { ...src.splitConfig.rearDeparture },
+          rearReverses: src.splitConfig.rearReverses
+        }
+      : undefined
+  };
 }
 
 /**
@@ -239,6 +273,88 @@ export function createDefaultSwitchSchedule(): SwitchSchedule {
     rules: [],
     slots: new Array(144).fill('straight'),
     hourlyDirections: new Array(24).fill('straight')
+  };
+}
+
+/**
+ * SwitchSchedule の完全なディープコピーを生成するヘルパー
+ */
+export function cloneSwitchSchedule(src: SwitchSchedule): SwitchSchedule {
+  return {
+    mode: src.mode,
+    defaultState: src.defaultState,
+    rules: (src.rules || []).map(r => ({ ...r })),
+    slots: src.slots ? [...src.slots] : undefined,
+    hourlyDirections: src.hourlyDirections ? [...src.hourlyDirections] : undefined
+  };
+}
+
+/**
+ * Undo復元用のタイルスナップショットデータ構造（メッシュ以外の完全なタイル状態）
+ */
+export interface TileDataSnapshot {
+  x: number;
+  z: number;
+  layer: GridLayer;
+  type: TileType;
+  rotation: number;
+  level: number;
+  stationPassengers?: number;
+  landValue?: number;
+  curveDir?: CurveDirection;
+  switchState?: SwitchState;
+  slopeReversed?: boolean;
+  slopePart?: number;
+  groupOrigin?: { x: number; z: number };
+  crossingRole?: 0 | 1 | 2 | 3;
+  crossingState?: CrossingState;
+  crossingRoadAxis?: number;
+  switchBranchSide?: 'left' | 'right';
+  stationPlatformSide?: 'left' | 'right';
+  stationGroupId?: string;
+  stationPlatformId?: string;
+  stationPart?: 'single' | 'start' | 'mid' | 'end';
+  stationName?: string;
+  stationSchedule?: StationSchedule;
+  switchSchedule?: SwitchSchedule;
+  isCargoYard?: boolean;
+  cargoContainers?: number;
+  elevationOffset?: number;
+}
+
+/**
+ * TileData のディープコピースナップショットを生成するヘルパー
+ */
+export function cloneTileSnapshot(tile: TileData | undefined | null): TileDataSnapshot | null {
+  if (!tile || tile.type === 'empty') return null;
+  return {
+    x: tile.x,
+    z: tile.z,
+    layer: (tile.layer ?? 1) as GridLayer,
+    type: tile.type,
+    rotation: tile.rotation,
+    level: tile.level,
+    stationPassengers: tile.stationPassengers,
+    landValue: tile.landValue,
+    curveDir: tile.curveDir,
+    switchState: tile.switchState,
+    slopeReversed: tile.slopeReversed,
+    slopePart: tile.slopePart,
+    groupOrigin: tile.groupOrigin ? { ...tile.groupOrigin } : undefined,
+    crossingRole: tile.crossingRole,
+    crossingState: tile.crossingState,
+    crossingRoadAxis: tile.crossingRoadAxis,
+    switchBranchSide: tile.switchBranchSide,
+    stationPlatformSide: tile.stationPlatformSide,
+    stationGroupId: tile.stationGroupId,
+    stationPlatformId: tile.stationPlatformId,
+    stationPart: tile.stationPart,
+    stationName: tile.stationName,
+    stationSchedule: tile.stationSchedule ? cloneStationSchedule(tile.stationSchedule) : undefined,
+    switchSchedule: tile.switchSchedule ? cloneSwitchSchedule(tile.switchSchedule) : undefined,
+    isCargoYard: tile.isCargoYard,
+    cargoContainers: tile.cargoContainers,
+    elevationOffset: tile.elevationOffset
   };
 }
 
@@ -591,10 +707,20 @@ export class WorldMap {
   public grid3D: Grid3D<TileData> = new Grid3D();
   public activeLayer: GridLayer = 1; // 現在編集・フォーカス中の階層 (-2..5)
   public stationManager: StationManager = new StationManager();
-  private scene: THREE.Scene;
   public instancedMeshManager: InstancedMeshManager;
+  /** 静的タイルメッシュの「チャンク×階層」バケット管理（視錐台・階層スライスカリング） */
+  public renderBuckets: RenderBucketRegistry;
   private elevationProvider: ((x: number, z: number) => number) | null = null;
   public gridManagerRef: { isWaterAtGroundLevel: (x: number, z: number) => boolean; getCell: (x: number, y: GridLayer, z: number) => any } | null = null;
+
+  /** マップ変更検知ダーティフラグとシリアライズキャッシュ */
+  public isDirty: boolean = true;
+  private cachedSerializedData: string | null = null;
+
+  public markDirty(): void {
+    this.isDirty = true;
+    this.cachedSerializedData = null;
+  }
   public groundHoleHandler: {
     add: (x: number, z: number, rotation: number) => void;
     remove: (x: number, z: number) => void;
@@ -602,8 +728,9 @@ export class WorldMap {
   } | null = null;
 
   constructor(scene: THREE.Scene, gridSize: number = 64) {
-    this.scene = scene;
+    // タイルメッシュは RenderBucketRegistry / InstancedMeshManager 経由でシーンへ登録する
     this.instancedMeshManager = new InstancedMeshManager(scene);
+    this.renderBuckets = new RenderBucketRegistry(scene);
     this.gridSize = gridSize;
     WorldMap.GRID_SIZE = gridSize;
     this.initializeGrid();
@@ -613,9 +740,6 @@ export class WorldMap {
     this.gridSize = size;
     WorldMap.GRID_SIZE = size;
     this.clearAll();
-    this.tiles.clear();
-    this.grid3D.clear();
-    this.initializeGrid();
   }
 
   public setActiveLayer(layer: GridLayer): void {
@@ -634,25 +758,30 @@ export class WorldMap {
     return `${x},${z}`;
   }
 
+  /**
+   * タイルメッシュを「チャンク×階層」バケットへ登録し、タイルに紐付ける
+   * （シーン直下に数万個を並べると、カリング判定・行列更新が毎フレーム全件走査されるため）
+   */
+  private attachTileMesh(tile: TileData, mesh: THREE.Group): void {
+    this.renderBuckets.add(mesh, tile.x, tile.z, (tile.layer ?? 1) as GridLayer);
+    tile.mesh = mesh;
+  }
+
+  /**
+   * 外部（main.ts 等）で再生成したタイルメッシュを登録するための公開ラッパー
+   */
+  public attachExternalTileMesh(tile: TileData, mesh: THREE.Group): void {
+    this.attachTileMesh(tile, mesh);
+  }
+
+  /**
+   * 疎（Sparse）マップ構造の初期化
+   * 大マップ（512x512, 1024x1024）でのヒープメモリ枯渇を防ぐため、
+   * 空タイルオブジェクトを事前生成せず、マップコレクションをクリアして境界サイズのみを定義する
+   */
   private initializeGrid() {
-    const half = Math.floor(this.gridSize / 2);
-    for (let x = -half; x < half; x++) {
-      for (let z = -half; z < half; z++) {
-        const defaultTile: TileData = {
-          x,
-          z,
-          layer: 1,
-          type: 'empty',
-          rotation: 0,
-          level: 1,
-          stationPassengers: 0,
-          landValue: 100,
-          switchState: 'straight'
-        };
-        this.tiles.set(this.getKey(x, z), defaultTile);
-        this.grid3D.set(x, 1, z, defaultTile);
-      }
-    }
+    this.tiles.clear();
+    this.grid3D.clear();
   }
 
   /**
@@ -725,17 +854,22 @@ export class WorldMap {
    */
   public getAllTiles(filterLayer?: GridLayer): TileData[] {
     const result: TileData[] = [];
+    // 地上1Fの登録済み座標（互換用Mapとの重複除外を O(1) で判定するための集合）
+    const seenGroundKeys = new Set<string>();
     for (const tile of this.grid3D.values()) {
       if (tile.type !== 'empty') {
         if (filterLayer === undefined || tile.layer === filterLayer) {
           result.push(tile);
+          if ((tile.layer ?? 1) === 1) {
+            seenGroundKeys.add(this.getKey(tile.x, tile.z));
+          }
         }
       }
     }
-    // 互換性のため地上1Fのタイルもマージ
+    // 互換性のため地上1Fのタイルもマージ（旧実装の result.some() による O(N^2) 走査を廃止）
     if (filterLayer === undefined || filterLayer === 1) {
       for (const tile of this.tiles.values()) {
-        if (tile.type !== 'empty' && !result.some(t => t.x === tile.x && t.z === tile.z && (t.layer ?? 1) === 1)) {
+        if (tile.type !== 'empty' && !seenGroundKeys.has(this.getKey(tile.x, tile.z))) {
           result.push(tile);
         }
       }
@@ -795,7 +929,11 @@ export class WorldMap {
     const tile = this.getOrCreateTile(x, z, layer);
     if (!tile) return false;
 
-    const tileType: TileType = isElevated ? 'rail_curve_elevated' : 'rail_curve_ground';
+    const cell = this.gridManagerRef?.getCell(x, 1, z);
+    const surfaceElevation = cell ? cell.elevation : 1;
+    const effectiveElevated = isElevated && (layer > surfaceElevation);
+
+    const tileType: TileType = effectiveElevated ? 'rail_curve_elevated' : 'rail_curve_ground';
 
     this.removeTileMesh(tile);
 
@@ -808,12 +946,12 @@ export class WorldMap {
     tile.elevationOffset = elevY;
 
     const isTunnel = this.isTunnelSection(x, z, layer);
-    const mesh = ModelFactory.createCurveTrackSegment(curveDir, isElevated, baseH, isTunnel);
+    const mesh = ModelFactory.createCurveTrackSegment(curveDir, effectiveElevated, baseH, isTunnel);
     mesh.position.set(x * WorldMap.TILE_SIZE, baseH + elevY, z * WorldMap.TILE_SIZE);
     mesh.visible = (layer === this.activeLayer);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
 
+    this.markDirty();
     return true;
   }
 
@@ -851,6 +989,7 @@ export class WorldMap {
       }
     });
 
+    this.markDirty();
     return true;
   }
 
@@ -874,8 +1013,7 @@ export class WorldMap {
     mesh.position.set(tile.x * WorldMap.TILE_SIZE, baseH, tile.z * WorldMap.TILE_SIZE);
     const upperLayer: GridLayer = (layer + 1) as GridLayer;
     mesh.visible = (layer === this.activeLayer || upperLayer === this.activeLayer);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
   }
 
   /**
@@ -914,6 +1052,7 @@ export class WorldMap {
       }
     });
 
+    this.markDirty();
     return true;
   }
 
@@ -934,8 +1073,7 @@ export class WorldMap {
 
     const mesh = ModelFactory.createUndergroundSlopeTrackPart(rotation, reversed, part);
     mesh.position.set(tile.x * WorldMap.TILE_SIZE, elevY, tile.z * WorldMap.TILE_SIZE);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
   }
 
   /**
@@ -948,8 +1086,12 @@ export class WorldMap {
     const tile = this.getOrCreateTile(x, z, layer);
     if (!tile) return false;
 
+    const cell = this.gridManagerRef?.getCell(x, 1, z);
+    const surfaceElevation = cell ? cell.elevation : 1;
+    const effectiveElevated = isElevated && (layer > surfaceElevation);
+
     const forward = ((rotation % 4) + 4) % 4;
-    const switchType: TileType = isElevated ? 'point_switch_elevated' : 'point_switch_ground';
+    const switchType: TileType = effectiveElevated ? 'point_switch_elevated' : 'point_switch_ground';
 
     this.removeTileMesh(tile);
 
@@ -966,12 +1108,12 @@ export class WorldMap {
     tile.elevationOffset = elevY;
 
     const isTunnel = this.isTunnelSection(x, z, layer);
-    const mesh = ModelFactory.createSwitchHub(forward, false, isElevated, branchSide, baseH, isTunnel);
+    const mesh = ModelFactory.createSwitchHub(forward, false, effectiveElevated, branchSide, baseH, isTunnel);
     mesh.position.set(x * WorldMap.TILE_SIZE, baseH + elevY, z * WorldMap.TILE_SIZE);
     mesh.visible = (layer === this.activeLayer);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
 
+    this.markDirty();
     return true;
   }
 
@@ -999,9 +1141,12 @@ export class WorldMap {
       if (!waterCheck.allowed) return false;
     }
 
-    const crossingType: TileType = isElevated ? 'scissors_crossing_elevated' : 'scissors_crossing_ground';
-
     positions.forEach((p, role) => {
+      const cell = this.gridManagerRef?.getCell(p.x, 1, p.z);
+      const surfaceElevation = cell ? cell.elevation : 1;
+      const effectiveElevated = isElevated && (layer > surfaceElevation);
+      const crossingType: TileType = effectiveElevated ? 'scissors_crossing_elevated' : 'scissors_crossing_ground';
+
       const t = this.getOrCreateTile(p.x, p.z, layer)!;
       this.removeTileMesh(t);
       t.type = crossingType;
@@ -1017,14 +1162,14 @@ export class WorldMap {
       t.elevationOffset = elevY;
 
       const isTunnel = this.isTunnelSection(p.x, p.z, layer);
-      const mesh = ModelFactory.createScissorsCrossingTile(along, role as 0 | 1 | 2 | 3, isElevated, 'straight', baseH, isTunnel);
+      const mesh = ModelFactory.createScissorsCrossingTile(along, role as 0 | 1 | 2 | 3, effectiveElevated, 'straight', baseH, isTunnel);
       mesh.position.set(p.x * WorldMap.TILE_SIZE, baseH + elevY, p.z * WorldMap.TILE_SIZE);
       mesh.visible = (layer === this.activeLayer);
-      this.scene.add(mesh);
-      t.mesh = mesh;
+      this.attachTileMesh(t, mesh);
       t.switchSchedule = t.switchSchedule || createDefaultSwitchSchedule();
     });
 
+    this.markDirty();
     return true;
   }
 
@@ -1084,10 +1229,10 @@ export class WorldMap {
       const mesh = ModelFactory.createScissorsCrossingTile(along, role as 0 | 1 | 2 | 3, isElevated, targetState, baseH, isTunnel);
       mesh.position.set(p.x * WorldMap.TILE_SIZE, baseH + elevY, p.z * WorldMap.TILE_SIZE);
       mesh.visible = (tileLayer === this.activeLayer);
-      this.scene.add(mesh);
-      t.mesh = mesh;
+      this.attachTileMesh(t, mesh);
     });
 
+    this.markDirty();
     return true;
   }
 
@@ -1123,9 +1268,9 @@ export class WorldMap {
     const mesh = ModelFactory.createSwitchHub(tile.rotation, tile.switchState === 'diverge', isElevated, branchSide, baseH, isTunnel);
     mesh.position.set(tile.x * WorldMap.TILE_SIZE, baseH + elevY, tile.z * WorldMap.TILE_SIZE);
     mesh.visible = (tileLayer === this.activeLayer);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
 
+    this.markDirty();
     return tile.switchState;
   }
 
@@ -1203,17 +1348,43 @@ export class WorldMap {
 
     const mesh = ModelFactory.createLevelCrossing(railAxis);
     mesh.position.set(x * WorldMap.TILE_SIZE, elevY, z * WorldMap.TILE_SIZE);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
+    this.markDirty();
     return true;
+  }
+
+  /**
+   * 踏切の明示的配置
+   */
+  public placeLevelCrossing(x: number, z: number, railAxis: number = 0, layer: GridLayer = 1): boolean {
+    if (layer !== 1) return false;
+    const normRailAxis = ((railAxis % 2) + 2) % 2;
+    const normRoadAxis = 1 - normRailAxis;
+    return this.applyLevelCrossing(x, z, normRailAxis, normRoadAxis, 1, layer);
   }
 
   /**
    * Set single tile
    */
   public setTile(x: number, z: number, type: TileType, rotation: number = 0, level: number = 1, platformSide: 'left' | 'right' = 'right', layer: GridLayer = this.activeLayer): boolean {
+    // 疎マップ構造対応: 更地化の場合はオブジェクトを新規生成せず、既存タイルがあれば完全削除する
+    if (type === 'empty') {
+      const existing = this.getTile(x, z, layer);
+      if (existing) {
+        this.resetTileData(existing);
+      }
+      return true;
+    }
+
     const tile = this.getOrCreateTile(x, z, layer);
     if (!tile) return false;
+
+    // 踏切の直接指定配置（地上1F）
+    if (type === 'level_crossing') {
+      const railAxis = ((rotation % 2) + 2) % 2;
+      const roadAxis = 1 - railAxis;
+      return this.applyLevelCrossing(x, z, railAxis, roadAxis, level, layer);
+    }
 
     // ⑤ 道路とレールが直交して重なる場合は踏切にする（地上1F限定）
     if (layer === 1) {
@@ -1234,9 +1405,9 @@ export class WorldMap {
     tile.crossingRoadAxis = undefined;
     if (!WorldMap.isStationTileType(type)) {
       tile.stationGroupId = undefined;
+      tile.stationPlatformId = undefined;
       tile.stationPart = undefined;
       tile.stationPlatformSide = undefined;
-      tile.stationTargetLength = undefined;
       tile.isCargoYard = undefined;
     }
 
@@ -1246,7 +1417,6 @@ export class WorldMap {
     if (WorldMap.isStationTileType(type)) {
       tile.stationPlatformSide = platformSide;
       tile.stationSchedule = tile.stationSchedule || (type.startsWith('cargo_station') ? createDefaultCargoStationSchedule() : createDefaultStationSchedule());
-      tile.stationTargetLength = tile.stationTargetLength || 1;
       if (type.startsWith('station')) {
         stationPart = this.detectStationPart(x, z, tile.rotation, type, layer);
       }
@@ -1260,6 +1430,16 @@ export class WorldMap {
     const hasPole = Math.abs(x + z) % 3 === 0;
     const isTunnel = this.isTunnelSection(x, z, layer);
     const baseH = layerToHeight(layer);
+
+    const cell = this.gridManagerRef?.getCell(x, 1, z);
+    const surfaceElevation = cell ? cell.elevation : 1;
+
+    // 山岳区間（isTunnel）では高架線路指定であっても山を貫くトンネル線路として扱い、
+    // 山岳地表面（layer === surfaceElevation）では高架ではなく地表線路として扱う
+    if (type === 'rail_elevated' && (isTunnel || layer === surfaceElevation)) {
+      type = 'rail_ground';
+      tile.type = 'rail_ground';
+    }
 
     const elevY = (type === 'rail_ground')
       ? this.getTrackElevationOffset(x, z, layer)
@@ -1325,9 +1505,6 @@ export class WorldMap {
         case 'road':
           mesh = ModelFactory.createRoad(tile.rotation);
           break;
-        case 'level_crossing':
-          mesh = ModelFactory.createLevelCrossing(tile.rotation);
-          break;
         case 'residence':
           mesh = ModelFactory.createHouse(Math.abs(x * 7 + z * 13) % 4, level);
           break;
@@ -1345,8 +1522,7 @@ export class WorldMap {
       if (mesh) {
         mesh.position.set(x * WorldMap.TILE_SIZE, baseH + elevY, z * WorldMap.TILE_SIZE);
         mesh.visible = (layer === this.activeLayer);
-        this.scene.add(mesh);
-        tile.mesh = mesh;
+        this.attachTileMesh(tile, mesh);
       }
     }
 
@@ -1357,12 +1533,6 @@ export class WorldMap {
           ? `第${this.getStationCount() + 1}貨物駅`
           : (type === 'signal_yard' ? `第${this.getStationCount() + 1}信号場` : `第${this.getStationCount() + 1}駅`);
       }
-      tile.dailyPassengers = tile.dailyPassengers ?? 0;
-      tile.totalPassengers = tile.totalPassengers ?? 0;
-      tile.totalRevenue = tile.totalRevenue ?? 0;
-      tile.stationMaintenance = type.startsWith('cargo_station') ? 25000 : (type === 'signal_yard' ? 10000 : 50000);
-      tile.stationNetProfit = (tile.totalRevenue ?? 0) - (tile.stationMaintenance ?? 0);
-      tile.stationTargetLength = this.getStationRunLength(x, z);
 
       if (type.startsWith('station')) {
         this.updateNeighborStations(x, z, tile.rotation, type);
@@ -1381,6 +1551,7 @@ export class WorldMap {
     // 直上階層の高架線路の橋脚を着地状況に合わせて更新
     this.updateUpperElevatedPiers(x, z, layer);
 
+    this.markDirty();
     return true;
   }
 
@@ -1402,7 +1573,7 @@ export class WorldMap {
     };
 
     if (tile.mesh) {
-      this.scene.remove(tile.mesh);
+      tile.mesh.removeFromParent();
       disposeHierarchy(tile.mesh);
     }
     const baseH = layerToHeight(layer);
@@ -1410,8 +1581,7 @@ export class WorldMap {
     const newMesh = ModelFactory.createTunnelTrack(tile.rotation, portalEnds);
     newMesh.position.set(x * WorldMap.TILE_SIZE, baseH + elevY, z * WorldMap.TILE_SIZE);
     newMesh.visible = (layer === this.activeLayer);
-    this.scene.add(newMesh);
-    tile.mesh = newMesh;
+    this.attachTileMesh(tile, newMesh);
   }
 
   /**
@@ -1437,10 +1607,17 @@ export class WorldMap {
     const tile = this.getTile(x, z, layer);
     if (!tile || !WorldMap.isStationTileType(tile.type)) return 0;
 
+    const targetLayer = (tile.layer ?? layer) as GridLayer;
+    // StationManager からホーム有効長を直接参照（正本優先）
+    const platInfo = this.stationManager.getPlatformByTile(x, z, targetLayer);
+    if (platInfo && platInfo.platform.length > 0) {
+      return platInfo.platform.length;
+    }
+
+    // 未登録の場合のみ従来のタイル探索にフォールバック
     const rot = tile.rotation;
     const stepX = rot === 1 ? 1 : 0;
     const stepZ = rot === 1 ? 0 : 1;
-    const targetLayer = (tile.layer ?? layer) as GridLayer;
 
     const isSameStation = (t: TileData | undefined): boolean => {
       if (!t) return false;
@@ -1682,9 +1859,9 @@ export class WorldMap {
         const t = this.getTile(nx, nz, stLayer);
         if (t) {
           t.stationName = stationName;
-          t.stationTargetLength = targetLength;
           t.stationSchedule = startTile.stationSchedule;
           t.stationGroupId = startTile.stationGroupId;
+          t.stationPlatformId = startTile.stationPlatformId;
           t.stationPlatformSide = startTile.stationPlatformSide ?? 'right';
           if (isCargo) {
             t.isCargoYard = true;
@@ -1712,9 +1889,9 @@ export class WorldMap {
         const t = this.getTile(nx, nz, stLayer);
         if (t) {
           t.stationGroupId = undefined;
+          t.stationPlatformId = undefined;
           t.stationPart = undefined;
           t.stationPlatformSide = undefined;
-          t.stationTargetLength = undefined;
           t.isCargoYard = undefined;
         }
       }
@@ -1726,9 +1903,9 @@ export class WorldMap {
       const nz = startTile.z + stepZ * i;
       const t = this.getTile(nx, nz, stLayer);
       if (t && t.type === stationType) {
-        t.stationTargetLength = targetLength;
         t.stationSchedule = startTile.stationSchedule;
         t.stationGroupId = startTile.stationGroupId;
+        t.stationPlatformId = startTile.stationPlatformId;
         if (isCargo) {
           t.isCargoYard = true;
         }
@@ -1751,8 +1928,7 @@ export class WorldMap {
             : ModelFactory.createStation(rot, isElevated, part, platformSide, t.stationName ?? '駅', baseH));
         mesh.position.set(nx * WorldMap.TILE_SIZE, baseH + elevY, nz * WorldMap.TILE_SIZE);
         mesh.visible = (tileLayer === this.activeLayer);
-        this.scene.add(mesh);
-        t.mesh = mesh;
+        this.attachTileMesh(t, mesh);
       }
     }
 
@@ -1774,10 +1950,17 @@ export class WorldMap {
         targetLength,
         newTiles
       );
+      for (const tCoord of newTiles) {
+        const t = this.getTile(tCoord.x, tCoord.z, tCoord.layer);
+        if (t) {
+          t.stationGroupId = platInfo.station.id;
+          t.stationPlatformId = platInfo.platform.id;
+        }
+      }
     } else {
       // 未登録の場合はホームとして新規登録
       const isSignalYard = stationType === 'signal_yard';
-      this.stationManager.registerPlatform({
+      const reg = this.stationManager.registerPlatform({
         tiles: newTiles,
         length: targetLength,
         trackAxis: rot,
@@ -1785,8 +1968,16 @@ export class WorldMap {
         isCargoStation: isCargo,
         customName: stationName
       });
+      for (const tCoord of newTiles) {
+        const t = this.getTile(tCoord.x, tCoord.z, tCoord.layer);
+        if (t) {
+          t.stationGroupId = reg.station.id;
+          t.stationPlatformId = reg.platform.id;
+        }
+      }
     }
 
+    this.markDirty();
     return true;
   }
 
@@ -1814,77 +2005,67 @@ export class WorldMap {
     isCargoYard?: boolean;
     cargoContainers?: number;
   } | null {
-    const startTile = this.getStationStartTile(x, z, layer);
-    if (!startTile) return null;
+    const tile = this.getTile(x, z, layer);
+    if (!tile || !WorldMap.isStationTileType(tile.type)) return null;
 
-    const rot = startTile.rotation;
-    const stationType = startTile.type;
-    const stepX = rot === 1 ? 1 : 0;
-    const stepZ = rot === 1 ? 0 : 1;
-    const stLayer = (startTile.layer ?? layer) as GridLayer;
+    const stLayer = (tile.layer ?? layer) as GridLayer;
+    const isYard = tile.type === 'signal_yard';
+    const isCargo = tile.type.startsWith('cargo_station') || !!tile.isCargoYard;
 
-    let length = 0;
-    let daily = 0;
-    let prevDaily = 0;
-    let twoDaysDaily = 0;
-    let totalPass = 0;
-    let totalRev = 0;
-    let loadedCargo = 0;
-    let unloadedCargo = 0;
-    let prevLoadedCargo = 0;
-    let prevUnloadedCargo = 0;
-
-    let curX = startTile.x, curZ = startTile.z;
-    while (true) {
-      const t = this.getTile(curX, curZ, stLayer);
-      if (t && t.type === stationType && t.rotation === rot) {
-        length++;
-        daily += t.dailyPassengers ?? 0;
-        prevDaily += t.previousDayPassengers ?? 0;
-        twoDaysDaily += t.twoDaysAgoPassengers ?? 0;
-        totalPass += t.totalPassengers ?? 0;
-        totalRev += t.totalRevenue ?? 0;
-        loadedCargo += t.dailyLoadedCargo ?? 0;
-        unloadedCargo += t.dailyUnloadedCargo ?? 0;
-        prevLoadedCargo += t.previousDayLoadedCargo ?? 0;
-        prevUnloadedCargo += t.previousDayUnloadedCargo ?? 0;
-        curX += stepX;
-        curZ += stepZ;
-      } else break;
+    // StationManager から所属駅とホームの正本データを直接取得（Single Source of Truth）
+    const platInfo = this.stationManager.getPlatformByTile(x, z, stLayer);
+    if (platInfo) {
+      const { station, platform } = platInfo;
+      return {
+        id: station.id,
+        name: station.name,
+        platformNumber: platform.platformNumber,
+        platformCount: station.platforms.length,
+        length: platform.length,
+        dailyPassengers: (isYard || isCargo) ? 0 : station.dailyPassengers,
+        previousDayPassengers: (isYard || isCargo) ? 0 : (station.previousDayPassengers ?? 0),
+        twoDaysAgoPassengers: (isYard || isCargo) ? 0 : (station.twoDaysAgoPassengers ?? 0),
+        dailyLoadedCargo: isCargo ? (station.dailyLoadedCargo ?? 0) : 0,
+        dailyUnloadedCargo: isCargo ? (station.dailyUnloadedCargo ?? 0) : 0,
+        previousDayLoadedCargo: isCargo ? (station.previousDayLoadedCargo ?? 0) : 0,
+        previousDayUnloadedCargo: isCargo ? (station.previousDayUnloadedCargo ?? 0) : 0,
+        totalPassengers: (isYard || isCargo) ? 0 : station.totalPassengers,
+        totalRevenue: station.totalRevenue,
+        maintenance: station.maintenance,
+        netProfit: station.netProfit,
+        isSignalYard: station.isSignalYard,
+        isCargoYard: isCargo,
+        cargoContainers: tile.cargoContainers ?? 0
+      };
     }
 
-    const isYard = stationType === 'signal_yard';
-    const isCargo = stationType.startsWith('cargo_station');
-    // StationManager から番線情報を取得
-    const platInfo = this.stationManager.getPlatformByTile(startTile.x, startTile.z, stLayer);
-    const baseMaint = isYard ? 20000 : (isCargo ? 50000 : 200000); // 信号場は月¥20,000、貨物駅は月¥50,000、通常駅ホームは月¥200,000 (StationManagerと完全同期)
-    const maintenance = platInfo ? platInfo.station.maintenance : (length * baseMaint);
-    const netProfit = totalRev - maintenance;
+    // 未登録時のフォールバック（初期化時等）
+    const length = this.getStationRunLength(x, z, stLayer) || 1;
+    const defaultMaint = isYard ? 20000 : (isCargo ? 50000 : 200000);
     const defaultName = isYard
       ? `第1信号場`
-      : (isCargo ? `貨物駅` : `駅 (${startTile.x}, ${startTile.z})`);
-    const stationName = platInfo?.station.name || startTile.stationName || defaultName;
+      : (isCargo ? `第1貨物駅` : `第1駅`);
 
     return {
-      id: platInfo?.station.id,
-      name: stationName,
-      platformNumber: platInfo?.platform.platformNumber ?? 1,
-      platformCount: platInfo?.station.platforms.length ?? 1,
+      id: tile.stationGroupId,
+      name: tile.stationName || defaultName,
+      platformNumber: 1,
+      platformCount: 1,
       length,
-      dailyPassengers: (isYard || isCargo) ? 0 : (platInfo?.station.dailyPassengers ?? daily),
-      previousDayPassengers: (isYard || isCargo) ? 0 : (platInfo?.station.previousDayPassengers ?? prevDaily),
-      twoDaysAgoPassengers: (isYard || isCargo) ? 0 : (platInfo?.station.twoDaysAgoPassengers ?? twoDaysDaily),
-      dailyLoadedCargo: isCargo ? (platInfo?.station.dailyLoadedCargo ?? loadedCargo) : 0,
-      dailyUnloadedCargo: isCargo ? (platInfo?.station.dailyUnloadedCargo ?? unloadedCargo) : 0,
-      previousDayLoadedCargo: isCargo ? (platInfo?.station.previousDayLoadedCargo ?? prevLoadedCargo) : 0,
-      previousDayUnloadedCargo: isCargo ? (platInfo?.station.previousDayUnloadedCargo ?? prevUnloadedCargo) : 0,
-      totalPassengers: (isYard || isCargo) ? 0 : totalPass,
-      totalRevenue: totalRev,
-      maintenance,
-      netProfit,
+      dailyPassengers: 0,
+      previousDayPassengers: 0,
+      twoDaysAgoPassengers: 0,
+      dailyLoadedCargo: 0,
+      dailyUnloadedCargo: 0,
+      previousDayLoadedCargo: 0,
+      previousDayUnloadedCargo: 0,
+      totalPassengers: 0,
+      totalRevenue: 0,
+      maintenance: defaultMaint,
+      netProfit: -defaultMaint,
       isSignalYard: isYard,
       isCargoYard: isCargo,
-      cargoContainers: startTile.cargoContainers ?? 0
+      cargoContainers: tile.cargoContainers ?? 0
     };
   }
 
@@ -1908,6 +2089,7 @@ export class WorldMap {
     for (const t of tiles) {
       t.cargoContainers = val;
     }
+    this.markDirty();
   }
 
   /**
@@ -1969,6 +2151,7 @@ export class WorldMap {
       }
     }
 
+    this.markDirty();
     return true;
   }
 
@@ -1982,7 +2165,8 @@ export class WorldMap {
         const tileLayer = (n.layer ?? layer) as GridLayer;
         const part = this.detectStationPart(n.x, n.z, n.rotation, n.type, tileLayer);
         n.stationPart = part;
-        this.scene.remove(n.mesh);
+        n.mesh.removeFromParent();
+        disposeHierarchy(n.mesh); // 旧メッシュのGPUリソース解放（VRAMリーク防止）
         const isElevated = n.type.includes('elevated');
         const baseH = layerToHeight(tileLayer);
         const elevY = (tileLayer === 1) ? this.getElevationOffset(n.x, n.z) : 0;
@@ -1990,8 +2174,7 @@ export class WorldMap {
         const newMesh = ModelFactory.createStation(n.rotation, isElevated, part, n.stationPlatformSide ?? 'right', n.stationName ?? '駅', baseH);
         newMesh.position.set(n.x * WorldMap.TILE_SIZE, baseH + elevY, n.z * WorldMap.TILE_SIZE);
         newMesh.visible = (tileLayer === this.activeLayer);
-        this.scene.add(newMesh);
-        n.mesh = newMesh;
+        this.attachTileMesh(n, newMesh);
       }
     });
   }
@@ -2006,7 +2189,8 @@ export class WorldMap {
 
     tile.switchState = state;
     if (tile.mesh) {
-      this.scene.remove(tile.mesh);
+      tile.mesh.removeFromParent();
+      disposeHierarchy(tile.mesh); // 旧メッシュのGPUリソース解放（VRAMリーク防止）
       tile.mesh = undefined;
     }
     const tileLayer = (tile.layer ?? layer) as GridLayer;
@@ -2019,8 +2203,8 @@ export class WorldMap {
     const mesh = ModelFactory.createSwitchHub(tile.rotation, tile.switchState === 'diverge', isElevated, branchSide, baseH, isTunnel);
     mesh.position.set(tile.x * WorldMap.TILE_SIZE, baseH + elevY, tile.z * WorldMap.TILE_SIZE);
     mesh.visible = (tileLayer === this.activeLayer);
-    this.scene.add(mesh);
-    tile.mesh = mesh;
+    this.attachTileMesh(tile, mesh);
+    this.markDirty();
   }
 
   /**
@@ -2092,12 +2276,6 @@ export class WorldMap {
       tile.stationPart = part;
       tile.stationPlatformSide = platformSide;
       tile.stationName = stationName;
-      tile.stationTargetLength = length;
-      tile.dailyPassengers = 0;
-      tile.totalPassengers = 0;
-      tile.totalRevenue = 0;
-      tile.stationMaintenance = isSignalYard ? 10000 * length : (isCargoStation ? 25000 * length : 50000 * length);
-      tile.stationNetProfit = 0;
       tile.stationSchedule = isCargoStation ? createDefaultCargoStationSchedule() : createDefaultStationSchedule();
       if (isCargoStation) {
         tile.isCargoYard = true;
@@ -2112,8 +2290,7 @@ export class WorldMap {
           : ModelFactory.createStation(rot, isElevated, part, platformSide, stationName, baseH));
       mesh.position.set(tx * WorldMap.TILE_SIZE, baseH + elevY, tz * WorldMap.TILE_SIZE);
       mesh.visible = (layer === this.activeLayer);
-      this.scene.add(mesh);
-      tile.mesh = mesh;
+      this.attachTileMesh(tile, mesh);
     }
 
     // StationManager にホーム（番線）として登録
@@ -2126,9 +2303,12 @@ export class WorldMap {
       customName: stationName
     });
 
+    // 発番された stationId と platformId を構成タイルの stationGroupId と stationPlatformId に確実に書き込む
     for (const tCoord of tiles) {
       const t = this.getTile(tCoord.x, tCoord.z, tCoord.layer);
       if (t) {
+        t.stationGroupId = reg.station.id;
+        t.stationPlatformId = reg.platform.id;
         t.stationName = reg.station.name;
         if (t.mesh && !isSignalYard) {
           ModelFactory.updateStationSign(t.mesh, reg.station.name);
@@ -2136,6 +2316,7 @@ export class WorldMap {
       }
     }
 
+    this.markDirty();
     return true;
   }
 
@@ -2149,7 +2330,7 @@ export class WorldMap {
     this.instancedMeshManager.removeTree(tileKey);
 
     if (tile.mesh) {
-      this.scene.remove(tile.mesh);
+      tile.mesh.removeFromParent();
       disposeHierarchy(tile.mesh);
       tile.mesh = undefined;
     }
@@ -2197,27 +2378,27 @@ export class WorldMap {
     tile.slopeReversed = undefined;
     tile.slopePart = undefined;
     tile.stationGroupId = undefined;
+    tile.stationPlatformId = undefined;
     tile.stationPart = undefined;
     tile.stationPlatformSide = undefined;
     tile.stationSchedule = undefined;
     tile.switchSchedule = undefined;
     tile.stationName = undefined;
-    tile.dailyPassengers = undefined;
-    tile.totalPassengers = undefined;
-    tile.totalRevenue = undefined;
-    tile.stationMaintenance = undefined;
-    tile.stationNetProfit = undefined;
-    tile.stationTargetLength = undefined;
     tile.cargoContainers = undefined;
     tile.isCargoYard = undefined;
 
-    // 地上1F以外のタイルは撤去時にGrid3Dから削除してメモリ解放
-    if (tile.layer !== undefined && tile.layer !== 1) {
-      this.grid3D.delete(tile.x, tile.layer, tile.z);
+    // 疎マップ構造化: 地上1Fを含め、全階層で empty オブジェクトを Map に残さず完全削除する
+    const layer = (tile.layer ?? 1) as GridLayer;
+    const tx = tile.x;
+    const tz = tile.z;
+    this.grid3D.delete(tx, layer, tz);
+    if (layer === 1) {
+      this.tiles.delete(this.getKey(tx, tz));
     }
 
     // 直上階層の高架線路の橋脚を再計算（下層が撤去されたため地上まで延長）
-    this.updateUpperElevatedPiers(tile.x, tile.z, (tile.layer ?? 1) as GridLayer);
+    this.updateUpperElevatedPiers(tx, tz, layer);
+    this.markDirty();
   }
 
   /**
@@ -2288,17 +2469,12 @@ export class WorldMap {
         st.slopeReversed = undefined;
         st.slopePart = undefined;
         st.stationGroupId = undefined;
+        st.stationPlatformId = undefined;
         st.stationPart = undefined;
         st.stationPlatformSide = undefined;
         st.stationSchedule = undefined;
         st.switchSchedule = undefined;
         st.stationName = undefined;
-        st.dailyPassengers = undefined;
-        st.totalPassengers = undefined;
-        st.totalRevenue = undefined;
-        st.stationMaintenance = undefined;
-        st.stationNetProfit = undefined;
-        st.stationTargetLength = undefined;
         st.cargoContainers = undefined;
         st.isCargoYard = undefined;
 
@@ -2314,8 +2490,7 @@ export class WorldMap {
             : ModelFactory.createGroundTrack(rot, false));
         trackMesh.position.set(sx * WorldMap.TILE_SIZE, baseH + elevY, sz * WorldMap.TILE_SIZE);
         trackMesh.visible = (stLayer === this.activeLayer);
-        this.scene.add(trackMesh);
-        st.mesh = trackMesh;
+        this.attachTileMesh(st, trackMesh);
 
         if (prevType.startsWith('station')) {
           this.updateNeighborStations(sx, sz, rot, prevType, stLayer);
@@ -2381,6 +2556,187 @@ export class WorldMap {
     return true;
   }
 
+  /**
+   * 指定座標のタイルのスナップショットを生成する
+   */
+  public createTileSnapshot(x: number, z: number, layer: GridLayer = this.activeLayer): TileDataSnapshot | null {
+    const tile = this.getTile(x, z, layer);
+    return cloneTileSnapshot(tile);
+  }
+
+  /**
+   * 撤去時に影響を受けるすべてのタイル一覧（駅ホーム全体、シーサス4マス、勾配4マス等）を取得する
+   */
+  public getDemolitionAffectedTiles(x: number, z: number, layer: GridLayer = this.activeLayer): TileData[] {
+    const tile = this.getTile(x, z, layer);
+    if (!tile || tile.type === 'empty') return [];
+
+    // 1. 駅・信号場・貨物駅（同一グループ全体）
+    if (tile.type.includes('station') || tile.type === 'signal_yard') {
+      const tiles: TileData[] = [];
+      if (tile.stationGroupId) {
+        const targetGroupId = tile.stationGroupId;
+        this.getAllTiles().forEach(t => {
+          if (t.stationGroupId === targetGroupId) {
+            tiles.push(t);
+          }
+        });
+      } else {
+        const startTile = this.getStationStartTile(x, z, layer);
+        if (startTile) {
+          const rot = startTile.rotation;
+          const stType = startTile.type;
+          const stepX = rot === 1 ? 1 : 0;
+          const stepZ = rot === 1 ? 0 : 1;
+          let curX = startTile.x, curZ = startTile.z;
+          while (true) {
+            const t = this.getTile(curX, curZ, layer);
+            if (t && t.type === stType && t.rotation === rot) {
+              tiles.push(t);
+              curX += stepX;
+              curZ += stepZ;
+            } else break;
+          }
+        } else {
+          tiles.push(tile);
+        }
+      }
+      return tiles.length > 0 ? tiles : [tile];
+    }
+
+    // 2. シーサスクロッシング（2×2グループの4マス）
+    if (tile.groupOrigin) {
+      const origin = this.getTile(tile.groupOrigin.x, tile.groupOrigin.z, layer);
+      if (origin && origin.crossingRole === 0) {
+        const along = origin.rotation === 1 ? 1 : 2;
+        const across = WorldMap.rotateCW(along);
+        const alongVec = WorldMap.DIRS[along];
+        const acrossVec = WorldMap.DIRS[across];
+        const coords = [
+          { x: origin.x, z: origin.z },
+          { x: origin.x + alongVec.x, z: origin.z + alongVec.z },
+          { x: origin.x + acrossVec.x, z: origin.z + acrossVec.z },
+          { x: origin.x + alongVec.x + acrossVec.x, z: origin.z + alongVec.z + acrossVec.z }
+        ];
+        const tiles: TileData[] = [];
+        for (const c of coords) {
+          const t = this.getTile(c.x, c.z, layer);
+          if (t) tiles.push(t);
+        }
+        return tiles.length > 0 ? tiles : [tile];
+      }
+    }
+
+    // 3. 勾配線路（4マス）
+    if (tile.type === 'rail_slope' || tile.type === 'rail_slope_underground') {
+      const rot = tile.rotation;
+      const rev = !!tile.slopeReversed;
+      const part = tile.slopePart ?? 0;
+      const axis: [number, number] = rot === 1 ? [1, 3] : [0, 2];
+      const [, stepIdx] = rev ? [axis[1], axis[0]] : [axis[0], axis[1]];
+      const stepDir = WorldMap.DIRS[stepIdx];
+      const originX = tile.x - stepDir.x * part;
+      const originZ = tile.z - stepDir.z * part;
+      const baseLayer = (tile.layer ?? 1) as GridLayer;
+      const tiles: TileData[] = [];
+      for (let i = 0; i < SLOPE_PARTS; i++) {
+        const sx = originX + stepDir.x * i;
+        const sz = originZ + stepDir.z * i;
+        const st = this.getTile(sx, sz, baseLayer);
+        if (st && st.type === tile.type) {
+          tiles.push(st);
+        }
+      }
+      return tiles.length > 0 ? tiles : [tile];
+    }
+
+    // 4. 通常タイル（1マス）
+    return [tile];
+  }
+
+  /**
+   * スナップショットからタイルを完全復元する
+   */
+  public restoreTileFromSnapshot(snap: TileDataSnapshot | null, x: number, z: number, layer: GridLayer = this.activeLayer): void {
+    if (!snap || snap.type === 'empty') {
+      this.setTile(x, z, 'empty', 0, 1, 'right', layer);
+      return;
+    }
+
+    const lyr = snap.layer ?? layer;
+    const isElevated = snap.type.includes('elevated') || lyr >= 2;
+
+    if (snap.type.startsWith('point_switch')) {
+      this.placeSwitch(snap.x, snap.z, snap.rotation, isElevated, snap.switchBranchSide || 'right', lyr);
+      if (snap.switchState === 'diverge') {
+        this.togglePointSwitch(snap.x, snap.z, lyr);
+      }
+      const swTile = this.getTile(snap.x, snap.z, lyr);
+      if (swTile && snap.switchSchedule) {
+        swTile.switchSchedule = cloneSwitchSchedule(snap.switchSchedule);
+      }
+    } else if (snap.type.startsWith('scissors_crossing')) {
+      if (snap.crossingRole === 0 && snap.groupOrigin && snap.groupOrigin.x === snap.x && snap.groupOrigin.z === snap.z) {
+        this.placeScissorsCrossing(snap.x, snap.z, snap.rotation, isElevated, lyr);
+        if (snap.crossingState) {
+          this.setCrossingState(snap.x, snap.z, snap.crossingState, lyr);
+        }
+        const crTile = this.getTile(snap.x, snap.z, lyr);
+        if (crTile && snap.switchSchedule) {
+          crTile.switchSchedule = cloneSwitchSchedule(snap.switchSchedule);
+        }
+      } else if (!snap.groupOrigin) {
+        this.setTile(snap.x, snap.z, snap.type, snap.rotation, snap.level, 'right', lyr);
+      }
+    } else if (snap.type.startsWith('rail_curve') && snap.curveDir !== undefined) {
+      this.placeCurve(snap.x, snap.z, snap.curveDir, isElevated, lyr);
+    } else if (snap.type === 'rail_slope') {
+      const tile = this.getOrCreateTile(snap.x, snap.z, lyr);
+      if (tile) {
+        this.applySlopeTile(tile, snap.rotation, !!snap.slopeReversed, snap.slopePart || 0, lyr);
+        if ((snap.slopePart || 0) === 3) {
+          const upperLayer: GridLayer = lyr === 1 ? 2 : ((lyr + 1) as GridLayer);
+          this.grid3D.set(snap.x, upperLayer, snap.z, tile);
+        }
+      }
+    } else if (snap.type === 'rail_slope_underground') {
+      const tile = this.getOrCreateTile(snap.x, snap.z, lyr);
+      if (tile) {
+        this.applyUndergroundSlopeTile(tile, snap.rotation, !!snap.slopeReversed, snap.slopePart || 0, lyr);
+        if ((snap.slopePart || 0) === 3) {
+          this.grid3D.set(snap.x, -1, snap.z, tile);
+        }
+        if ((snap.slopePart || 0) === 0 || (snap.slopePart || 0) === 1) {
+          this.groundHoleHandler?.add(snap.x, snap.z, snap.rotation);
+        }
+      }
+    } else if (snap.type === 'level_crossing') {
+      this.applyLevelCrossing(snap.x, snap.z, snap.rotation, snap.crossingRoadAxis ?? (1 - snap.rotation), snap.level, lyr);
+    } else if (snap.type.includes('station') || snap.type === 'signal_yard') {
+      this.setTile(snap.x, snap.z, snap.type, snap.rotation, snap.level, snap.stationPlatformSide || 'right', lyr);
+      const restored = this.getTile(snap.x, snap.z, lyr);
+      if (restored) {
+        if (snap.stationName) restored.stationName = snap.stationName;
+        if (snap.stationGroupId) restored.stationGroupId = snap.stationGroupId;
+        if (snap.stationPlatformId) restored.stationPlatformId = snap.stationPlatformId;
+        if (snap.stationPart) restored.stationPart = snap.stationPart;
+        if (snap.stationPlatformSide) restored.stationPlatformSide = snap.stationPlatformSide;
+        if (snap.stationSchedule) restored.stationSchedule = cloneStationSchedule(snap.stationSchedule);
+        if (snap.stationPassengers !== undefined) restored.stationPassengers = snap.stationPassengers;
+        if (snap.isCargoYard !== undefined) restored.isCargoYard = snap.isCargoYard;
+        if (snap.cargoContainers !== undefined) restored.cargoContainers = snap.cargoContainers;
+        if (restored.mesh && snap.stationName) {
+          ModelFactory.updateStationSign(restored.mesh, snap.stationName);
+        }
+      }
+    } else {
+      this.setTile(snap.x, snap.z, snap.type, snap.rotation, snap.level, 'right', lyr);
+    }
+
+    this.updateUpperElevatedPiers(snap.x, snap.z, lyr);
+    this.markDirty();
+  }
+
   public clearAll() {
     // 全階層のタイルメッシュを破棄
     const all = this.getAllTiles();
@@ -2389,6 +2745,7 @@ export class WorldMap {
       tile.landValue = 100;
     }
     this.instancedMeshManager.clearAll();
+    this.renderBuckets.clear(); // 空になったチャンク×階層バケットも破棄
     this.groundHoleHandler?.clear();
     this.stationManager.clear();
     this.tiles.clear();
@@ -2406,20 +2763,13 @@ export class WorldMap {
    */
   public resetDailyStationPassengers(): void {
     this.stationManager.resetDailyPassengers();
-    for (const tile of this.getAllTiles()) {
-      if (tile.type.includes('station') || tile.type === 'signal_yard') {
-        tile.twoDaysAgoPassengers = tile.previousDayPassengers ?? 0;
-        tile.previousDayPassengers = tile.dailyPassengers ?? 0;
-        tile.dailyPassengers = 0;
-        tile.previousDayLoadedCargo = tile.dailyLoadedCargo ?? 0;
-        tile.dailyLoadedCargo = 0;
-        tile.previousDayUnloadedCargo = tile.dailyUnloadedCargo ?? 0;
-        tile.dailyUnloadedCargo = 0;
-      }
-    }
   }
 
   public serialize(): string {
+    if (!this.isDirty && this.cachedSerializedData !== null) {
+      return this.cachedSerializedData;
+    }
+
     const nonEmpties: any[] = [];
     const allTiles = this.getAllTiles();
     allTiles.forEach(t => {
@@ -2444,7 +2794,7 @@ export class WorldMap {
           cargoContainers: t.cargoContainers,
           stationName: t.stationName,
           stationGroupId: t.stationGroupId,
-          stationTargetLength: t.stationTargetLength,
+          stationPlatformId: t.stationPlatformId,
           stationPart: t.stationPart,
           stationPlatformSide: t.stationPlatformSide,
           stationSchedule: t.stationSchedule,
@@ -2454,11 +2804,15 @@ export class WorldMap {
     });
 
     // 【駅の記憶喪失解消】v2 フォーマット: タイル一覧に加えて stationManager の全状態をシリアライズ
-    return JSON.stringify({
+    const serialized = JSON.stringify({
       version: 2,
       tiles: nonEmpties,
       stations: this.stationManager.serialize()
     });
+
+    this.cachedSerializedData = serialized;
+    this.isDirty = false;
+    return serialized;
   }
 
   public deserialize(jsonStr: string) {
@@ -2533,7 +2887,7 @@ export class WorldMap {
           if (restored) {
             if (item.stationName) restored.stationName = item.stationName;
             if (item.stationGroupId) restored.stationGroupId = item.stationGroupId;
-            if (item.stationTargetLength) restored.stationTargetLength = item.stationTargetLength;
+            if (item.stationPlatformId) restored.stationPlatformId = item.stationPlatformId;
             if (item.stationPart) restored.stationPart = item.stationPart;
             if (item.stationPlatformSide) restored.stationPlatformSide = item.stationPlatformSide;
             if (item.stationSchedule) restored.stationSchedule = item.stationSchedule;
@@ -2557,18 +2911,21 @@ export class WorldMap {
 
       // 【駅の記憶喪失解消】駅マネージャーの復元
       if (stationData) {
-        // v2 保存データから駅・番線構成・財務・乗降客数・固有IDを完全復元
+        // v2 保存データから駅・番線構成・財務・乗降客数・固有ID・タイルマッピングを完全復元
         this.stationManager.deserialize(stationData);
-        // 各駅・ホームの乗降客数・収支データを対応する全タイルに同期復元
+
+        // 各タイルの stationName, stationGroupId, stationPlatformId および看板メッシュを正本から同期
         for (const st of this.stationManager.getStations()) {
           for (const plat of st.platforms) {
-            for (const tCoord of plat.tiles) {
-              const tile = this.getTile(tCoord.x, tCoord.z, tCoord.layer);
-              if (tile) {
-                tile.dailyPassengers = plat.dailyPassengers;
-                tile.totalPassengers = plat.totalPassengers;
-                tile.totalRevenue = plat.totalRevenue;
-                tile.stationNetProfit = (plat.totalRevenue ?? 0) - (tile.stationMaintenance ?? 0);
+            for (const pt of plat.tiles) {
+              const t = this.getTile(pt.x, pt.z, pt.layer);
+              if (t) {
+                t.stationName = st.name;
+                t.stationGroupId = st.id;
+                t.stationPlatformId = plat.id;
+                if (t.mesh && !plat.isSignalYard) {
+                  ModelFactory.updateStationSign(t.mesh, st.name);
+                }
               }
             }
           }
@@ -2600,14 +2957,18 @@ export class WorldMap {
           const isSignalYard = first.type === 'signal_yard';
           const isCargo = first.type.startsWith('cargo_station') || !!first.isCargoYard;
           const trackAxis = first.rotation === 1 ? 1 : 0;
-          this.stationManager.registerPlatform({
+          const reg = this.stationManager.registerPlatform({
             tiles: groupTiles.map(gt => ({ x: gt.x, z: gt.z, layer: (gt.layer ?? 1) as GridLayer })),
-            length: first.stationTargetLength || groupTiles.length,
+            length: groupTiles.length,
             trackAxis,
             isSignalYard,
             isCargoStation: isCargo,
             customName: first.stationName
           });
+          for (const gt of groupTiles) {
+            gt.stationGroupId = reg.station.id;
+            gt.stationPlatformId = reg.platform.id;
+          }
         }
       }
     } catch (e) {

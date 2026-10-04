@@ -1,115 +1,252 @@
 import * as THREE from 'three';
 import { GameMaterials } from './materials';
+import { GridLayer } from '../core/types';
 
 /**
  * InstancedMeshManager
  * 大量オブジェクト（直線レール、高架レール、橋脚、架線柱、街路樹等）を
  * THREE.InstancedMesh に集約してドローコール（Draw Calls）を劇的に削減する。
  * スワップ＆ポップ方式（Swap & Pop）による O(1) の高速追加・削除および厳格なメモリ解放を実装。
+ *
+ * 【大規模発展時のパフォーマンス防壁】
+ * InstancedMesh を「種類 × 階層(GridLayer) × 空間リージョン(64×64マス)」単位に分割して保持する。
+ * - 階層スライサーで非表示にした階層の InstancedMesh を丸ごと描画対象外にできる
+ * - リージョンごとに静的な包囲球を設定し、カメラ外のリージョンを視錐台カリングで除外できる
  */
 
+/** インスタンス種別ごとの共有ジオメトリ・マテリアル定義 */
+interface InstanceArchetype {
+  geometry: THREE.BufferGeometry;
+  material: THREE.Material;
+  ghostMaterial: THREE.Material;
+}
+
+/** 種別×階層×リージョン単位の InstancedMesh バケット */
 interface ManagedInstancedLayer {
   mesh: THREE.InstancedMesh;
+  layerName: string;
   keyToIndex: Map<string, number>;
   indexToKey: Map<number, string>;
   count: number;
   maxCount: number;
+  floor: number;
 }
 
 export class InstancedMeshManager {
+  /** 空間リージョン1辺のマス数（大きすぎるとカリング効率低下、小さすぎるとドローコール増加） */
+  private static readonly REGION_TILES = 64;
+  /** マス1辺のワールド長 */
+  private static readonly TILE_SIZE = 2.0;
+  /** リージョン新規生成時の初期容量（不足時は倍々に拡張） */
+  private static readonly INITIAL_CAPACITY = 128;
+  /** 包囲球の高さ方向の範囲（5F高架〜地上までの橋脚を含む） */
+  private static readonly MIN_Y = -10;
+  private static readonly MAX_Y = 20;
+
   private scene: THREE.Scene;
   private container: THREE.Group = new THREE.Group();
 
-  // レイヤー管理
+  // 種別定義（共有ジオメトリ・マテリアル）
+  private archetypes: Map<string, InstanceArchetype> = new Map();
+
+  // バケット管理: キー = `${種別}|${階層}|${リージョンX},${リージョンZ}`
   private layers: Map<string, ManagedInstancedLayer> = new Map();
 
   // ジオメトリキャッシュ（共有してdispose時に一括解放）
   private sharedGeometries: THREE.BufferGeometry[] = [];
 
-  constructor(scene: THREE.Scene, initialCapacity: number = 4096) {
+  // 階層スライサーによる表示設定（'all' または各階層）
+  private currentDisplayLayer: GridLayer | 'all' = 'all';
+
+  // 一時計算用（GC削減）
+  private readonly tempMatrix = new THREE.Matrix4();
+
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.container.name = 'InstancedMeshContainer';
-    this.container.frustumCulled = false;
+    this.container.matrixAutoUpdate = false;
     this.scene.add(this.container);
 
-    this.initGeometriesAndLayers(initialCapacity);
+    this.initGeometriesAndLayers();
   }
 
   /**
    * ジオメトリ構築およびInstancedMeshレイヤーの初期化
    */
-  private initGeometriesAndLayers(capacity: number): void {
+  private initGeometriesAndLayers(): void {
     // 1. 直線地上レール (Ballast, Sleepers, Rails)
     // 1-a. バラスト
     const ballastGeo = new THREE.BoxGeometry(1.6, 0.16, 2.0);
     ballastGeo.translate(0, 0.08, 0);
-    this.createLayer('rail_ground_ballast', ballastGeo, GameMaterials.ballastMat, capacity);
+    this.createLayer('rail_ground_ballast', ballastGeo, GameMaterials.ballastMat);
 
     // 1-b. 枕木 (5本を単一ジオメトリにマージ)
     const sleeperGeo = this.createMergedSleepersGeometry(1.4, 0.08, 0.16, 0.18, 5);
-    this.createLayer('rail_ground_sleepers', sleeperGeo, GameMaterials.sleeperMat, capacity);
+    this.createLayer('rail_ground_sleepers', sleeperGeo, GameMaterials.sleeperMat);
 
     // 1-c. レール (左右2本マージ)
     const railGeo = this.createMergedRailsGeometry(0.06, 0.1, 2.0, 0.24, 0.45);
-    this.createLayer('rail_ground_rails', railGeo, GameMaterials.railMat, capacity);
+    this.createLayer('rail_ground_rails', railGeo, GameMaterials.railMat);
 
     // 2. 直線高架レール (Deck & Walls, Sleepers, Rails)
     // 2-a. 高架デッキと左右側壁
     const elevatedStructureGeo = this.createElevatedStructureGeometry();
-    this.createLayer('rail_elevated_structure', elevatedStructureGeo, GameMaterials.concreteMat, capacity);
+    this.createLayer('rail_elevated_structure', elevatedStructureGeo, GameMaterials.concreteMat);
 
     // 2-b. 高架枕木
     const elevatedSleeperGeo = this.createMergedSleepersGeometry(1.3, 0.06, 0.16, 0.38, 5);
-    this.createLayer('rail_elevated_sleepers', elevatedSleeperGeo, GameMaterials.sleeperMat, capacity);
+    this.createLayer('rail_elevated_sleepers', elevatedSleeperGeo, GameMaterials.sleeperMat);
 
     // 2-c. 高架レール
     const elevatedRailGeo = this.createMergedRailsGeometry(0.06, 0.1, 2.0, 0.44, 0.45);
-    this.createLayer('rail_elevated_rails', elevatedRailGeo, GameMaterials.railMat, capacity);
+    this.createLayer('rail_elevated_rails', elevatedRailGeo, GameMaterials.railMat);
 
     // 3. 標準橋脚 (Pier)
     const pierGeo = new THREE.BoxGeometry(0.8, 3.0, 0.8);
     pierGeo.translate(0, -1.5, 0);
-    this.createLayer('standard_pier', pierGeo, GameMaterials.concreteMat, capacity);
+    this.createLayer('standard_pier', pierGeo, GameMaterials.concreteMat);
 
     // 4. 架線柱 (Catenary Pole)
     const poleGeo = this.createCatenaryPoleGeometry();
-    this.createLayer('catenary_pole', poleGeo, GameMaterials.poleMat, capacity);
+    this.createLayer('catenary_pole', poleGeo, GameMaterials.poleMat);
 
     // 5. 街路樹 (Tree - Trunk & Foliage)
     const trunkGeo = new THREE.CylinderGeometry(0.08, 0.12, 0.8, 6);
     trunkGeo.translate(0, 0.4, 0);
-    this.createLayer('tree_trunk', trunkGeo, GameMaterials.woodTrunkMat, capacity);
+    this.createLayer('tree_trunk', trunkGeo, GameMaterials.woodTrunkMat);
 
     const foliageGeo = this.createTreeFoliageGeometry();
-    this.createLayer('tree_foliage', foliageGeo, GameMaterials.foliageMats[0], capacity);
+    this.createLayer('tree_foliage', foliageGeo, GameMaterials.foliageMats[0]);
   }
 
   /**
-   * 単一InstancedMeshレイヤーの生成
+   * インスタンス種別（共有ジオメトリ・マテリアル・ゴーストマテリアル）の登録
+   * 実際の InstancedMesh は、インスタンスが配置された階層×リージョンごとに遅延生成する
    */
   private createLayer(
     name: string,
     geometry: THREE.BufferGeometry,
-    material: THREE.Material,
-    capacity: number
+    material: THREE.Material
   ): void {
+    const ghostMaterial = material.clone();
+    ghostMaterial.transparent = true;
+    ghostMaterial.opacity = 0.28;
+    ghostMaterial.depthWrite = false;
     this.sharedGeometries.push(geometry);
-    const mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    this.archetypes.set(name, { geometry, material, ghostMaterial });
+  }
+
+  /**
+   * タイルキー（"x,z,layer"）から所属する階層・リージョンを算出
+   */
+  private static parseTileKey(tileKey: string): { floor: number; rx: number; rz: number } {
+    const parts = tileKey.split(',');
+    const x = parseInt(parts[0], 10) || 0;
+    const z = parseInt(parts[1], 10) || 0;
+    const floor = parts.length > 2 ? (parseInt(parts[2], 10) || 1) : 1;
+    const n = InstancedMeshManager.REGION_TILES;
+    return { floor, rx: Math.floor(x / n), rz: Math.floor(z / n) };
+  }
+
+  /**
+   * バケットキーの生成
+   */
+  private static bucketKey(name: string, tileKey: string): string {
+    const { floor, rx, rz } = InstancedMeshManager.parseTileKey(tileKey);
+    return `${name}|${floor}|${rx},${rz}`;
+  }
+
+  /**
+   * リージョン全体を包む静的な包囲球（インスタンス追加・削除のたびに再計算しないための固定値）
+   */
+  private static createRegionBoundingSphere(rx: number, rz: number): THREE.Sphere {
+    const n = InstancedMeshManager.REGION_TILES;
+    const ts = InstancedMeshManager.TILE_SIZE;
+    const box = new THREE.Box3(
+      new THREE.Vector3(rx * n * ts - ts, InstancedMeshManager.MIN_Y, rz * n * ts - ts),
+      new THREE.Vector3((rx + 1) * n * ts + ts, InstancedMeshManager.MAX_Y, (rz + 1) * n * ts + ts)
+    );
+    return box.getBoundingSphere(new THREE.Sphere());
+  }
+
+  /**
+   * InstancedMesh の生成（共通設定）
+   */
+  private createInstancedMesh(archetype: InstanceArchetype, capacity: number, boundingSphere: THREE.Sphere): THREE.InstancedMesh {
+    const mesh = new THREE.InstancedMesh(archetype.geometry, archetype.material, capacity);
     mesh.count = 0;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-    // インスタンスがワールド広域に分散するため、原点基準の視錐台カリングによる消失を完全防止
-    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    // リージョン単位の静的包囲球を与え、カメラ外のリージョンを視錐台カリングで除外する
+    mesh.boundingSphere = boundingSphere;
+    mesh.frustumCulled = true;
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    return mesh;
+  }
+
+  /**
+   * バケットの取得（存在しなければ create=true の場合のみ生成）
+   */
+  private getBucket(name: string, tileKey: string, create: boolean): ManagedInstancedLayer | undefined {
+    const key = InstancedMeshManager.bucketKey(name, tileKey);
+    let layer = this.layers.get(key);
+    if (layer || !create) return layer;
+
+    const archetype = this.archetypes.get(name);
+    if (!archetype) return undefined;
+
+    const { floor, rx, rz } = InstancedMeshManager.parseTileKey(tileKey);
+    const capacity = InstancedMeshManager.INITIAL_CAPACITY;
+    const mesh = this.createInstancedMesh(archetype, capacity, InstancedMeshManager.createRegionBoundingSphere(rx, rz));
+    mesh.name = `Instanced_${key}`;
+    mesh.visible = false; // インスタンス0件の間は描画対象外
     this.container.add(mesh);
 
-    this.layers.set(name, {
+    layer = {
       mesh,
+      layerName: name,
       keyToIndex: new Map(),
       indexToKey: new Map(),
       count: 0,
-      maxCount: capacity
-    });
+      maxCount: capacity,
+      floor
+    };
+    this.layers.set(key, layer);
+    return layer;
+  }
+
+  /**
+   * インスタンス数・階層スライス状態に応じたバケットの表示状態および通常/ゴーストマテリアルを更新
+   */
+  private refreshBucketVisibility(layer: ManagedInstancedLayer): void {
+    if (layer.count === 0) {
+      layer.mesh.visible = false;
+      return;
+    }
+
+    const archetype = this.archetypes.get(layer.layerName);
+    if (!archetype) return;
+
+    if (this.currentDisplayLayer === 'all') {
+      // All 表示: 地上階層（1F以上）を通常表示
+      const isVisible = layer.floor >= 1;
+      layer.mesh.visible = isVisible;
+      if (isVisible) {
+        layer.mesh.material = archetype.material;
+      }
+    } else {
+      const targetFloor = this.currentDisplayLayer;
+      const isUnderground = targetFloor < 0;
+      const isTarget = layer.floor === targetFloor;
+      // 地上スライス時: 地上全階層（1F以上）を表示（選択階層は通常、他階層は半透明ゴースト）
+      // 地下スライス時: 地下全階層および地上階層を表示
+      const isVisible = isUnderground ? true : layer.floor >= 1;
+      layer.mesh.visible = isVisible;
+      if (isVisible) {
+        layer.mesh.material = isTarget ? archetype.material : archetype.ghostMaterial;
+      }
+    }
   }
 
   /**
@@ -257,8 +394,8 @@ export class InstancedMeshManager {
   /**
    * 単一レイヤーへのインスタンス配置 / 更新（内部用）
    */
-  private setLayerInstance(layerName: string, key: string, matrix: THREE.Matrix4): void {
-    const layer = this.layers.get(layerName);
+  private setLayerInstance(layerName: string, key: string, matrix: THREE.Matrix4, tileKey: string = key): void {
+    const layer = this.getBucket(layerName, tileKey, true);
     if (!layer) return;
 
     let index = layer.keyToIndex.get(key);
@@ -271,6 +408,7 @@ export class InstancedMeshManager {
       layer.keyToIndex.set(key, index);
       layer.indexToKey.set(index, key);
       layer.mesh.count = layer.count;
+      this.refreshBucketVisibility(layer);
     }
 
     layer.mesh.setMatrixAt(index, matrix);
@@ -280,8 +418,9 @@ export class InstancedMeshManager {
   /**
    * 単一レイヤーからのインスタンス削除（O(1) スワップ＆ポップ）
    */
-  private removeLayerInstance(layerName: string, key: string): void {
-    const layer = this.layers.get(layerName);
+  private removeLayerInstance(layerName: string, key: string, tileKey: string = key): void {
+    // 削除時はバケットを新規生成しない（未配置キーへの削除要求が頻繁に発生するため）
+    const layer = this.getBucket(layerName, tileKey, false);
     if (!layer) return;
 
     const index = layer.keyToIndex.get(key);
@@ -290,9 +429,8 @@ export class InstancedMeshManager {
     const lastIndex = layer.count - 1;
     if (index !== lastIndex) {
       // 末尾の matrix を削除対象位置にコピー
-      const tempMatrix = new THREE.Matrix4();
-      layer.mesh.getMatrixAt(lastIndex, tempMatrix);
-      layer.mesh.setMatrixAt(index, tempMatrix);
+      layer.mesh.getMatrixAt(lastIndex, this.tempMatrix);
+      layer.mesh.setMatrixAt(index, this.tempMatrix);
 
       // マッピングを更新
       const lastKey = layer.indexToKey.get(lastIndex)!;
@@ -305,6 +443,7 @@ export class InstancedMeshManager {
     layer.count--;
     layer.mesh.count = layer.count;
     layer.mesh.instanceMatrix.needsUpdate = true;
+    this.refreshBucketVisibility(layer);
   }
 
   /**
@@ -313,22 +452,33 @@ export class InstancedMeshManager {
   private expandLayerCapacity(layer: ManagedInstancedLayer): void {
     const newCapacity = layer.maxCount * 2;
     const oldMesh = layer.mesh;
-    const newMesh = new THREE.InstancedMesh(oldMesh.geometry, oldMesh.material, newCapacity);
-    newMesh.count = layer.count;
-    newMesh.castShadow = true;
-    newMesh.receiveShadow = true;
-    newMesh.frustumCulled = false;
-    newMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const archetype = this.archetypes.get(layer.layerName);
+    if (!archetype) return;
 
-    const tempMatrix = new THREE.Matrix4();
-    for (let i = 0; i < layer.count; i++) {
-      oldMesh.getMatrixAt(i, tempMatrix);
-      newMesh.setMatrixAt(i, tempMatrix);
-    }
+    const isTarget = this.currentDisplayLayer === 'all'
+      ? layer.floor >= 1
+      : layer.floor === this.currentDisplayLayer;
+    const activeMaterial = isTarget ? archetype.material : archetype.ghostMaterial;
+
+    const newMesh = this.createInstancedMesh(
+      { geometry: archetype.geometry, material: activeMaterial, ghostMaterial: archetype.ghostMaterial },
+      newCapacity,
+      oldMesh.boundingSphere ?? new THREE.Sphere()
+    );
+    newMesh.name = oldMesh.name;
+    newMesh.count = layer.count;
+    newMesh.visible = oldMesh.visible;
+
+    // 既存の行列配列を一括コピー
+    (newMesh.instanceMatrix.array as Float32Array).set(
+      (oldMesh.instanceMatrix.array as Float32Array).subarray(0, layer.count * 16)
+    );
     newMesh.instanceMatrix.needsUpdate = true;
 
     this.container.remove(oldMesh);
     this.container.add(newMesh);
+    // 旧 InstancedMesh の instanceMatrix GPU バッファを解放（共有ジオメトリ・マテリアルは解放しない）
+    oldMesh.dispose();
 
     layer.mesh = newMesh;
     layer.maxCount = newCapacity;
@@ -346,9 +496,9 @@ export class InstancedMeshManager {
     this.setLayerInstance('rail_ground_sleepers', key, matrix);
     this.setLayerInstance('rail_ground_rails', key, matrix);
     if (hasPole) {
-      this.setLayerInstance('catenary_pole', `pole_${key}`, matrix);
+      this.setLayerInstance('catenary_pole', `pole_${key}`, matrix, key);
     } else {
-      this.removeLayerInstance('catenary_pole', `pole_${key}`);
+      this.removeLayerInstance('catenary_pole', `pole_${key}`, key);
     }
   }
 
@@ -359,7 +509,7 @@ export class InstancedMeshManager {
     this.removeLayerInstance('rail_ground_ballast', key);
     this.removeLayerInstance('rail_ground_sleepers', key);
     this.removeLayerInstance('rail_ground_rails', key);
-    this.removeLayerInstance('catenary_pole', `pole_${key}`);
+    this.removeLayerInstance('catenary_pole', `pole_${key}`, key);
   }
 
   /**
@@ -373,12 +523,13 @@ export class InstancedMeshManager {
 
     this.removeElevatedPiers(key);
 
+    // 橋脚は所属する高架線路と同じ階層バケットに入れ、スライサーで線路と一緒に表示切替する
     if (Array.isArray(pierMatrices)) {
       for (let i = 0; i < pierMatrices.length; i++) {
-        this.setLayerInstance('standard_pier', `pier_${key}_${i}`, pierMatrices[i]);
+        this.setLayerInstance('standard_pier', `pier_${key}_${i}`, pierMatrices[i], key);
       }
     } else if (pierMatrices === true) {
-      this.setLayerInstance('standard_pier', `pier_${key}_0`, matrix);
+      this.setLayerInstance('standard_pier', `pier_${key}_0`, matrix, key);
     }
   }
 
@@ -397,9 +548,9 @@ export class InstancedMeshManager {
    */
   private removeElevatedPiers(key: string): void {
     for (let i = 0; i < 6; i++) {
-      this.removeLayerInstance('standard_pier', `pier_${key}_${i}`);
+      this.removeLayerInstance('standard_pier', `pier_${key}_${i}`, key);
     }
-    this.removeLayerInstance('standard_pier', `pier_${key}`);
+    this.removeLayerInstance('standard_pier', `pier_${key}`, key);
   }
 
   /**
@@ -422,13 +573,12 @@ export class InstancedMeshManager {
    * 全インスタンスのクリア
    */
   public clearAll(): void {
+    // バケット単位の InstancedMesh を破棄（共有ジオメトリ・マテリアルは保持）
     for (const layer of this.layers.values()) {
-      layer.keyToIndex.clear();
-      layer.indexToKey.clear();
-      layer.count = 0;
-      layer.mesh.count = 0;
-      layer.mesh.instanceMatrix.needsUpdate = true;
+      this.container.remove(layer.mesh);
+      layer.mesh.dispose();
     }
+    this.layers.clear();
   }
 
   /**
@@ -439,18 +589,29 @@ export class InstancedMeshManager {
   }
 
   /**
+   * 階層スライサーの表示設定を行い、全バケットへ即時反映する
+   */
+  public setDisplayLayer(displayLayer: GridLayer | 'all'): void {
+    this.currentDisplayLayer = displayLayer;
+    for (const layer of this.layers.values()) {
+      this.refreshBucketVisibility(layer);
+    }
+  }
+
+  /**
    * 厳格なメモリ解放（全ジオメトリ・InstancedMeshのGPU破棄）
    */
   public dispose(): void {
     for (const layer of this.layers.values()) {
       this.container.remove(layer.mesh);
-      layer.mesh.geometry.dispose();
+      layer.mesh.dispose();
       // マテリアルは GameMaterials の共有マテリアルのためここでは dispose しない
     }
     for (const geo of this.sharedGeometries) {
       geo.dispose();
     }
     this.sharedGeometries = [];
+    this.archetypes.clear();
     this.layers.clear();
     this.scene.remove(this.container);
   }

@@ -11,6 +11,39 @@ export class VehicleMeshBuilder {
    */
   public static readonly CAR_SPACING = 1.95;
 
+  /** 車両用共有マテリアルキャッシュ（同一パラメータのマテリアルを全編成で使い回す） */
+  private static materialCache = new Map<string, THREE.Material>();
+
+  /**
+   * パラメータが同一の MeshStandardMaterial を共有取得する
+   * （1両ごとに新規生成すると、40編成×10両で数千個のマテリアルとなり描画時の状態切替が増大するため）
+   * ※ 共有物のため userData.keepAlive を付与し、disposeHierarchy による解放対象から除外する
+   */
+  public static sharedStandard(params: THREE.MeshStandardMaterialParameters): THREE.MeshStandardMaterial {
+    const key = `S:${JSON.stringify(params)}`;
+    let mat = this.materialCache.get(key) as THREE.MeshStandardMaterial | undefined;
+    if (!mat) {
+      mat = new THREE.MeshStandardMaterial(params);
+      mat.userData.keepAlive = true;
+      this.materialCache.set(key, mat);
+    }
+    return mat;
+  }
+
+  /**
+   * パラメータが同一の MeshBasicMaterial を共有取得する
+   */
+  public static sharedBasic(params: THREE.MeshBasicMaterialParameters): THREE.MeshBasicMaterial {
+    const key = `B:${JSON.stringify(params)}`;
+    let mat = this.materialCache.get(key) as THREE.MeshBasicMaterial | undefined;
+    if (!mat) {
+      mat = new THREE.MeshBasicMaterial(params);
+      mat.userData.keepAlive = true;
+      this.materialCache.set(key, mat);
+    }
+    return mat;
+  }
+
   /**
    * 車両編成の動的生成
    * @param modelInfo 車両カタログ情報（カラー、定員、性能等）
@@ -69,7 +102,7 @@ export class VehicleMeshBuilder {
     const height = 0.78;
 
     // 車体本体
-    const bodyMat = new THREE.MeshStandardMaterial({
+    const bodyMat = VehicleMeshBuilder.sharedStandard({
       color: modelInfo.bodyColor,
       metalness: modelInfo.bodyColor === 0xd1d5db ? 0.8 : 0.2,
       roughness: 0.35
@@ -80,7 +113,7 @@ export class VehicleMeshBuilder {
     car.add(body);
 
     // 帯・ラインカラースプライト
-    const stripeMat = new THREE.MeshStandardMaterial({
+    const stripeMat = VehicleMeshBuilder.sharedStandard({
       color: modelInfo.stripeColor,
       roughness: 0.3
     });
@@ -89,7 +122,7 @@ export class VehicleMeshBuilder {
     car.add(stripe);
 
     // 屋根
-    const roofMat = new THREE.MeshStandardMaterial({
+    const roofMat = VehicleMeshBuilder.sharedStandard({
       color: modelInfo.roofColor,
       roughness: 0.6
     });
@@ -101,7 +134,7 @@ export class VehicleMeshBuilder {
     if (isFront || isRear || hasDoubleCab) {
       const zDir = isFront ? 1 : -1;
       const faceZ = (length / 2 + 0.02) * zDir;
-      const maskMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.3 });
+      const maskMat = VehicleMeshBuilder.sharedStandard({ color: 0x1e293b, roughness: 0.3 });
 
       // 切妻型前面ブラックマスク
       const maskMesh = new THREE.Mesh(new THREE.BoxGeometry(width - 0.02, height * 0.88, 0.04), maskMat);
@@ -109,7 +142,7 @@ export class VehicleMeshBuilder {
       car.add(maskMesh);
 
       // フロントガラス（大型窓）
-      const frontWinMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.9, roughness: 0.1 });
+      const frontWinMat = VehicleMeshBuilder.sharedStandard({ color: 0x0f172a, metalness: 0.9, roughness: 0.1 });
       const winGeo = new THREE.BoxGeometry(0.26, 0.28, 0.05);
       const frontWinL = new THREE.Mesh(winGeo, frontWinMat);
       frontWinL.position.set(-0.18, height / 2 + 0.36, faceZ + 0.01 * zDir);
@@ -119,20 +152,20 @@ export class VehicleMeshBuilder {
       car.add(frontWinR);
 
       // 貫通扉
-      const doorMat = new THREE.MeshStandardMaterial({ color: modelInfo.bodyColor, roughness: 0.4 });
+      const doorMat = VehicleMeshBuilder.sharedStandard({ color: modelInfo.bodyColor, roughness: 0.4 });
       const door = new THREE.Mesh(new THREE.BoxGeometry(0.16, height * 0.84, 0.052), doorMat);
       door.position.set(0, height / 2 + 0.24, faceZ + 0.005 * zDir);
       car.add(door);
 
       // 行先表示幕
-      const signMat = new THREE.MeshBasicMaterial({ color: 0x0f172a });
+      const signMat = VehicleMeshBuilder.sharedBasic({ color: 0x0f172a });
       const sign = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.07, 0.055), signMat);
       sign.position.set(0, height + 0.18, faceZ + 0.01 * zDir);
       car.add(sign);
 
       // ヘッドライト / テールライト
       const isHead = isFront || (hasDoubleCab && zDir === 1);
-      const lightMat = new THREE.MeshBasicMaterial({ color: isHead ? 0xfffae0 : 0xef4444 });
+      const lightMat = VehicleMeshBuilder.sharedBasic({ color: isHead ? 0xfffae0 : 0xef4444 });
       const lightL = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 8), lightMat);
       lightL.position.set(-0.22, 0.44, faceZ + 0.03 * zDir);
       car.add(lightL);
@@ -142,14 +175,14 @@ export class VehicleMeshBuilder {
       car.add(lightR);
 
       // スカート（排障器）
-      const skirtMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.5 });
+      const skirtMat = VehicleMeshBuilder.sharedStandard({ color: 0x475569, roughness: 0.5 });
       const skirt = new THREE.Mesh(new THREE.BoxGeometry(width - 0.08, 0.12, 0.06), skirtMat);
       skirt.position.set(0, 0.18, faceZ + 0.02 * zDir);
       car.add(skirt);
     }
 
     // 側窓
-    const winMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.1, metalness: 0.9 });
+    const winMat = VehicleMeshBuilder.sharedStandard({ color: 0x0f172a, roughness: 0.1, metalness: 0.9 });
     for (const z of [-0.45, 0.45]) {
       const win = new THREE.Mesh(new THREE.BoxGeometry(width + 0.02, 0.26, 0.38), winMat);
       win.position.set(0, height / 2 + 0.32, z);
@@ -157,7 +190,7 @@ export class VehicleMeshBuilder {
     }
 
     // クーラー室外機
-    const coolerMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.4 });
+    const coolerMat = VehicleMeshBuilder.sharedStandard({ color: 0x94a3b8, roughness: 0.4 });
     const cooler = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.6), coolerMat);
     cooler.position.set(0, height + 0.32, 0);
     car.add(cooler);
@@ -170,7 +203,7 @@ export class VehicleMeshBuilder {
     }
 
     // 台車・車輪
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
+    const wheelMat = VehicleMeshBuilder.sharedStandard({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
     for (const bz of [-0.55, 0.55]) {
       const wL = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.06, 12), wheelMat);
       wL.rotation.z = Math.PI / 2;
@@ -191,7 +224,7 @@ export class VehicleMeshBuilder {
    */
   public static createPantograph(): THREE.Group {
     const pGroup = new THREE.Group();
-    const frameMat = new THREE.MeshStandardMaterial({ color: 0xef4444, metalness: 0.6, roughness: 0.3 });
+    const frameMat = VehicleMeshBuilder.sharedStandard({ color: 0xef4444, metalness: 0.6, roughness: 0.3 });
 
     const base = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.02, 0.24), frameMat);
     pGroup.add(base);
@@ -225,7 +258,7 @@ export class VehicleMeshBuilder {
     const height = 0.78;
 
     // ① 機関車メインボディ（ディープブルー）
-    const bodyMat = new THREE.MeshStandardMaterial({
+    const bodyMat = VehicleMeshBuilder.sharedStandard({
       color: modelInfo.bodyColor,
       roughness: 0.35,
       metalness: 0.25
@@ -236,13 +269,13 @@ export class VehicleMeshBuilder {
     car.add(body);
 
     // ② 機関車下部フレーム（ダークグレー）
-    const underFrameMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5 });
+    const underFrameMat = VehicleMeshBuilder.sharedStandard({ color: 0x1e293b, roughness: 0.5 });
     const underFrame = new THREE.Mesh(new THREE.BoxGeometry(width + 0.02, 0.12, length + 0.02), underFrameMat);
     underFrame.position.y = 0.28;
     car.add(underFrame);
 
     // ③ ゴールド・イエロー警戒ライン（車体側面・前面）
-    const stripeMat = new THREE.MeshStandardMaterial({
+    const stripeMat = VehicleMeshBuilder.sharedStandard({
       color: modelInfo.stripeColor,
       roughness: 0.3
     });
@@ -251,20 +284,20 @@ export class VehicleMeshBuilder {
     car.add(stripe);
 
     // ④ 屋根上機器・ランボード
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.5 });
+    const roofMat = VehicleMeshBuilder.sharedStandard({ color: 0x475569, roughness: 0.5 });
     const roof = new THREE.Mesh(new THREE.BoxGeometry(width - 0.04, 0.09, length), roofMat);
     roof.position.y = height + 0.27;
     car.add(roof);
 
     // モニター屋根（機器室上部の出っ張り）
     const monitorGeo = new THREE.BoxGeometry(0.38, 0.07, 0.90);
-    const monitorMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.4 });
+    const monitorMat = VehicleMeshBuilder.sharedStandard({ color: 0x64748b, roughness: 0.4 });
     const monitor = new THREE.Mesh(monitorGeo, monitorMat);
     monitor.position.y = height + 0.34;
     car.add(monitor);
 
     // 側面機器室エアフィルタールーバー（左右スリット）
-    const louverMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.6 });
+    const louverMat = VehicleMeshBuilder.sharedStandard({ color: 0x334155, roughness: 0.6 });
     for (const side of [-width / 2 - 0.005, width / 2 + 0.005]) {
       const louver = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.24, 0.70), louverMat);
       louver.position.set(side, height / 2 + 0.32, 0);
@@ -277,13 +310,13 @@ export class VehicleMeshBuilder {
       const faceZ = (length / 2 + 0.01) * zDir;
 
       // 前面傾斜・フロントブラックマスク
-      const frontMaskMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.3 });
+      const frontMaskMat = VehicleMeshBuilder.sharedStandard({ color: 0x0f172a, roughness: 0.3 });
       const frontMask = new THREE.Mesh(new THREE.BoxGeometry(width - 0.02, height * 0.75, 0.04), frontMaskMat);
       frontMask.position.set(0, height / 2 + 0.26, faceZ);
       car.add(frontMask);
 
       // フロント大型2連窓
-      const winMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.9, roughness: 0.1 });
+      const winMat = VehicleMeshBuilder.sharedStandard({ color: 0x0f172a, metalness: 0.9, roughness: 0.1 });
       const winGeo = new THREE.BoxGeometry(0.25, 0.24, 0.05);
       const winL = new THREE.Mesh(winGeo, winMat);
       winL.position.set(-0.18, height / 2 + 0.38, faceZ + 0.01 * zDir);
@@ -293,14 +326,14 @@ export class VehicleMeshBuilder {
       car.add(winR);
 
       // 前面V字/ナンバープレート（ゴールド）
-      const plateMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.6, roughness: 0.3 });
+      const plateMat = VehicleMeshBuilder.sharedStandard({ color: 0xfbbf24, metalness: 0.6, roughness: 0.3 });
       const plate = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.06, 0.052), plateMat);
       plate.position.set(0, height / 2 + 0.14, faceZ + 0.01 * zDir);
       car.add(plate);
 
       // 前照灯（進行方向前照灯：温白色、後部：赤）
       const isFrontFacing = (zDir === 1);
-      const lightMat = new THREE.MeshBasicMaterial({ color: isFrontFacing ? 0xfffae0 : 0xef4444 });
+      const lightMat = VehicleMeshBuilder.sharedBasic({ color: isFrontFacing ? 0xfffae0 : 0xef4444 });
       for (const lx of [-0.22, 0.22]) {
         const light = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), lightMat);
         light.position.set(lx, height / 2 + 0.14, faceZ + 0.025 * zDir);
@@ -308,13 +341,13 @@ export class VehicleMeshBuilder {
       }
 
       // スカート（排障器・スノープラウ風）
-      const skirtMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5 });
+      const skirtMat = VehicleMeshBuilder.sharedStandard({ color: 0x334155, roughness: 0.5 });
       const skirt = new THREE.Mesh(new THREE.BoxGeometry(width - 0.06, 0.14, 0.06), skirtMat);
       skirt.position.set(0, 0.16, faceZ + 0.015 * zDir);
       car.add(skirt);
 
       // 連結器（黒）
-      const couplerMat = new THREE.MeshStandardMaterial({ color: 0x111827, metalness: 0.8 });
+      const couplerMat = VehicleMeshBuilder.sharedStandard({ color: 0x111827, metalness: 0.8 });
       const coupler = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.08, 0.10), couplerMat);
       coupler.position.set(0, 0.15, faceZ + 0.06 * zDir);
       car.add(coupler);
@@ -328,8 +361,8 @@ export class VehicleMeshBuilder {
     }
 
     // ⑦ 2軸ボギー台車×2基
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
-    const bogieFrameMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7 });
+    const wheelMat = VehicleMeshBuilder.sharedStandard({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
+    const bogieFrameMat = VehicleMeshBuilder.sharedStandard({ color: 0x1e293b, roughness: 0.7 });
 
     for (const bz of [-0.58, 0.58]) {
       // 台車枠
@@ -365,7 +398,7 @@ export class VehicleMeshBuilder {
     const width = 0.68;
 
     // ① コキ100系ブルーの細身台枠（フラットフレーム）
-    const kokiBlueMat = new THREE.MeshStandardMaterial({
+    const kokiBlueMat = VehicleMeshBuilder.sharedStandard({
       color: 0x1d4ed8, // JR貨物コキ100系ブルー
       roughness: 0.45,
       metalness: 0.3
@@ -387,14 +420,14 @@ export class VehicleMeshBuilder {
     car.add(sideFrameR);
 
     // デッキ床面（横梁リブ）
-    const deckMat = new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.6 });
+    const deckMat = VehicleMeshBuilder.sharedStandard({ color: 0x1e3a8a, roughness: 0.6 });
     const deck = new THREE.Mesh(new THREE.BoxGeometry(width, 0.02, length), deckMat);
     deck.position.y = 0.28;
     car.add(deck);
 
     // 端部手すり・ブレーキハンドル（後端）
-    const handrailMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.3 });
-    const brakeHandleMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.3 });
+    const handrailMat = VehicleMeshBuilder.sharedStandard({ color: 0xf1f5f9, roughness: 0.3 });
+    const brakeHandleMat = VehicleMeshBuilder.sharedStandard({ color: 0xf59e0b, roughness: 0.3 });
     const handrail = new THREE.Mesh(new THREE.BoxGeometry(width - 0.08, 0.16, 0.02), handrailMat);
     handrail.position.set(0, 0.36, -length / 2 + 0.02);
     car.add(handrail);
@@ -404,8 +437,8 @@ export class VehicleMeshBuilder {
     car.add(brakeWheel);
 
     // ② 台車（FT1形2軸ボギー台車×2基）
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
-    const bogieFrameMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7 });
+    const wheelMat = VehicleMeshBuilder.sharedStandard({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
+    const bogieFrameMat = VehicleMeshBuilder.sharedStandard({ color: 0x1e293b, roughness: 0.7 });
 
     for (const bz of [-0.58, 0.58]) {
       const bogie = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.07, 0.40), bogieFrameMat);
@@ -436,7 +469,7 @@ export class VehicleMeshBuilder {
       { name: 'ventilated', color: 0x1e3a8a, stripe: 0x10b981 }  // 通風コンテナ (濃紺/グリーン帯)
     ];
 
-    const lockMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, metalness: 0.6, roughness: 0.3 });
+    const lockMat = VehicleMeshBuilder.sharedStandard({ color: 0xf59e0b, metalness: 0.6, roughness: 0.3 });
 
     slotZs.forEach((sz, slotIdx) => {
       // 緊締金具（ツイストロック4箇所）のグループ
@@ -464,8 +497,8 @@ export class VehicleMeshBuilder {
 
     // ④ 最後尾車両の場合：赤色丸形後部標識板（JR貨物特有のリアルな反射板）
     if (isRear) {
-      const plateMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-      const rimMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.3 });
+      const plateMat = VehicleMeshBuilder.sharedBasic({ color: 0xef4444 });
+      const rimMat = VehicleMeshBuilder.sharedStandard({ color: 0xf8fafc, roughness: 0.3 });
 
       for (const rx of [-0.24, 0.24]) {
         // 白い縁取りリング
@@ -495,7 +528,7 @@ export class VehicleMeshBuilder {
     const cLength = 0.50;
 
     // コンテナ本体ボックス
-    const boxMat = new THREE.MeshStandardMaterial({
+    const boxMat = VehicleMeshBuilder.sharedStandard({
       color,
       roughness: 0.4,
       metalness: 0.15
@@ -505,7 +538,7 @@ export class VehicleMeshBuilder {
     container.add(box);
 
     // コンテナ帯ライン（JR貨物ロゴ・ライン）
-    const stripeMat = new THREE.MeshStandardMaterial({
+    const stripeMat = VehicleMeshBuilder.sharedStandard({
       color: stripeColor,
       roughness: 0.3
     });
@@ -514,7 +547,7 @@ export class VehicleMeshBuilder {
     container.add(stripe);
 
     // コーナーキャスティング金具（四隅の黒金物ディテール）
-    const cornerMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.5 });
+    const cornerMat = VehicleMeshBuilder.sharedStandard({ color: 0x0f172a, roughness: 0.5 });
     for (const cx of [-cWidth / 2, cWidth / 2]) {
       for (const cy of [-cHeight / 2 + 0.03, cHeight / 2 - 0.03]) {
         for (const cz of [-cLength / 2, cLength / 2]) {

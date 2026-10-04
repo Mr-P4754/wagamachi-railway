@@ -236,6 +236,15 @@ html, body {
   box-shadow: 0 0 10px rgba(2, 132, 199, 0.5);
 }
 
+.icon-action-btn:disabled,
+.icon-action-btn.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
 /* 昼夜切替ボタン（モード別状態スタイル） */
 .icon-action-btn.mode-day {
   background: rgba(245, 158, 11, 0.25);
@@ -880,6 +889,40 @@ html, body {
   border-color: rgba(56, 189, 248, 0.6);
 }
 
+.cab-nav-btn.mode-toggle {
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(168, 85, 247, 0.4);
+  color: #e9d5ff;
+}
+
+.cab-nav-btn.mode-toggle:hover {
+  background: rgba(168, 85, 247, 0.35);
+  border-color: rgba(168, 85, 247, 0.7);
+  color: #ffffff;
+}
+
+.inspect-actions .train-chase-btn {
+  background: rgba(168, 85, 247, 0.2);
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+}
+
+.inspect-actions .train-chase-btn:hover {
+  background: rgba(168, 85, 247, 0.35);
+  color: #ffffff;
+}
+
+.inspect-actions .train-cab-btn {
+  background: rgba(56, 189, 248, 0.2);
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  color: #7dd3fc;
+}
+
+.inspect-actions .train-cab-btn:hover {
+  background: rgba(56, 189, 248, 0.35);
+  color: #ffffff;
+}
+
 /* 車窓 列車選択モーダル */
 .cab-select-card {
   max-width: 520px;
@@ -1419,10 +1462,277 @@ html, body {
   margin: 4px 0;
 }
 
+/* ==========================================================================
+   財務状況・決算報告モーダル & 財務推移チャート / テーブル
+   ========================================================================== */
+.report-modal-card {
+  max-width: 760px;
+  width: 95%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.report-tab-bar {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 4px 0 0 0;
+  margin-bottom: 12px;
+}
+
+.report-tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.report-tab-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.report-tab-btn.active {
+  color: #38bdf8;
+  border-bottom-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.report-modal-body {
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.report-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeInPane 0.2s ease-out;
+}
+
+@keyframes fadeInPane {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chart-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chart-header-row h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 0;
+}
+
+.chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.legend-dot.dashed {
+  border-radius: 2px;
+  height: 4px;
+  width: 12px;
+}
+
+.chart-container-wrapper {
+  position: relative;
+  width: 100%;
+  height: 250px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.financial-chart-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.chart-tooltip {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #f1f5f9;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+  line-height: 1.5;
+  transition: opacity 0.15s ease;
+}
+
+.history-table-container {
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: auto;
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.financial-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.financial-history-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(30, 41, 59, 0.95);
+  backdrop-filter: blur(8px);
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-panel);
+  z-index: 2;
+}
+
+.financial-history-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.financial-history-table tbody tr:hover {
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.financial-history-table .val-pos { color: #34d399; font-weight: 600; }
+.financial-history-table .val-neg { color: #f87171; font-weight: 600; }
+.financial-history-table .val-num { text-align: right; }
+.financial-history-table .empty-cell { text-align: center; color: var(--text-muted); padding: 24px; }
+
 .save-load-section {
   margin-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   padding-top: 12px;
+}
+
+/* 画質設定コンポーネント */
+.graphics-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  margin-top: 10px;
+  margin-bottom: 6px;
+}
+
+.graphics-setting-row .setting-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.setting-icon-svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.graphics-select {
+  flex: 1;
+  max-width: 380px;
+  background: rgba(30, 41, 59, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 6px 10px;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.graphics-select:hover {
+  border-color: var(--border-focus);
+}
+
+.graphics-select:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.graphics-select option {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 6px;
+}
+
+/* クイックバーの画質バッジスタイル */
+#graphics-quality-badge.quality-high {
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(14, 165, 233, 0.25);
+}
+
+#graphics-quality-badge.quality-medium {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(245, 158, 11, 0.25);
+}
+
+#graphics-quality-badge.quality-low {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(16, 185, 129, 0.25);
 }
 
 .save-load-buttons {
@@ -1705,6 +2015,26 @@ html, body {
   border-color: #ef4444;
   color: #fff;
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+}
+
+.fleet-btn-sell.confirming {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  border-color: #f87171;
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.7);
+  animation: pulse-sell-confirm 1s infinite alternate;
+}
+
+@keyframes pulse-sell-confirm {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+  }
+  100% {
+    transform: scale(1.03);
+    box-shadow: 0 0 16px rgba(248, 113, 113, 0.9);
+  }
 }
 
 .fleet-car-config-row {
@@ -3120,8 +3450,10 @@ html, body {
 
 .world-badge {
   position: absolute;
-  transform: translate(-50%, -100%);
-  display: none;
+  top: 0;
+  left: 0;
+  will-change: transform;
+  visibility: hidden;
   font-family: 'Outfit', 'Zen Kaku Gothic New', -apple-system, sans-serif;
   font-size: 11px;
   font-weight: 700;
@@ -3164,11 +3496,11 @@ html, body {
    スマホ・モバイル最適化レスポンシブスタイル (@media max-width: 768px)
    ========================================================================== */
 @media (max-width: 768px) {
-  /* 1. ヘッダー HUD（上下2段ですっきり整理、横スクロールで見切れ防止） */
+  /* 1. ヘッダー HUD（上下2段ですっきり整理、横スクロールで見切れ防止、セーフエリア対応） */
   #hud-header {
     top: calc(6px + env(safe-area-inset-top, 0px));
-    left: 6px;
-    right: 6px;
+    left: calc(6px + env(safe-area-inset-left, 0px));
+    right: calc(6px + env(safe-area-inset-right, 0px));
     flex-direction: column;
     align-items: stretch;
     gap: 4px;
@@ -3250,15 +3582,26 @@ html, body {
     padding: 1px 2px;
   }
 
-  /* 2. 右側操作コントロール（時間進行・カメラ回転）: 小型化して上下の圧迫を解消 */
+  /* 2. 右側操作コントロール（時間進行・カメラ回転）: 端のマージン確保・透明度55%で誤タップ防止 */
   .side-controls-dock {
-    right: 4px;
+    right: calc(4px + env(safe-area-inset-right, 0px));
     top: 50%;
     transform: translateY(-50%);
     padding: 3px;
     gap: 3px;
     border-radius: var(--radius-sm);
     z-index: 35;
+    opacity: 0.55;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+
+  .side-controls-dock:hover,
+  .side-controls-dock:active,
+  .side-controls-dock:focus-within {
+    opacity: 0.95;
+    transform: translateY(-50%) translateX(-2px);
   }
 
   .side-control-group {
@@ -3291,15 +3634,26 @@ html, body {
     height: 13px;
   }
 
-  /* 3. 左側階層スライサー: 小型化して左端にすっきり配置 */
+  /* 3. 左側階層スライサー: 端のマージン確保・透明度55%で誤タップ防止 */
   #floor-slicer {
-    left: 4px;
+    left: calc(4px + env(safe-area-inset-left, 0px));
     top: 50%;
     transform: translateY(-50%);
     padding: 3px;
     gap: 2px;
     border-radius: var(--radius-sm);
     z-index: 35;
+    opacity: 0.55;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+
+  #floor-slicer:hover,
+  #floor-slicer:active,
+  #floor-slicer:focus-within {
+    opacity: 0.95;
+    transform: translateY(-50%) translateX(2px);
   }
 
   .floor-slicer-title {
@@ -3372,34 +3726,84 @@ html, body {
     margin: 0 1px;
   }
 
-  /* 5. 路線図ミニマップ: スマホでは 125x125px にコンパクト化 */
+  /* 5. 路線図ミニマップ: 画面右上のヘッダー直下へ退避し、下部ツールバーとの重なりを完全根絶 */
   #minimap-container {
-    right: 6px;
-    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    top: calc(52px + env(safe-area-inset-top, 0px)) !important;
+    right: 8px !important;
+    bottom: auto !important;
+    left: auto !important;
     padding: 4px;
-    z-index: 30;
+    z-index: 45;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55);
   }
 
   #minimap-canvas {
-    width: 125px !important;
-    height: 125px !important;
+    width: 110px !important;
+    height: 110px !important;
   }
 
-  /* 6. タイル情報インスペクター: ミニマップと横幅が重ならないサイズに調整 */
+  /* 6. タイル情報インスペクター: 下部からスライドアップするボトムシート（最大36dvh・折りたたみ対応） */
   #inspector-panel {
-    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
-    left: 6px;
-    width: 195px;
-    max-width: calc(100vw - 145px);
-    max-height: calc(100dvh - 160px);
-    padding: 6px 8px;
+    position: fixed;
+    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-width: 440px;
+    margin: 0 auto;
+    max-height: 36dvh;
+    overflow-y: auto;
+    border-radius: 16px 16px 12px 12px;
+    padding: 8px 12px 10px;
     font-size: 11px;
-    z-index: 28;
+    z-index: 38;
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.12);
+    transition: max-height 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), padding 0.2s ease;
+  }
+
+  /* ボトムシートのドラッグ用グラブバー */
+  #inspector-panel::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.35);
+    margin: 0 auto 6px;
+  }
+
+  /* インスペクター折りたたみ（最小化）状態: タイトル・主要ステータスのみ表示（約44px） */
+  #inspector-panel.minimized {
+    max-height: 44px;
+    overflow: hidden;
+    padding-bottom: 4px;
+  }
+
+  #inspector-panel.minimized .panel-body,
+  #inspector-panel.minimized .inspect-actions {
+    display: none;
   }
 
   .panel-header {
     padding-bottom: 3px;
     font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-header::after {
+    content: '▾';
+    font-size: 12px;
+    opacity: 0.7;
+    margin-left: 6px;
+    transition: transform 0.2s ease;
+  }
+
+  #inspector-panel.minimized .panel-header::after {
+    content: '▴';
   }
 
   .inspect-row {
@@ -3411,13 +3815,15 @@ html, body {
     font-size: 11px;
   }
 
-  /* 7. カテゴリーサブメニュー・回転ヒント・ホーム長セレクター */
+  /* 7. カテゴリーサブメニュー・回転ヒント・ホーム長セレクター（スリム化・上下階層スタック化） */
   #tool-submenu {
     bottom: calc(58px + env(safe-area-inset-bottom, 0px));
     width: calc(100vw - 12px);
     max-width: calc(100vw - 12px);
-    max-height: 48dvh;
+    max-height: 45dvh;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: none;
     padding: 8px;
     z-index: 30;
   }
@@ -3429,27 +3835,82 @@ html, body {
   }
 
   .tool-submenu-grid {
-    grid-template-columns: repeat(auto-fill, minmax(75px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+    gap: 4px;
+    touch-action: pan-y;
+  }
+
+  /* 回転・決定ヒント: メインツールバー直上に配置 */
+  .rotation-hint {
+    bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+    max-width: 95vw;
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 3px 8px;
+    gap: 5px;
+    z-index: 25;
+    font-size: 10px;
+    border-radius: var(--radius-full);
+  }
+  .rotation-hint::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 駅有効長セレクター: 回転ヒントの直上に縦スタック配置 */
+  .station-length-selector {
+    bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+    max-width: 95vw;
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 3px 8px;
+    gap: 5px;
+    z-index: 26;
+    font-size: 10px;
+    border-radius: var(--radius-full);
+  }
+  .station-length-selector::-webkit-scrollbar {
+    display: none;
+  }
+
+  .st-len-stepper {
     gap: 4px;
   }
 
-  .rotation-hint {
-    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
-    max-width: calc(100vw - 12px);
-    padding: 6px 10px;
-    z-index: 22;
+  .st-stepper-btn {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
   }
 
-  .station-length-selector {
-    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
-    padding: 4px 8px;
-    max-width: calc(100vw - 12px);
-    z-index: 22;
+  .st-len-display {
+    font-size: 11px;
+    min-width: 32px;
   }
 
-  /* 8. モーダル全般（上下の見切れ防止・内部スクロール対応） */
+  /* 8. 最小タッチターゲットサイズ（スワイプ操作横取り防止のため36×36pxに適正化） */
+  .floor-btn, .speed-btn, .rotation-step-btn, .icon-action-btn, .st-stepper-btn, .close-btn {
+    position: relative;
+  }
+  .floor-btn::after, .speed-btn::after, .rotation-step-btn::after, .icon-action-btn::after, .st-stepper-btn::after, .close-btn::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 38px;
+    max-height: 38px;
+    width: 100%;
+    height: 100%;
+    pointer-events: auto;
+  }
+
+  /* 9. モーダル全般（セーフエリア対応・上下の見切れ防止・内部スクロール対応） */
   .modal-overlay {
-    padding: 10px;
+    padding: calc(12px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px));
     align-items: center;
     justify-content: center;
   }
@@ -3508,6 +3969,47 @@ html, body {
     overflow-y: auto;
     width: calc(100vw - 20px);
   }
+}
+
+/* 貨物納品・荷役完了時のワールド内フローティング通知バッジ */
+@keyframes cargo-float-badge {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.85);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, -12px) scale(1.06);
+  }
+  30% {
+    transform: translate(-50%, -20px) scale(1.0);
+  }
+  75% {
+    opacity: 1;
+    transform: translate(-50%, -42px) scale(1.0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -60px) scale(0.92);
+  }
+}
+
+.cargo-floating-toast {
+  position: absolute;
+  pointer-events: none;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(245, 158, 11, 0.85);
+  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  color: #fbbf24;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: cargo-float-badge 1.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 

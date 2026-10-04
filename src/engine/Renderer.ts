@@ -3,6 +3,7 @@ import { GameMaterials } from '../graphics/materials';
 
 export type TimeOfDay = 'day' | 'sunset' | 'night';
 export type TimeLightingMode = 'auto' | 'day' | 'night';
+export type GraphicsQuality = 'high' | 'medium' | 'low';
 
 export class EngineRenderer {
   public scene: THREE.Scene;
@@ -30,6 +31,21 @@ export class EngineRenderer {
   private currentTimeOfDay: TimeOfDay = 'day';
   private lightingMode: TimeLightingMode = 'auto';
   private isUndergroundMode: boolean = false;
+  private graphicsQuality: GraphicsQuality = 'high';
+
+  /** 画面リサイズや解像度変更時にカメラマネージャー等の外部Frustum更新を呼ぶコールバック */
+  public onResizeCallback?: () => void;
+
+  /** 太陽光の向き（影の注視点からの相対位置）。時間帯ライティングがこの値を更新する */
+  private lightOffset: THREE.Vector3 = new THREE.Vector3(50, 75, 40);
+  /** 影を描画する中心（カメラ注視点に追従） */
+  private shadowFocus: THREE.Vector3 = new THREE.Vector3();
+  /** 影カメラの半幅（ワールド単位） */
+  private shadowHalfExtent: number = 50;
+
+  // 前面展望用ヘッドライト（前照灯）
+  private cabHeadlight: THREE.SpotLight | null = null;
+  private cabHeadlightTarget: THREE.Object3D | null = null;
 
   constructor(containerId: string) {
     const container = document.getElementById(containerId);
@@ -114,19 +130,22 @@ export class EngineRenderer {
     this.scene.add(this.hemiLight);
 
     this.dirLight = new THREE.DirectionalLight(0xfffaed, 1.25);
-    this.dirLight.position.set(50, 75, 40);
+    this.lightOffset.set(50, 75, 40);
     this.dirLight.castShadow = true;
     this.dirLight.shadow.mapSize.width = 2048;
     this.dirLight.shadow.mapSize.height = 2048;
-    this.dirLight.shadow.camera.near = 10;
-    this.dirLight.shadow.camera.far = 200;
+    this.dirLight.shadow.camera.near = 1;
+    this.dirLight.shadow.camera.far = 500;
     const d = 50;
     this.dirLight.shadow.camera.left = -d;
     this.dirLight.shadow.camera.right = d;
     this.dirLight.shadow.camera.top = d;
     this.dirLight.shadow.camera.bottom = -d;
-    this.dirLight.shadow.bias = -0.0005;
+    // 奥行き範囲(far=500)拡大に合わせ、正規化深度上のバイアスを縮小して浮き影を抑制
+    this.dirLight.shadow.bias = -0.0002;
     this.scene.add(this.dirLight);
+    // 影の注視点追従のため、ライトのターゲットをシーンに登録（行列更新対象にする）
+    this.scene.add(this.dirLight.target);
 
     // Resize handler
     window.addEventListener('resize', this.onResize.bind(this));
@@ -138,6 +157,7 @@ export class EngineRenderer {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.onResizeCallback?.();
   }
 
   public setGridVisible(visible: boolean) {
@@ -181,7 +201,7 @@ export class EngineRenderer {
       (this.scene.fog as THREE.FogExp2 | null)?.color.set(0xfdba74);
       this.dirLight.color.set(0xf97316);
       this.dirLight.intensity = 1.1;
-      this.dirLight.position.set(65, 30, 15);
+      this.lightOffset.set(65, 30, 15);
       this.ambientLight.color.set(0xfb923c);
       this.ambientLight.intensity = 0.55;
       (this.groundMesh.material as THREE.MeshStandardMaterial).color.set(0x927042);
@@ -201,7 +221,7 @@ export class EngineRenderer {
     (this.scene.fog as THREE.FogExp2 | null)?.color.set(0xd6e6f2);
     this.dirLight.color.set(0xfffaed);
     this.dirLight.intensity = 1.25;
-    this.dirLight.position.set(50, 75, 40);
+    this.lightOffset.set(50, 75, 40);
     this.ambientLight.color.set(0xffffff);
     this.ambientLight.intensity = 0.65;
     (this.groundMesh.material as THREE.MeshStandardMaterial).color.set(0x86b96e);
@@ -215,7 +235,7 @@ export class EngineRenderer {
     (this.scene.fog as THREE.FogExp2 | null)?.color.set(0x090d16);
     this.dirLight.color.set(0x93c5fd);
     this.dirLight.intensity = 0.35;
-    this.dirLight.position.set(-30, 60, -40);
+    this.lightOffset.set(-30, 60, -40);
     this.ambientLight.color.set(0x1e293b);
     this.ambientLight.intensity = 0.42;
     (this.groundMesh.material as THREE.MeshStandardMaterial).color.set(0x1c2833);
@@ -234,7 +254,7 @@ export class EngineRenderer {
       if (isDaytime) {
         this.dirLight.intensity = 1.1;
         this.dirLight.color.set(0xfffaed);
-        this.dirLight.position.set(20, 80, 20);
+        this.lightOffset.set(20, 80, 20);
         this.dirLight.castShadow = false; // 地下では床の陰影破綻を防ぐためシャドウ無効
         this.ambientLight.intensity = 0.85;
         this.ambientLight.color.set(0xe2e8f0); // 明るい作業用ホワイトグレー
@@ -261,7 +281,7 @@ export class EngineRenderer {
       return;
     }
 
-    this.dirLight.castShadow = true;
+    this.dirLight.castShadow = (this.graphicsQuality !== 'low');
 
     // ② 昼間固定モード: 時間帯に関係なく昼間の明るさに固定
     if (this.lightingMode === 'day') {
@@ -437,6 +457,9 @@ export class EngineRenderer {
     this.undergroundFloorMesh.visible = visible;
     this.undergroundFloorMesh.position.y = height - 0.01;
     this.isUndergroundMode = visible;
+    if (!visible) {
+      this.dirLight.castShadow = (this.graphicsQuality !== 'low');
+    }
   }
 
   /**
@@ -444,13 +467,181 @@ export class EngineRenderer {
    */
   public setUndergroundMode(underground: boolean) {
     this.isUndergroundMode = underground;
+    if (!underground) {
+      this.dirLight.castShadow = (this.graphicsQuality !== 'low');
+    }
   }
 
   public getIsUndergroundMode(): boolean {
     return this.isUndergroundMode;
   }
 
+  /**
+   * 描画クオリティを動的に設定・適用
+   * @param level 'high' | 'medium' | 'low'
+   * @param onResizeCamera カメラアスペクト比・フラスタム再計算用コールバック
+   */
+  public setGraphicsQuality(level: GraphicsQuality, onResizeCamera?: () => void): void {
+    this.graphicsQuality = level;
+
+    // 1. ピクセル比（解像度）の更新
+    let targetPixelRatio = 1.0;
+    if (level === 'high') {
+      targetPixelRatio = Math.min(window.devicePixelRatio, 2.0);
+    } else if (level === 'medium') {
+      targetPixelRatio = Math.min(window.devicePixelRatio, 1.5);
+    } else {
+      // low: 描画ピクセル数を1.0固定（Retina等の高DPI環境でもGPU負荷を最小化）
+      targetPixelRatio = 1.0;
+    }
+    this.renderer.setPixelRatio(targetPixelRatio);
+
+    // 2. レンダラーサイズとカメラ投影行列の同期再計算
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    this.renderer.setSize(width, height);
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+
+    // 3. シャドウマップおよびディレクショナルライトの影設定更新
+    if (level === 'low') {
+      // シャドウ完全無効化
+      this.renderer.shadowMap.enabled = false;
+      this.dirLight.castShadow = false;
+      if (this.dirLight.shadow.map) {
+        this.dirLight.shadow.map.dispose();
+        this.dirLight.shadow.map = null;
+      }
+    } else {
+      // シャドウ有効化
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = (level === 'high') ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+      this.dirLight.castShadow = !this.isUndergroundMode;
+
+      const mapSize = (level === 'high') ? 2048 : 1024;
+      if (this.dirLight.shadow.mapSize.width !== mapSize || this.dirLight.shadow.mapSize.height !== mapSize) {
+        this.dirLight.shadow.mapSize.set(mapSize, mapSize);
+        if (this.dirLight.shadow.map) {
+          this.dirLight.shadow.map.dispose();
+          this.dirLight.shadow.map = null;
+        }
+      }
+    }
+
+    // 4. マテリアルの再コンパイルをトリガー（シャドウシェーダーの切替アーティファクト防止）
+    this.scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach((m) => {
+            if (m) m.needsUpdate = true;
+          });
+        } else if (mesh.material) {
+          mesh.material.needsUpdate = true;
+        }
+      }
+    });
+
+    // 5. 外部カメラフラスタム等の更新を実行
+    if (onResizeCamera) {
+      onResizeCamera();
+    } else if (this.onResizeCallback) {
+      this.onResizeCallback();
+    }
+  }
+
+  public getGraphicsQuality(): GraphicsQuality {
+    return this.graphicsQuality;
+  }
+
+  /**
+   * 影の描画範囲（影カメラ）をカメラ注視点とズーム量に追従させる
+   * （原点固定だと、広域マップでは中央付近以外に影が落ちないため）
+   * @param focus 影を描画する中心（ワールド座標）
+   * @param halfExtent 影カメラの半幅（ワールド単位）
+   */
+  public setShadowFocus(focus: THREE.Vector3, halfExtent: number): void {
+    if (this.graphicsQuality === 'low') return;
+    const d = THREE.MathUtils.clamp(halfExtent, 30, 160);
+    if (Math.abs(d - this.shadowHalfExtent) > 2) {
+      this.shadowHalfExtent = d;
+      const cam = this.dirLight.shadow.camera;
+      cam.left = -d;
+      cam.right = d;
+      cam.top = d;
+      cam.bottom = -d;
+      cam.updateProjectionMatrix();
+    }
+    // テクセル単位にスナップして、カメラ移動時の影のちらつき（シャドウスイミング）を抑制
+    const texel = (this.shadowHalfExtent * 2) / this.dirLight.shadow.mapSize.width;
+    this.shadowFocus.set(
+      Math.round(focus.x / texel) * texel,
+      0,
+      Math.round(focus.z / texel) * texel
+    );
+  }
+
   public render(customCamera?: THREE.Camera) {
+    // 時間帯ライティングの光の向き（lightOffset）を、影の注視点基準で配置
+    // 影カメラの投影範囲が広がっても奥行き方向で切れないよう、光源を一定距離(250)に配置する
+    this.dirLight.position.copy(this.lightOffset).normalize().multiplyScalar(250).add(this.shadowFocus);
+    this.dirLight.target.position.copy(this.shadowFocus);
     this.renderer.render(this.scene, customCamera || this.camera);
+  }
+
+  /**
+   * 前面展望用透視投影フォグの有効化／無効化
+   * クォータービュー時は正投影のため null、前面展望時は遠方エッジを自然に隠蔽する THREE.Fog を適用
+   */
+  public setCabViewFog(enabled: boolean): void {
+    if (enabled) {
+      const bgColor = (this.scene.background as THREE.Color) || new THREE.Color(0xd6e6f2);
+      this.scene.fog = new THREE.Fog(bgColor.getHex(), 120, 280);
+    } else {
+      this.scene.fog = null;
+    }
+  }
+
+  /**
+   * 前面展望用ヘッドライト（前照灯スポットライト）の有効化
+   * 夜間や地下トンネル走行時に進行方向レールを鮮明に照らし出す
+   */
+  public enableCabHeadlight(): void {
+    if (!this.cabHeadlight) {
+      this.cabHeadlight = new THREE.SpotLight(0xfffae6, 1.8, 45, 0.38, 0.5, 1.2);
+      this.cabHeadlight.castShadow = false; // パフォーマンス優先
+      this.cabHeadlightTarget = new THREE.Object3D();
+      this.scene.add(this.cabHeadlight);
+      this.scene.add(this.cabHeadlightTarget);
+      this.cabHeadlight.target = this.cabHeadlightTarget;
+    }
+  }
+
+  /**
+   * 前面展望用ヘッドライトの位置・照射方向をカメラ座標・視線方向と同期
+   */
+  public updateCabHeadlight(camPos: THREE.Vector3, forwardDir: THREE.Vector3): void {
+    if (!this.cabHeadlight || !this.cabHeadlightTarget) return;
+    this.cabHeadlight.position.set(camPos.x, camPos.y - 0.1, camPos.z);
+    this.cabHeadlightTarget.position.set(
+      camPos.x + forwardDir.x * 25,
+      camPos.y + forwardDir.y * 25 - 0.4,
+      camPos.z + forwardDir.z * 25
+    );
+  }
+
+  /**
+   * 前面展望用ヘッドライトのシーンからの除去・解放
+   */
+  public disableCabHeadlight(): void {
+    if (this.cabHeadlight) {
+      this.scene.remove(this.cabHeadlight);
+      this.cabHeadlight.dispose?.();
+      this.cabHeadlight = null;
+    }
+    if (this.cabHeadlightTarget) {
+      this.scene.remove(this.cabHeadlightTarget);
+      this.cabHeadlightTarget = null;
+    }
   }
 }

@@ -4,6 +4,7 @@ dist/
 dist-ssr/
 shared_txt/
 scratch/
+e2e_screenshots/
 *.local
 
 # Logs

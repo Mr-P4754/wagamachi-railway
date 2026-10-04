@@ -1,90 +1,35 @@
 import * as THREE from 'three';
-import { WorldMap, TileData, SwitchState, CrossingState, StationActionMode, DepartureRule, SplitConfig, getSwitchDirectionAtTime } from './WorldMap';
+import { WorldMap, TileData, TileExit, SwitchState, CrossingState, getSwitchDirectionAtTime } from './WorldMap';
 import { ModelFactory } from '../models/ModelFactory';
 import { AudioManager } from '../engine/AudioManager';
 import { FollowTarget } from '../graphics/CameraManager';
-import { VehicleModelInfo, getVehicleById, getRunningCostPerDay, getRunningCostPerTrip, getMaxCapacity } from './VehicleCatalog';
+import { VehicleModelInfo, getVehicleById, getRunningCostPerDay } from './VehicleCatalog';
 import { BlockSignalManager } from '../core/BlockSignal';
 import { GridLayer, DeadlockEvent } from '../core/types';
-import { layerToHeight } from '../core/Grid3D';
 import { GRID_LAYERS } from '../core/constants';
-import { CARGO_FARE_PER_CONTAINER_PER_TILE } from '../core/CargoSystem';
+import { layerToHeight } from '../core/Grid3D';
 import * as ScheduleEngine from '../core/ScheduleEngine';
 import { checkCoupleEligibility, validateSplitConfig } from '../core/CouplingSystem';
 import { disposeHierarchy } from '../graphics/materials';
 import { VehicleMeshBuilder } from '../graphics/vehicles/VehicleMeshBuilder';
 
-// ④ 先頭車の走行履歴サンプル（各車両がこの履歴を「車両間隔ぶん遅れて」辿ることで、
-// カーブや勾配・進路変更を編成全体が一斉にではなく1両ずつ順番に通過するようにする）
-interface PathSample {
-  pos: THREE.Vector3;
-  yaw: number;
-  pitch: number;
-  cant: number;
-  dist: number; // 経路の始点からの累積距離（ワールド単位）
-  layer: GridLayer; // 車両が存在する階層
-}
+// 専門クラス群および共通型定義のインポート
+import { TrainInstance, PathSample, IntermediateSample, CargoHooks } from './trains/types';
+import { TrainKinematics } from './trains/TrainKinematics';
+import { TrainCollisionSystem } from './trains/TrainCollisionSystem';
+import { TrainCouplingManager } from './trains/TrainCouplingManager';
+import { TrainPayloadSystem } from './trains/TrainPayloadSystem';
 
-export interface TrainInstance {
-  id: number;
-  name: string;
-  model: VehicleModelInfo;
-  carCount: number;
-  mesh: THREE.Group; // ④ 常に position/rotation ともに単位変換（子の各車両をワールド座標で個別配置する）
-  frontPosition: THREE.Vector3; // ④ 先頭車の現在位置（カメラ追従・ATS判定に使用）
-  currentTile: { x: number; z: number; layer: GridLayer }; // ④ 先頭車が今いるタイルと階層
-  targetTile: { x: number; z: number; layer: GridLayer }; // ④ 先頭車が次に向かうタイルと階層
-  direction: THREE.Vector3;
-  progress: number;
-  speed: number; // tiles per second
-  isStopped: boolean;
-  isAtsBraked: boolean; // ⑥ ATSによる先行列車接近停止
-  isSignalStopped?: boolean; // 閉塞信号による停止
-  isTrapped?: boolean; // 孤立（前後とも進行不能）による立ち往生停止
-  occupiedTiles: Array<{ x: number; z: number; layer: GridLayer }>; // 最大10両全マスの占有タイル
-  stopTimer: number;
-  passengers: number;
-  capacity: number;
-  isReversed: boolean;
-  cars: THREE.Group[];
-  heightY: number; // Current vertical elevation
-  pathHistory: PathSample[]; // ④ 先頭車の走行履歴（各車両の遅延追従に使用）
+// 既存コードからの参照互換性のための再エクスポート
+export * from './trains/types';
+export { TrainKinematics } from './trains/TrainKinematics';
+export { TrainCollisionSystem } from './trains/TrainCollisionSystem';
+export { TrainCouplingManager } from './trains/TrainCouplingManager';
+export { TrainPayloadSystem } from './trains/TrainPayloadSystem';
 
-  // ⑤ 列車収支・乗客データ
-  totalPassengers: number;
-  totalRevenue: number;
-  totalCost: number;
-  monthlyProfit: number;
-  fleetId?: string; // ⑦ 車両基地での保有ID
-
-  // ⑤ 駅グループ重複停車防止用
-  lastStationGroupId: string | null;
-  // ② 駅ダイヤ（折り返し待機、定時発車待機）
-  isReversingAtStation?: boolean;
-  scheduledDepartureMinute?: number | null;
-
-  // ④ 貨物列車の積荷状態（category: 'freight' の編成のみ使用）
-  cargoLoad?: number;
-  cargoCapacity?: number;
-  cargoPickup?: { x: number; z: number } | null;
-  cargoTraveledTiles?: number; // 積載中の実走行マス数（運賃計算用）
-
-  // Phase3: 純粋時間軸ダイヤエンジン用の停車状態追跡
-  stopMode?: StationActionMode | null; // 現在停車中の動作モード（'hold'は毎フレーム再判定）
-  stopElapsedMinutes?: number; // 現在の停車開始からの経過ゲーム内分
-  requiredStopMinutes?: number; // 発車可能になるまでの最短停車分数
-  // Phase3: 分割後の編成に個別付与される発車ルール（未設定時はホームタイルの共通ダイヤに従う）
-  overrideDepartureRule?: DepartureRule | null;
-}
-
-/** 貨物駅での積み降ろし・運賃計算をTrainManagerへ橋渡しするフック群 */
-export interface CargoHooks {
-  tryLoad: (x: number, z: number, capacity: number, layer?: GridLayer) => number;
-  tryUnload: (x: number, z: number, containers: number, layer?: GridLayer) => number | boolean;
-  isCommercialStation?: (x: number, z: number, layer?: GridLayer) => boolean;
-  onStationCargoChanged?: (x: number, z: number, layer?: GridLayer) => void;
-}
-
+/**
+ * 列車運行シミュレーション オーケストレーター（メインファサード）
+ */
 export class TrainManager {
   private trains: TrainInstance[] = [];
   public blockSignalManager: BlockSignalManager = new BlockSignalManager();
@@ -97,9 +42,20 @@ export class TrainManager {
   private nextTrainId: number = 1;
   private soundTimer: number = 0;
   private listenerPosition: { x: number; z: number } = { x: 0, z: 0 };
-  // 高倍速・フレームスキップ時の発車時刻すり抜け防止用（前フレーム時刻追跡）
   private lastUpdateHour: number = -1;
   private lastUpdateMinute: number = -1;
+
+  // 専門クラスインスタンス
+  public readonly kinematics: TrainKinematics = new TrainKinematics();
+  public readonly collisionSystem: TrainCollisionSystem = new TrainCollisionSystem(this.kinematics);
+  public readonly couplingManager: TrainCouplingManager = new TrainCouplingManager(this.kinematics);
+  public readonly payloadSystem: TrainPayloadSystem = new TrainPayloadSystem();
+
+  // 編成単位カリング用の一時オブジェクト
+  private readonly cullFrustum = new THREE.Frustum();
+  private readonly cullProjScreen = new THREE.Matrix4();
+  private readonly cullBox = new THREE.Box3();
+  private static readonly CULL_MARGIN = 1.5;
 
   constructor(scene: THREE.Scene, worldMap: WorldMap, audioManager: AudioManager) {
     this.scene = scene;
@@ -113,7 +69,7 @@ export class TrainManager {
   }
 
   /**
-   * 3D空間音響用カメラ注視点（画面中央）の登録
+   * 3D空間音響用カメラ注視点の登録
    */
   public setListenerPosition(pos: { x: number; z: number }): void {
     this.listenerPosition = pos;
@@ -134,12 +90,47 @@ export class TrainManager {
     return this.trains;
   }
 
+  /**
+   * カメラ視錐台カリング（画面外の編成非表示）
+   */
+  public applyVisibility(camera: THREE.Camera, isLayerVisible: (layer: GridLayer) => boolean): void {
+    camera.updateMatrixWorld();
+    this.cullProjScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.cullFrustum.setFromProjectionMatrix(this.cullProjScreen);
+
+    for (const train of this.trains) {
+      const curLyr = train.currentTile.layer;
+      const tgtLyr = train.targetTile.layer;
+      const curVis = isLayerVisible(curLyr);
+      const tgtVis = isLayerVisible(tgtLyr);
+
+      if (!curVis && !tgtVis) {
+        train.mesh.visible = false;
+        continue;
+      }
+
+      this.cullBox.makeEmpty();
+      this.cullBox.expandByPoint(train.frontPosition);
+      for (const car of train.cars) {
+        this.cullBox.expandByPoint(car.position);
+      }
+      this.cullBox.min.x -= TrainManager.CULL_MARGIN;
+      this.cullBox.min.y -= TrainManager.CULL_MARGIN;
+      this.cullBox.min.z -= TrainManager.CULL_MARGIN;
+      this.cullBox.max.x += TrainManager.CULL_MARGIN;
+      this.cullBox.max.y += TrainManager.CULL_MARGIN;
+      this.cullBox.max.z += TrainManager.CULL_MARGIN;
+
+      train.mesh.visible = this.cullFrustum.intersectsBox(this.cullBox);
+    }
+  }
+
   public getTrainById(id: number): TrainInstance | undefined {
     return this.trains.find(t => t.id === id);
   }
 
   /**
-   * ⑤ & ⑦ スポーン（車種・両数・初期進行方向・保有ID指定）
+   * 新しい列車インスタンスを生成して配置
    */
   public spawnTrain(
     x: number,
@@ -148,18 +139,19 @@ export class TrainManager {
     carCount: number = 3,
     initialDirIdx?: number,
     fleetId?: string,
-    layer?: GridLayer
+    layer?: GridLayer,
+    overrideId?: number,
+    initialPassengers: number = 0,
+    initialCargoLoad?: number
   ): TrainInstance | null {
     const spawnLayer: GridLayer = layer ?? (this.worldMap.getTile(x, z)?.layer ?? this.worldMap.activeLayer);
     const tile = this.worldMap.getTile(x, z, spawnLayer);
-    if (!tile || !this.isTrackTile(tile)) {
-      return null;
-    }
+    if (!tile || !this.kinematics.isTrackTile(tile)) return null;
 
     const elevOffset = tile.elevationOffset ?? 0;
     const baseHeight = layerToHeight(spawnLayer, elevOffset);
 
-    // Build 3D formation using ModelFactory
+    // 車両編成の3Dメッシュ生成
     const { group: trainGroup, cars } = ModelFactory.createTrainFormation(modelInfo, carCount);
     this.scene.add(trainGroup);
 
@@ -173,9 +165,8 @@ export class TrainManager {
     }
     const dirVec = WorldMap.DIRS[chosenDirIdx];
     const dir = new THREE.Vector3(dirVec.x, 0, dirVec.z).normalize();
-    const nextTile = this.findNextTrackTile(x, z, spawnLayer, dir, true);
+    const nextTile = this.kinematics.findNextTrackTile(x, z, spawnLayer, dir, true, this.worldMap);
 
-    // 基準移動速度 (マス/分 = 等速時のマス/秒)
     const speedTilesPerSec = modelInfo.speedTilesPerMinute ?? 1.5;
     const initialYaw = Math.atan2(dir.x, dir.z);
 
@@ -185,9 +176,6 @@ export class TrainManager {
       car.rotation.set(0, initialYaw, 0);
     });
 
-    // ③ 列車誕生時の「ブラックホール収縮」バグ解消:
-    // スポーン時に進行方向の逆向きに「最後尾 (i = carCount - 1) から先頭 (i = 0)」までの
-    // 走行履歴配列（累積距離付き）を事前生成し、各車両が1点に圧縮されるのを完全に防止する
     const initialHistory: PathSample[] = [];
     let accumDist = 0;
     for (let i = carCount - 1; i >= 0; i--) {
@@ -205,11 +193,21 @@ export class TrainManager {
       });
     }
 
-    const trainId = this.nextTrainId++;
+    const actualId = (overrideId !== undefined && overrideId > 0) ? overrideId : this.nextTrainId++;
+    if (actualId >= this.nextTrainId) {
+      this.nextTrainId = actualId + 1;
+    }
+
     const nextLayer: GridLayer = (nextTile?.layer ?? spawnLayer) as GridLayer;
+    const isFreight = modelInfo.category === 'freight';
+    const cargoCapacity = isFreight ? Math.max(0, (carCount - 1) * 3) : 0;
+    const actualCargoLoad = isFreight
+      ? (initialCargoLoad !== undefined ? Math.min(cargoCapacity, initialCargoLoad) : 0)
+      : undefined;
+
     const train: TrainInstance = {
-      id: trainId,
-      name: `${modelInfo.name} ${trainId}号`,
+      id: actualId,
+      name: `${modelInfo.name} ${actualId}号`,
       model: modelInfo,
       carCount,
       mesh: trainGroup,
@@ -222,22 +220,23 @@ export class TrainManager {
       isStopped: false,
       isAtsBraked: false,
       isSignalStopped: false,
+      isTrapped: false,
       occupiedTiles: [{ x, z, layer: spawnLayer }],
       stopTimer: 0,
-      passengers: 0,
-      capacity: modelInfo.category === 'freight' ? 0 : modelInfo.baseCapacity * carCount,
+      passengers: initialPassengers,
+      capacity: isFreight ? 0 : modelInfo.baseCapacity * carCount,
       isReversed: false,
       cars,
       heightY: baseHeight,
       pathHistory: initialHistory,
-      totalPassengers: 0,
+      totalPassengers: initialPassengers,
       totalRevenue: 0,
       totalCost: 0,
       monthlyProfit: 0,
       fleetId,
       lastStationGroupId: null,
-      cargoLoad: 0,
-      cargoCapacity: modelInfo.category === 'freight' ? Math.max(0, (carCount - 1) * 3) : 0,
+      cargoLoad: actualCargoLoad,
+      cargoCapacity,
       cargoPickup: null,
       cargoTraveledTiles: 0,
       stopMode: null,
@@ -246,443 +245,19 @@ export class TrainManager {
       overrideDepartureRule: null
     };
 
-    // 初期配置の物理姿勢・占有タイルを即座に確定
-    this.applyCarTransforms(train);
-    train.occupiedTiles = this.calculateOccupiedTiles(train);
+    this.kinematics.applyCarTransforms(train);
+    train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
 
-    // 貨物列車は購入・配置時点でコンテナ積載数0（空荷・緊締装置のみ表示）
-    if (modelInfo.category === 'freight') {
-      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, 0);
+    if (isFreight) {
+      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, actualCargoLoad ?? 0);
     }
 
     this.trains.push(train);
-    this.audioManager.playHorn();
     return train;
   }
 
   /**
-   * ワールド座標系のベクトルを最も近い方向インデックス(0=北,1=東,2=南,3=西)に丸める
-   */
-  private vecToDirIdx(v: THREE.Vector3): number {
-    let best = 0;
-    let bestDot = -Infinity;
-    for (let i = 0; i < 4; i++) {
-      const d = WorldMap.DIRS[i];
-      const dot = v.x * d.x + v.z * d.z;
-      if (dot > bestDot + 1e-4) {
-        bestDot = dot;
-        best = i;
-      }
-    }
-    return best;
-  }
-
-  /**
-   * ①③⑦⑧ 実際の線路接続（向き・曲線・勾配レベル・ポイント開通方向）に基づく次タイル探索。
-   *
-   * ③ 現在タイルが持つ出口は常に高々2方向（進入側=back とその先=forward）であり、
-   * 「進入してきた方向の反対（back）」を除いた残りの出口だけが、実際に進める唯一の方向になる。
-   * 単に列車の現在の向き（ヘディング）から直進・右・左を試すと、向きが合っていない直線レールでも
-   * たまたま90度方向の出口と一致してしまい誤って接続扱いになるため、この方式は採らない。
-   * 隣接タイル側にも back 方向の受け口が存在し、かつ双方の高さレベルが一致しない限り「未接続」とし、
-   * 有効な接続先が一つも見つからない場合は null を返す（呼び出し側で列車を折り返させる）。
-   */
-  private findNextTrackTile(currX: number, currZ: number, currLayer: GridLayer, currentDir: THREE.Vector3, isSpawn: boolean = false): TileData | null {
-    const curTile = this.worldMap.getTile(currX, currZ, currLayer);
-    if (!curTile) return null;
-
-    const curExits = WorldMap.getTileExits(curTile);
-    if (curExits.length === 0) return null;
-
-    const headingIdx = this.vecToDirIdx(currentDir);
-
-    let candidateIdxs: number[];
-    if (isSpawn) {
-      // スポーン時は「進入してきた方向」が存在しないため、現在の向きに一致する出口を優先する
-      const matching = curExits.find(e => e.idx === headingIdx);
-      candidateIdxs = matching ? [matching.idx] : curExits.map(e => e.idx);
-    } else if (curTile.type.startsWith('point_switch')) {
-      // ③ 分岐器の場合: 進入方向(incomingSide)によって直進・分岐または合流(back)を決定
-      const incomingSide = WorldMap.opposite(headingIdx);
-      const forward = ((curTile.rotation % 4) + 4) % 4;
-      const back = WorldMap.opposite(forward);
-      const branchDir = curTile.switchBranchSide === 'left' ? WorldMap.rotateCCW(forward) : WorldMap.rotateCW(forward);
-
-      if (incomingSide === forward || incomingSide === branchDir) {
-        // 合流進入（背向進入）：直進側または分岐側から進入してきた場合は、分岐条件を無視して合流方向（根元=back）へ進行
-        candidateIdxs = [back];
-      } else {
-        // 根元側から進入（対向進入）：現在の開通状態に従って直進または分岐へ進行
-        const targetExit = curTile.switchState === 'diverge' ? branchDir : forward;
-        candidateIdxs = [targetExit];
-      }
-    } else {
-      // currentDir は「このタイルに進入してきた時の向き」＝back方向はその反対
-      const backIdx = WorldMap.opposite(headingIdx);
-      const forward = curExits.filter(e => e.idx !== backIdx).map(e => e.idx);
-      candidateIdxs = forward.length > 0 ? forward : curExits.map(e => e.idx);
-    }
-
-    for (const idx of candidateIdxs) {
-      const exit = curExits.find(e => e.idx === idx);
-      if (!exit) continue;
-
-      let nx: number;
-      let nz: number;
-      if (exit.targetOffset) {
-        // ② シーサスクロッシング等の対角渡り線（A⇄D、C⇄B）への直接移動
-        nx = currX + exit.targetOffset.dx;
-        nz = currZ + exit.targetOffset.dz;
-      } else {
-        const d = WorldMap.DIRS[idx];
-        nx = currX + d.x;
-        nz = currZ + d.z;
-      }
-
-      const backIdx = WorldMap.opposite(idx);
-
-      // まず現在のレイヤーで隣接タイルを探索
-      let neighbor = this.worldMap.getTile(nx, nz, currLayer);
-      let nExits = neighbor && this.isTrackTile(neighbor) ? WorldMap.getTileExits(neighbor) : [];
-      let nExit = nExits.find(e => e.idx === backIdx);
-
-      // 同一レイヤーで接続先が見つからない場合、上下階層（スロープ境界等）を探索
-      if (!nExit) {
-        for (const candLayer of GRID_LAYERS) {
-          if (candLayer === currLayer) continue;
-          const candTile = this.worldMap.getTile(nx, nz, candLayer);
-          if (!candTile || !this.isTrackTile(candTile)) continue;
-          const candExits = WorldMap.getTileExits(candTile);
-          const candExit = candExits.find(e => e.idx === backIdx);
-          if (candExit) {
-            // 高さが一致するかチェック
-            if (exit.worldHeight !== undefined && candExit.worldHeight !== undefined) {
-              if (Math.abs(exit.worldHeight - candExit.worldHeight) <= 0.05) {
-                neighbor = candTile;
-                nExits = candExits;
-                nExit = candExit;
-                break;
-              }
-            } else if (exit.level === candExit.level) {
-              neighbor = candTile;
-              nExits = candExits;
-              nExit = candExit;
-              break;
-            }
-          }
-        }
-      }
-
-      if (!neighbor || !nExit) continue; // 隣接タイル側がこちらを向いて接続していない（向き違い・分岐未開通など）
-
-      // ① 階層・標高・レベルの接続判定（高さが異なる線路同士は接続しない）
-      if (exit.worldHeight !== undefined && nExit.worldHeight !== undefined) {
-        if (Math.abs(exit.worldHeight - nExit.worldHeight) > 0.05) {
-          continue; // 山の上と平地など、高さが合っていない場合は接続しない（崖落下防止）
-        }
-      } else if (nExit.level !== exit.level) {
-        continue; // レベル不一致
-      }
-
-      return neighbor;
-    }
-
-    return null; // 有効な接続なし = 列車は折り返す
-  }
-
-  /**
-   * 次に進むべきタイルを決定し、方向・目標タイルを更新する。接続先が無ければ（デッドエンド）
-   * その場で折り返す。停車中の列車に対しては、発車が確定した瞬間にのみ呼び出すこと。
-   */
-  private resolveNextTileOrReverse(train: TrainInstance): void {
-    const next = this.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction);
-    if (next) {
-      let newDir = new THREE.Vector3(next.x - train.currentTile.x, 0, next.z - train.currentTile.z).normalize();
-      // ③ シーサスクロッシング通過後の「方向喪失・横滑り」防止:
-      // 対角移動（斜め45度）の場合、進行方向ベクトルに斜め成分が残ると vecToDirIdx で方位誤認を起こすため、
-      // クロッシングの主線軸（cardinal direction）に強制補正する
-      if (Math.abs(newDir.x) > 0.01 && Math.abs(newDir.z) > 0.01) {
-        const curTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-        const nextTile = this.worldMap.getTile(next.x, next.z, (next.layer ?? train.currentTile.layer) as GridLayer);
-        const scissorsTile = (curTile && curTile.type.startsWith('scissors_crossing')) ? curTile : nextTile;
-        if (scissorsTile && scissorsTile.type.startsWith('scissors_crossing')) {
-          const along = scissorsTile.rotation === 1 ? 1 : 2;
-          const alongVec = WorldMap.DIRS[along];
-          const dot = newDir.x * alongVec.x + newDir.z * alongVec.z;
-          const finalIdx = dot >= 0 ? along : WorldMap.opposite(along);
-          const cardinalDir = WorldMap.DIRS[finalIdx];
-          newDir = new THREE.Vector3(cardinalDir.x, 0, cardinalDir.z);
-        } else {
-          const bestIdx = this.vecToDirIdx(newDir);
-          const cardinalDir = WorldMap.DIRS[bestIdx];
-          newDir = new THREE.Vector3(cardinalDir.x, 0, cardinalDir.z);
-        }
-      }
-      train.isTrapped = false;
-      train.direction.copy(newDir);
-      train.targetTile = { x: next.x, z: next.z, layer: (next.layer ?? train.currentTile.layer) as GridLayer };
-    } else {
-      // ④ 折り返し（デッドエンド）:
-      // 【無限反転ループ解消】反対方向（反転先）にも線路が存在するか事前に確認
-      const reverseDir = train.direction.clone().negate();
-      const carCount = train.carCount;
-      const lagDist = (carCount - 1) * ModelFactory.CAR_SPACING;
-      const oldRearSample = this.sampleHistoryAtLag(train.pathHistory, lagDist);
-      const rearX = Math.round(oldRearSample.pos.x / WorldMap.TILE_SIZE);
-      const rearZ = Math.round(oldRearSample.pos.z / WorldMap.TILE_SIZE);
-
-      // 旧先頭車の階層に固定せず、新先頭車（旧最後尾）の物理高さやレイヤーから最適な軌道タイルを探索
-      let rearLayer: GridLayer = (oldRearSample.layer ?? train.currentTile.layer) as GridLayer;
-      let rearTile = this.worldMap.getTile(rearX, rearZ, rearLayer);
-      if (!rearTile || !this.isTrackTile(rearTile)) {
-        let minDiff = Infinity;
-        for (const lyr of GRID_LAYERS) {
-          const t = this.worldMap.getTile(rearX, rearZ, lyr);
-          if (t && this.isTrackTile(t)) {
-            const h = this.getTileInterpolatedHeight(t, lyr);
-            const diff = Math.abs(h - oldRearSample.pos.y);
-            if (diff < minDiff) {
-              minDiff = diff;
-              rearLayer = lyr;
-            }
-          }
-        }
-      }
-      const reverseNext = this.findNextTrackTile(rearX, rearZ, rearLayer, reverseDir, true);
-
-      if (reverseNext) {
-        // 反対側に進める線路がある場合は正常に反転
-        train.isTrapped = false;
-        this.reverseTrainDirection(train);
-      } else {
-        // 前後両方向とも線路がない（孤立・線路分断）: 反転ループを遮断して安全に停止
-        train.isTrapped = true;
-        train.speed = 0;
-        train.progress = 0;
-        train.targetTile = { ...train.currentTile };
-      }
-    }
-  }
-
-  private isTrackTile(t: TileData): boolean {
-    return (
-      t.type.includes('rail') ||
-      t.type.includes('station') ||
-      t.type === 'signal_yard' ||
-      t.type.includes('point_switch') ||
-      t.type.includes('scissors_crossing') ||
-      t.type === 'level_crossing' ||
-      t.type.includes('slope')
-    );
-  }
-
-  /**
-   * ⑥ ATS（先行列車検知・自動停止・閉塞制御）
-   */
-  private checkAtsCollisionAvoidance() {
-    for (let i = 0; i < this.trains.length; i++) {
-      const trainA = this.trains[i];
-      if (!trainA || !trainA.occupiedTiles || trainA.occupiedTiles.length === 0) continue;
-      // 停車中の列車は既に停止しているため、ATS緊急ブレーキ判定の対象外
-      if (trainA.isStopped) {
-        trainA.isAtsBraked = false;
-        continue;
-      }
-      let mustStop = false;
-
-      for (let j = 0; j < this.trains.length; j++) {
-        if (i === j) continue;
-        const trainB = this.trains[j];
-        if (!trainB || !trainB.occupiedTiles || trainB.occupiedTiles.length === 0) continue;
-
-        // ① 別線路（複線など）の列車に対する立ち往生（ATS誤爆）を防止しつつ、
-        // 同一線路上で前方2マス（安全車間距離4.2m）以内にいる先行列車を確実に検知する
-        let isSharingRoute = false;
-        for (const ta of trainA.occupiedTiles) {
-          if (trainB.occupiedTiles.some(tb => tb.x === ta.x && tb.z === ta.z && tb.layer === ta.layer)) {
-            isSharingRoute = true;
-            break;
-          }
-        }
-
-        // targetTile の先にある進路タイルの先読み（車間距離4.2m≒2マス先の先行列車検知用）
-        if (!isSharingRoute) {
-          const next1 = this.findNextTrackTile(trainA.targetTile.x, trainA.targetTile.z, trainA.targetTile.layer, trainA.direction);
-          if (next1) {
-            const l1 = (next1.layer ?? trainA.targetTile.layer) as GridLayer;
-            if (trainB.occupiedTiles.some(tb => tb.x === next1.x && tb.z === next1.z && tb.layer === l1)) {
-              isSharingRoute = true;
-            } else {
-              const dir1 = new THREE.Vector3(next1.x - trainA.targetTile.x, 0, next1.z - trainA.targetTile.z).normalize();
-              const next2 = this.findNextTrackTile(next1.x, next1.z, l1, dir1);
-              if (next2) {
-                const l2 = (next2.layer ?? l1) as GridLayer;
-                if (trainB.occupiedTiles.some(tb => tb.x === next2.x && tb.z === next2.z && tb.layer === l2)) {
-                  isSharingRoute = true;
-                }
-              }
-            }
-          }
-        }
-
-        // 同一進路上でなければ衝突判定から除外する
-        if (!isSharingRoute) continue;
-
-        // 先行列車 trainB のすべての車体ポイント（先頭＋各車両位置）を走査
-        const checkPoints = [trainB.frontPosition, ...trainB.cars.map(c => c.position)];
-        let closestDist = Infinity;
-        let isAhead = false;
-
-        for (const pt of checkPoints) {
-          // ① 立体交差除外: 高度差（Y差）が1.5mを超えるポイントは高架上または地下の別階層なので衝突判定から除外
-          if (Math.abs(trainA.frontPosition.y - pt.y) > 1.5) {
-            continue;
-          }
-
-          // 水平距離（XZ平面）を算出
-          const dx = pt.x - trainA.frontPosition.x;
-          const dz = pt.z - trainA.frontPosition.z;
-          const horizontalDist = Math.hypot(dx, dz);
-
-          // 進行方向ベクトルとの内積（前方判定）
-          const toPtHoriz = new THREE.Vector3(dx, 0, dz);
-          const dot = toPtHoriz.dot(trainA.direction);
-
-          if (dot > 0) {
-            // trainA の進行方向前方にある同一階層の車体ポイント
-            if (horizontalDist < closestDist) {
-              closestDist = horizontalDist;
-              isAhead = true;
-            }
-          } else if (horizontalDist < 2.0) {
-            // 同一階層の至近距離接触（横やすれ違い・めり込み防止）
-            if (horizontalDist < closestDist) {
-              closestDist = horizontalDist;
-            }
-          }
-        }
-
-        // 前方に先行列車が存在し、かつ安全車間距離 (4.2m) 未満であれば ATS 発動
-        if (isAhead && closestDist < 4.2) {
-          if (this.canBypassAtsForCoupling(trainA, trainB)) {
-            continue;
-          }
-          mustStop = true;
-          break;
-        }
-
-        // 同一階層の極至近距離衝突防止 (2.0m未満)
-        if (closestDist < 2.0) {
-          if (this.canBypassAtsForCoupling(trainA, trainB)) {
-            continue;
-          }
-          mustStop = true;
-          break;
-        }
-      }
-
-      trainA.isAtsBraked = mustStop;
-    }
-  }
-
-  /**
-   * Phase3 ①: 誘導信号モード判定
-   * 後続(follower)が先行(leader)の停車中ホームへ安全に進入・連結できる場合のみ true を返す。
-   * 「先行両数＋後続両数 ≤ 10両」かつ「合計両数 ≤ ホーム有効長」を満たさない場合は、
-   * 通常のATS停止距離をそのまま適用し、手前で絶対停止させる。
-   */
-  private canBypassAtsForCoupling(follower: TrainInstance, leader: TrainInstance): boolean {
-    if (!leader.isStopped) return false;
-
-    const followerTile = this.worldMap.getTile(follower.currentTile.x, follower.currentTile.z, follower.currentTile.layer);
-    const leaderTile = this.worldMap.getTile(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer);
-    if (!followerTile || !leaderTile) return false;
-    if (!leaderTile.type.startsWith('station')) return false; // 信号場・留置線での併合は対象外
-
-    // followerが既に駅にいるか、または駅ホームに向かって進入中（targetTileが同じ駅）かを判定
-    const targetTileData = this.worldMap.getTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer);
-    const followerStationGroupId = followerTile.stationGroupId ?? targetTileData?.stationGroupId;
-    if (!followerStationGroupId || followerStationGroupId !== leaderTile.stationGroupId) return false;
-
-    const effectiveLength = this.worldMap.getStationRunLength(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer) || 1;
-    return checkCoupleEligibility(leader.carCount, follower.carCount, effectiveLength).eligible;
-  }
-
-  /**
-   * タイルの種類・階層・標高オフセットに応じた接続高さを取得
-   */
-  private getTileInterpolatedHeight(t?: TileData, defaultLayer: GridLayer = 1): number {
-    if (!t) return layerToHeight(defaultLayer);
-    const elev = t.elevationOffset ?? 0;
-    const tLayer = t.layer ?? defaultLayer;
-    const baseH = layerToHeight(tLayer, elev);
-    if (t.type === 'rail_slope') {
-      const part = t.slopePart ?? 0;
-      return baseH + (part + 0.5) * 0.75;
-    }
-    if (t.type === 'rail_slope_underground') {
-      const part = t.slopePart ?? 0;
-      return elev - (part + 0.5) * 0.75;
-    }
-    return baseH;
-  }
-
-  /**
-   * 現在の progress に応じた先頭車のワールド位置 frontPosition を算出・更新
-   */
-  private updateTrainFrontPosition(train: TrainInstance): void {
-    const fromTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-    const toTile = this.worldMap.getTile(train.targetTile.x, train.targetTile.z, train.targetTile.layer);
-    const fromH = this.getTileInterpolatedHeight(fromTile, train.currentTile.layer);
-    const toH = this.getTileInterpolatedHeight(toTile, train.targetTile.layer);
-    train.heightY = THREE.MathUtils.lerp(fromH, toH, train.progress);
-
-    const fromPos = new THREE.Vector3(
-      train.currentTile.x * WorldMap.TILE_SIZE,
-      fromH,
-      train.currentTile.z * WorldMap.TILE_SIZE
-    );
-    const toPos = new THREE.Vector3(
-      train.targetTile.x * WorldMap.TILE_SIZE,
-      toH,
-      train.targetTile.z * WorldMap.TILE_SIZE
-    );
-    train.frontPosition.lerpVectors(fromPos, toPos, train.progress);
-  }
-
-  /**
-   * 先頭車の最新位置・姿勢を経路履歴（pathHistory）へ即座に記録・同期する
-   * 反転処理（reverseTrainDirection）や駅到着・停止時に呼び出すことで、
-   * 極超高速サブステップ中であっても走行履歴が前フレームのまま乖離するのを防止する
-   */
-  private recordCurrentHeadSample(train: TrainInstance): void {
-    this.updateTrainFrontPosition(train);
-    const fromTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-    const toTile = this.worldMap.getTile(train.targetTile.x, train.targetTile.z, train.targetTile.layer);
-    const fromH = this.getTileInterpolatedHeight(fromTile, train.currentTile.layer);
-    const toH = this.getTileInterpolatedHeight(toTile, train.targetTile.layer);
-
-    const yaw = train.direction.lengthSq() > 0.001
-      ? Math.atan2(train.direction.x, train.direction.z)
-      : (train.pathHistory[train.pathHistory.length - 1]?.yaw ?? 0);
-
-    const heightDiff = toH - fromH;
-    const pitch = Math.abs(heightDiff) > 0.05
-      ? -Math.atan2(heightDiff, WorldMap.TILE_SIZE)
-      : 0;
-
-    const isCurving = fromTile?.type.includes('curve') || toTile?.type.includes('curve');
-    const cant = isCurving ? 0.04 : 0;
-
-    const currentHeadLayer: GridLayer = (train.progress < 0.5
-      ? (train.currentTile.layer ?? 1)
-      : (train.targetTile.layer ?? train.currentTile.layer ?? 1)) as GridLayer;
-
-    this.recordPathSample(train, train.frontPosition, yaw, pitch, cant, currentHeadLayer);
-  }
-
-  /**
-   * メイン更新ループ
+   * メイン更新ループ（パイプライン化）
    */
   public update(
     deltaTime: number,
@@ -693,34 +268,60 @@ export class TrainManager {
     _getDemandMultiplier?: (x: number, z: number, hour: number) => number,
     cargoHooks?: CargoHooks,
     onPassengerCost?: (amount: number) => void
-  ) {
+  ): void {
     if (this.trains.length === 0 || speedMultiplier <= 0) return;
 
-    const dt = deltaTime * speedMultiplier;
+    // =========================================================================
+    // ステップ 1: 時間進行・サブステップ幅の算出
+    // =========================================================================
+    const clampedDelta = Math.min(deltaTime, 0.05);
+    const dt = clampedDelta * speedMultiplier;
 
-    // 【時空の歪み解消】サブステッピング（Sub-stepping）の導入
-    // 高倍速（超高速・極超高速 720倍速=12時間/秒）でも脱線・閉塞すり抜け・駅通過判定の飛び越しが起きないよう、
-    // 1サブステップあたりの最大移動進行度を制御し、適切なサブステップ数に均等分割する。
-    const MAX_SUB_STEP_PROGRESS = speedMultiplier >= 60 ? 0.35 : 0.25;
+    const MAX_SUB_STEP_PROGRESS = speedMultiplier >= 60 ? 0.85 : 0.25;
     let maxSpeed = 1.5;
     for (const t of this.trains) {
       if (t.speed > maxSpeed) maxSpeed = t.speed;
     }
     const maxProgressInFrame = maxSpeed * dt;
-    const maxAllowedSteps = speedMultiplier >= 60 ? 120 : 20;
+    const maxAllowedSteps = speedMultiplier >= 60 ? 12 : 6;
     const numSubSteps = Math.min(Math.max(1, Math.ceil(maxProgressInFrame / MAX_SUB_STEP_PROGRESS)), maxAllowedSteps);
     const subDt = dt / numSubSteps;
 
-    // Phase3 ①②: 併合で消滅する編成・分割で新規生成される編成は、ループ終了後にまとめて反映する
+    const currentFrameTotalMin = ((currentHour % 24) * 60 + currentMinute) % 1440;
+    const prevFrameTotalMin = this.lastUpdateHour >= 0
+      ? ((this.lastUpdateHour % 24) * 60 + this.lastUpdateMinute) % 1440
+      : currentFrameTotalMin;
+    const frameElapsedMin = (currentFrameTotalMin - prevFrameTotalMin + 1440) % 1440;
+
     const trainsPendingRemoval: number[] = [];
     const trainsPendingAdd: TrainInstance[] = [];
+    let hasOccupancyChanged = true;
 
-    // サブステップループ開始
+    // =========================================================================
+    // ステップ 2: サブステップループ
+    // =========================================================================
     for (let step = 0; step < numSubSteps; step++) {
-      // ① 最大10両編成の全マス在線ロック計算 ＆ 閉塞更新（消滅予定の幽霊列車を除外）
+      const shouldRecordHistory = speedMultiplier < 60 || step === numSubSteps - 1;
+
+      const stepStartTotalMin = (prevFrameTotalMin + (frameElapsedMin * step) / numSubSteps) % 1440;
+      const stepEndTotalMin = (step === numSubSteps - 1)
+        ? currentFrameTotalMin
+        : (prevFrameTotalMin + (frameElapsedMin * (step + 1)) / numSubSteps) % 1440;
+
+      const subStepPrevHour = Math.floor(stepStartTotalMin / 60) % 24;
+      const subStepPrevMinute = Math.floor(stepStartTotalMin % 60);
+      const subStepHour = Math.floor(stepEndTotalMin / 60) % 24;
+      const subStepMinute = Math.floor(stepEndTotalMin % 60);
+
+      // (2-A) 在線ロック更新 ＆ 閉塞更新
       const activeTrains = this.trains.filter(t => !trainsPendingRemoval.includes(t.id));
       for (const train of activeTrains) {
-        train.occupiedTiles = this.calculateOccupiedTiles(train);
+        const isStatic = !!(train.isStopped || train.isSignalStopped || train.isAtsBraked || train.isTrapped);
+        if (isStatic && train.occupiedTiles && train.occupiedTiles.length > 0) {
+          continue;
+        }
+        train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
+        hasOccupancyChanged = true;
       }
       this.blockSignalManager.updateOccupancy(
         activeTrains.map(t => ({
@@ -732,522 +333,354 @@ export class TrainManager {
           isDeadlocked: !!((t.isSignalStopped || t.isAtsBraked || t.isTrapped) && !t.isStopped),
           speed: t.speed
         })),
-        subDt
+        subDt,
+        hasOccupancyChanged
       );
+      hasOccupancyChanged = false;
 
-      // ⑥ ATS 衝突防止チェック（サブステップ毎に評価し、すり抜けを完全防止）
-      this.checkAtsCollisionAvoidance();
+      // (2-B) ATS 衝突防止チェック
+      this.collisionSystem.checkAtsCollisionAvoidance(activeTrains, this.worldMap, speedMultiplier);
 
+      // (2-C) 各編成の移動・停車・発車制御
       for (const train of this.trains) {
         if (trainsPendingRemoval.includes(train.id)) continue;
 
-        // 【無限反転ループ解消】孤立状態の復帰チェック
+        // 孤立状態の復帰チェック
         if (train.isTrapped) {
-          const forwardNext = this.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction);
+          const forwardNext = this.kinematics.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction, false, this.worldMap);
           if (forwardNext) {
             train.isTrapped = false;
             train.speed = train.model.speedTilesPerMinute ?? 1.5;
-            this.resolveNextTileOrReverse(train);
+            this.kinematics.resolveNextTileOrReverse(train, this.worldMap);
           } else {
             const reverseDir = train.direction.clone().negate();
-            const carCount = train.carCount;
-            const lagDist = (carCount - 1) * ModelFactory.CAR_SPACING;
-            const oldRearSample = this.sampleHistoryAtLag(train.pathHistory, lagDist);
+            const lagDist = (train.carCount - 1) * ModelFactory.CAR_SPACING;
+            const oldRearSample = this.kinematics.sampleHistoryAtLag(train.pathHistory, lagDist);
             const rearX = Math.round(oldRearSample.pos.x / WorldMap.TILE_SIZE);
             const rearZ = Math.round(oldRearSample.pos.z / WorldMap.TILE_SIZE);
-            const reverseNext = this.findNextTrackTile(rearX, rearZ, train.currentTile.layer, reverseDir, true);
+            const reverseNext = this.kinematics.findNextTrackTile(rearX, rearZ, train.currentTile.layer, reverseDir, true, this.worldMap);
             if (reverseNext) {
               train.isTrapped = false;
               train.speed = train.model.speedTilesPerMinute ?? 1.5;
-              this.reverseTrainDirection(train);
+              this.kinematics.reverseTrainDirection(train, this.worldMap);
             } else {
-              // 依然として孤立中：進行を安全にスキップ
               continue;
             }
           }
         }
-      // ① Station stop & Timed departure（Phase3: ホーム単位の純粋時間軸ダイヤエンジンで判定）
-      // 【論理停止バグ解消】赤信号であっても駅の停車タイマー（stopElapsedMinutes）を凍結させず正常に進行させる
-      if (train.isStopped) {
-        train.stopElapsedMinutes = (train.stopElapsedMinutes ?? 0) + subDt;
 
-        const stoppedTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-        const liveSchedule = stoppedTile?.stationSchedule;
-        const mode = train.stopMode ?? 'stop';
-        const required = train.requiredStopMinutes ?? 0;
+        // 駅停車中判定 ＆ 発車評価
+        if (train.isStopped) {
+          train.stopElapsedMinutes = (train.stopElapsedMinutes ?? 0) + subDt;
 
-        // 分割編成に個別付与された発車ルールがあれば、ホーム共通ダイヤより優先する
-        // 既に発車可能状態に達して出発信号待ちだった編成は発車権を継続
-        let canDeparture = !!train.isSignalStopped;
-        let shouldReverse = !!train.isReversingAtStation;
+          const stoppedTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+          const liveSchedule = stoppedTile?.stationSchedule;
+          const mode = train.stopMode ?? 'stop';
+          const required = train.requiredStopMinutes ?? 0;
 
-        if (!canDeparture) {
-          if (train.overrideDepartureRule) {
-            const rule = train.overrideDepartureRule;
-            const currentTotalMin = ((currentHour % 24) * 60 + currentMinute) % 1440;
-            const prevTotal = this.lastUpdateHour >= 0
-              ? ((this.lastUpdateHour % 24) * 60 + this.lastUpdateMinute) % 1440
-              : currentTotalMin;
+          let canDeparture = !!train.isSignalStopped;
+          let shouldReverse = !!train.isReversingAtStation;
 
-            if (rule.mode === 'timer') {
-              canDeparture = (train.stopElapsedMinutes ?? 0) >= required;
-            } else if (rule.mode === 'pattern') {
-              const patMin = rule.patternMinute ?? 0;
-              const interval = rule.patternIntervalMinutes ?? 60;
-              canDeparture = ScheduleEngine.isPatternIntervalInRange(prevTotal, currentTotalMin, patMin, interval);
-            } else if (rule.mode === 'specific') {
-              const specMin = (((rule.specificHour ?? 0) % 24) * 60 + (rule.specificMinute ?? 0)) % 1440;
-              canDeparture = ScheduleEngine.isMinuteInRange(prevTotal, currentTotalMin, specMin);
-            }
-          } else {
-            // ホーム共通ダイヤの動的リアルタイム評価（日またぎ・パターン・停車時間・折り返し対応・フレームスキップ対応）
-            const evalResult = ScheduleEngine.evaluateStationDeparture(
-              liveSchedule,
-              currentHour,
-              currentMinute,
-              train.stopElapsedMinutes ?? 0,
-              mode,
-              required,
-              shouldReverse,
-              this.lastUpdateHour,
-              this.lastUpdateMinute
-            );
-            canDeparture = evalResult.canDepart;
-            shouldReverse = evalResult.shouldReverse || !!train.isReversingAtStation;
-          }
-        }
+          const currentTotalMin = Math.floor(stepEndTotalMin);
+          const isSameMinuteAsLastDep = train.lastDepartureMinute !== undefined &&
+            Math.abs(((train.lastDepartureMinute % 1440) - (currentTotalMin % 1440) + 1440) % 1440) === 0;
 
-        if (canDeparture) {
-          // 発車進路（新目標タイル）の決定:
-          // 既に信号待ち(isSignalStopped)で進路解決済みの場合は再探索をスキップ
-          if (!train.isSignalStopped) {
-            if (shouldReverse) {
-              train.isReversingAtStation = false;
-              this.reverseTrainDirection(train);
-            } else {
-              // Phase3: 発車タイミングに達したこの瞬間に進路（次のタイル）を決定する
-              this.resolveNextTileOrReverse(train);
-            }
-          }
+          if (!canDeparture && !isSameMinuteAsLastDep) {
+            if (train.overrideDepartureRule) {
+              const rule = train.overrideDepartureRule;
+              const prevTotal = Math.floor(stepStartTotalMin);
 
-          // 出発信号機判定: 決定された発車先の目標閉塞が青信号になるまで駅ホームで安全に待機（停止維持）
-          const toLayer = train.targetTile.layer;
-          const canEnter = this.blockSignalManager.canEnterTile(train.id, train.targetTile.x, train.targetTile.z, toLayer);
-          if (!canEnter) {
-            train.isSignalStopped = true;
-            continue; // 出発信号が赤なので発車保留（進路は既に決定済み）
-          }
-
-          // ② 出発時の乗車処理 (Boarding)
-          if (train.model.category !== 'freight') {
-            const stoppedTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-            const isYard = stoppedTile?.type === 'signal_yard';
-            const isCargo = stoppedTile?.type.startsWith('cargo_station') || !!stoppedTile?.isCargoYard;
-
-            if (stoppedTile && !isYard && !isCargo) {
-              const waiting = stoppedTile.stationPassengers ?? 0;
-              const maxCap = getMaxCapacity(train.model, train.carCount);
-              const freeSeats = Math.max(0, maxCap - train.passengers);
-              const boarding = Math.min(waiting, freeSeats);
-
-              if (boarding > 0) {
-                train.passengers += boarding;
-                const remainingWaiting = waiting - boarding;
-                stoppedTile.stationPassengers = remainingWaiting;
-
-                // ホーム内の全構成タイルの待機乗客数も同期
-                const platInfo = this.worldMap.stationManager.getPlatformByTile(
-                  train.currentTile.x,
-                  train.currentTile.z,
-                  train.currentTile.layer
-                );
-                if (platInfo) {
-                  for (const t of platInfo.platform.tiles) {
-                    const tData = this.worldMap.getTile(t.x, t.z, (t.layer ?? 1) as GridLayer);
-                    if (tData) tData.stationPassengers = remainingWaiting;
-                  }
-                }
-
-                // 運賃収入・統計の更新
-                const fare = Math.round(train.model.farePerRide * boarding);
-                train.totalPassengers += boarding;
-                train.totalRevenue += fare;
-                train.monthlyProfit = train.totalRevenue - train.totalCost;
-
-                stoppedTile.dailyPassengers = (stoppedTile.dailyPassengers ?? 0) + boarding;
-                stoppedTile.totalPassengers = (stoppedTile.totalPassengers ?? 0) + boarding;
-                stoppedTile.totalRevenue = (stoppedTile.totalRevenue ?? 0) + fare;
-                stoppedTile.stationNetProfit = (stoppedTile.totalRevenue ?? 0) - (stoppedTile.stationMaintenance ?? 0);
-
-                if (platInfo) {
-                  this.worldMap.stationManager.addBoardingRecord(
-                    platInfo.station.id,
-                    platInfo.platform.id,
-                    boarding,
-                    fare
-                  );
-                }
-
-                onPassengerFare(fare);
-              }
-
-              // 【乗車率75%損益分岐点モデル】発車時の区間運行費用の計上
-              // 1区間あたり運行費用 = 定員 * 0.75 * 運賃（乗車率75%でトントン）
-              const tripCost = getRunningCostPerTrip(train.model, train.carCount);
-              train.totalCost += tripCost;
-              train.monthlyProfit = train.totalRevenue - train.totalCost;
-              onPassengerCost?.(tripCost);
-            }
-          }
-
-          train.isSignalStopped = false;
-          train.isStopped = false;
-          train.stopMode = null;
-          train.stopElapsedMinutes = 0;
-          train.overrideDepartureRule = null;
-          this.audioManager.playStationBell();
-        }
-        continue;
-      }
-
-      // 閉塞信号による走行中の停止判定（赤信号の場合は閉塞手前で自動停止）
-      const toLayer = train.targetTile.layer;
-      const canEnterBlock = this.blockSignalManager.canEnterTile(train.id, train.targetTile.x, train.targetTile.z, toLayer);
-      if (!canEnterBlock) {
-        train.isSignalStopped = true;
-        continue;
-      } else {
-        train.isSignalStopped = false;
-      }
-
-      // ⑥ ATS brake engaged
-      if (train.isAtsBraked) {
-        continue;
-      }
-
-      // Advance train by subDt
-      train.progress += (train.speed * subDt);
-
-      if (train.progress >= 1.0) {
-        train.progress -= 1.0;
-        if (train.progress >= 1.0) {
-          train.progress = 0.999;
-        }
-        train.currentTile = { ...train.targetTile };
-        this.recordCurrentHeadSample(train);
-
-        // 貨物積載中は実走行マス数をインクリメント（正当な距離運賃を計算するため）
-        if ((train.cargoLoad ?? 0) > 0) {
-          train.cargoTraveledTiles = (train.cargoTraveledTiles ?? 0) + 1;
-        }
-
-        const curTileData = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-
-        // ⑤ 駅・信号場・貨物駅ホーム到着・停車判定（複数マス駅の奥側停車 ＆ 10分単位ダイヤ判定）
-        const isStationOrYard = curTileData && WorldMap.isStationTileType(curTileData.type);
-        let wasAbsorbedByCoupling = false;
-        if (isStationOrYard && curTileData) {
-          const isYard = curTileData.type === 'signal_yard';
-          const isCargo = curTileData.type.startsWith('cargo_station') || !!curTileData.isCargoYard;
-          const isFreight = train.model.category === 'freight';
-          const stGroupId = curTileData.stationGroupId || (() => {
-            const st = this.worldMap.getStationStartTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-            return st ? `st_${st.x}_${st.z}` : `st_${train.currentTile.x}_${train.currentTile.z}`;
-          })();
-
-          // ⑥ 次のマスを先読みし、次もまだ同じ駅グループのマスかを確認
-          const peekNext = this.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction);
-          const nextIsSameStation = !!(peekNext && WorldMap.isStationTileType(peekNext.type) && (
-            peekNext.stationGroupId === stGroupId || (!peekNext.stationGroupId && !curTileData.stationGroupId)
-          ));
-
-          // ⑥ 複数マス駅の場合、手前側1マス目ではなくホームの最奥部（先端）に達した時に停車判定
-          if (!nextIsSameStation && train.lastStationGroupId !== stGroupId) {
-            train.lastStationGroupId = stGroupId;
-
-            // ① 要件(1): ホーム有効長（1〜10両）の安全進入判定
-            // 「ホーム有効長 ＜ 編成長」の列車が進入した場合は、客扱い停止（過走・ホームはみ出し）防止のため
-            // シンプルに「停車不可（通過扱い）」とする安全判定
-            const effectiveLength = this.worldMap.getStationRunLength(train.currentTile.x, train.currentTile.z, train.currentTile.layer)
-              || curTileData.stationTargetLength
-              || 1;
-            let isTooLong = train.carCount > effectiveLength;
-
-            if (!peekNext || isCargo || isYard) {
-              // ② 行き止まり（デッドエンド）の場合、または貨物駅・信号場の場合は、
-              // 旅客ホームドア・乗降ステップのような制約がなく、ヤード・留置線全体で荷役・待避作業を行うため、
-              // 編成が指定有効長を超えていても確実に停車を許容する
-              isTooLong = false;
-            }
-
-            // Phase3 ①: ホーム単位の純粋時間軸ダイヤエンジンで、現在時刻から今回の動作モードを決定する
-            const schedule = curTileData.stationSchedule;
-            const rawArrival = ScheduleEngine.resolveArrival(schedule, currentHour, currentMinute);
-            if (isTooLong) {
-              rawArrival.mode = 'pass';
-              rawArrival.requiredStopMinutes = 0;
-            }
-
-            // 列車種別と駅種別の適合判定
-            let arrival = rawArrival;
-            if (rawArrival.mode !== 'pass') {
-              // 貨物駅に旅客列車が進入した場合: 旅客用設備がないため客扱いせず通過
-              if (isCargo && !isFreight) {
-                arrival = { ...rawArrival, mode: 'pass', requiredStopMinutes: 0 };
-              }
-              // 旅客駅に貨物列車が進入した場合: 荷扱い設備がないため客扱いせず通過
-              else if (!isCargo && !isYard && isFreight) {
-                arrival = { ...rawArrival, mode: 'pass', requiredStopMinutes: 0 };
-              }
-            }
-
-            if (arrival.mode === 'pass') {
-              // 通過ダイヤ、または有効長不足による安全通過: 停車せずそのまま通過
-              // 【通過＋折り返し対応】通過設定かつ折り返しフラグが有効な場合、その場で進行方向を反転
-              if (arrival.isReverse) {
-                this.reverseTrainDirection(train);
-                continue; // 反転後は新先頭車から逆方向への進路が決定済みのため、このサブステップは完了
+              if (rule.mode === 'timer') {
+                canDeparture = (train.stopElapsedMinutes ?? 0) >= required;
+              } else if (rule.mode === 'pattern') {
+                const patMin = rule.patternMinute ?? 0;
+                const interval = rule.patternIntervalMinutes ?? 60;
+                canDeparture = ScheduleEngine.isPatternIntervalInRange(prevTotal, currentTotalMin, patMin, interval);
+              } else if (rule.mode === 'specific') {
+                const specMin = (((rule.specificHour ?? 0) % 24) * 60 + (rule.specificMinute ?? 0)) % 1440;
+                canDeparture = ScheduleEngine.isMinuteInRange(prevTotal, currentTotalMin, specMin);
               }
             } else {
-              train.isStopped = true;
-              train.progress = 0;
-              this.recordCurrentHeadSample(train);
+              const evalResult = ScheduleEngine.evaluateStationDeparture(
+                liveSchedule,
+                subStepHour,
+                subStepMinute,
+                train.stopElapsedMinutes ?? 0,
+                mode,
+                required,
+                shouldReverse,
+                subStepPrevHour,
+                subStepPrevMinute
+              );
+              canDeparture = evalResult.canDepart;
+              shouldReverse = evalResult.shouldReverse || !!train.isReversingAtStation;
+            }
+          }
 
-              // ② 貨物駅＋貨物列車の場合は、コンテナ積み降ろしを行う
-              if (isCargo && isFreight && cargoHooks) {
-                const isCommercial = cargoHooks.isCommercialStation
-                  ? cargoHooks.isCommercialStation(train.currentTile.x, train.currentTile.z, train.currentTile.layer)
-                  : false;
-
-                // 【商業エリアの貨物駅】コンテナを積載していれば自動で全て荷降ろし＆販売
-                if (isCommercial) {
-                  if ((train.cargoLoad ?? 0) > 0) {
-                    const toUnload = train.cargoLoad ?? 0;
-                    const unloadResult = cargoHooks.tryUnload(train.currentTile.x, train.currentTile.z, toUnload, train.currentTile.layer);
-                    const delivered = typeof unloadResult === 'number'
-                      ? unloadResult
-                      : (unloadResult ? toUnload : 0);
-
-                    if (delivered > 0) {
-                      // 【運賃錬金術（エクスプロイト）防止】
-                      // マンハッタン距離×1.5＋4マスを上限キャップとし、駅手前での無限周回ループによる不正運賃増殖を完全に防止
-                      const manhattanDist = train.cargoPickup
-                        ? (Math.abs(train.currentTile.x - train.cargoPickup.x) + Math.abs(train.currentTile.z - train.cargoPickup.z))
-                        : Math.min(train.cargoTraveledTiles ?? 1, 64);
-                      const maxAllowedTiles = Math.max(1, Math.round(manhattanDist * 1.5) + 4);
-                      const distanceTiles = Math.max(1, Math.min(train.cargoTraveledTiles ?? 1, maxAllowedTiles));
-                      const revenue = Math.round(distanceTiles * delivered * CARGO_FARE_PER_CONTAINER_PER_TILE);
-                      train.totalPassengers += delivered;
-                      train.totalRevenue += revenue;
-                      train.monthlyProfit = train.totalRevenue - train.totalCost;
-                      if (revenue > 0) onPassengerFare(revenue);
-
-                      train.cargoLoad = Math.max(0, (train.cargoLoad ?? 0) - delivered);
-                      if (train.cargoLoad === 0) {
-                        train.cargoPickup = null;
-                        train.cargoTraveledTiles = 0;
-                      }
-
-                      curTileData.dailyUnloadedCargo = (curTileData.dailyUnloadedCargo ?? 0) + delivered;
-                      curTileData.totalRevenue = (curTileData.totalRevenue ?? 0) + revenue;
-                      curTileData.stationNetProfit = (curTileData.totalRevenue ?? 0) - (curTileData.stationMaintenance ?? 0);
-
-                      // 【駅統計連携】貨物駅での運賃収入および荷下ろし数を StationManager に加算・同期
-                      const platInfo = this.worldMap.stationManager.getPlatformByTile(
-                        train.currentTile.x,
-                        train.currentTile.z,
-                        train.currentTile.layer
-                      );
-                      if (platInfo) {
-                        this.worldMap.stationManager.addCargoRecord(
-                          platInfo.station.id,
-                          platInfo.platform.id,
-                          0,
-                          delivered,
-                          revenue
-                        );
-                      }
-                    }
-                  }
-                  // 荷降ろし後の残積載数に応じて貨車のコンテナ描写を同期更新
-                  VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad ?? 0);
-                } else {
-                  // 【積み込み】商業エリア外の貨物駅（工業エリア等）でのみ、空き容量があり、駅にコンテナがあれば一括積載
-                  const capacity = train.cargoCapacity ?? 0;
-                  const freeSlots = capacity - (train.cargoLoad ?? 0);
-                  if (freeSlots > 0) {
-                    const loaded = cargoHooks.tryLoad(train.currentTile.x, train.currentTile.z, freeSlots, train.currentTile.layer);
-                    if (loaded > 0) {
-                      train.cargoLoad = (train.cargoLoad ?? 0) + loaded;
-                      train.cargoPickup = { x: train.currentTile.x, z: train.currentTile.z };
-                      train.cargoTraveledTiles = 0;
-                      curTileData.dailyLoadedCargo = (curTileData.dailyLoadedCargo ?? 0) + loaded;
-
-                      // 【駅統計連携】貨物駅での積み込み数を StationManager に加算・同期
-                      const platInfo = this.worldMap.stationManager.getPlatformByTile(
-                        train.currentTile.x,
-                        train.currentTile.z,
-                        train.currentTile.layer
-                      );
-                      if (platInfo) {
-                        this.worldMap.stationManager.addCargoRecord(
-                          platInfo.station.id,
-                          platInfo.platform.id,
-                          loaded,
-                          0,
-                          0
-                        );
-                      }
-
-                      // 列車のコンテナ描写を積載数だけ増加
-                      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad);
-                      // 駅のコンテナ描写を積載数だけ減少
-                      cargoHooks.onStationCargoChanged?.(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-                    }
-                  }
-                }
-              } else if (!isYard && !isCargo && !isFreight) {
-                // 信号場・貨物駅以外の旅客駅かつ旅客列車の場合のみ、旅客処理を行う
-                // ① 駅到着時の降車処理 (Alighting)
-                // 終点（行き止まり）または折り返し運転の場合は全員降車、途中駅では35〜60%が降車
-                if (train.passengers > 0) {
-                  let alighting = 0;
-                  if (arrival.isReverse || arrival.mode === 'reverse' || !peekNext) {
-                    alighting = train.passengers;
-                  } else {
-                    const alightRatio = 0.35 + Math.random() * 0.25;
-                    alighting = Math.min(train.passengers, Math.max(1, Math.round(train.passengers * alightRatio)));
-                  }
-                  train.passengers = Math.max(0, train.passengers - alighting);
-                  // 【重要】降りた乗客は駅外の目的地へ向かうため、待機乗客（stationPassengers）には一切追加・上書きしない。
-                  // ホームで以前から待っていた乗客のみが待機乗客としてホームに残り、発車時に乗車する。
-
-                  // 駅の乗降客数（降車客数）をカウント加算
-                  if (alighting > 0) {
-                    curTileData.dailyPassengers = (curTileData.dailyPassengers ?? 0) + alighting;
-                    curTileData.totalPassengers = (curTileData.totalPassengers ?? 0) + alighting;
-
-                    const platInfo = this.worldMap.stationManager.getPlatformByTile(
-                      train.currentTile.x,
-                      train.currentTile.z,
-                      train.currentTile.layer
-                    );
-                    if (platInfo) {
-                      this.worldMap.stationManager.addBoardingRecord(
-                        platInfo.station.id,
-                        platInfo.platform.id,
-                        alighting,
-                        0 // 降車客のため運賃加算は0（乗車時に計上済み）
-                      );
-                    }
-                  }
-                }
-              }
-
-              // Phase3 ②: 途中駅での分割（切り離し）判定
-              let activeSplitConfig = arrival.splitConfig || schedule?.splitConfig;
-              if (activeSplitConfig && activeSplitConfig.enabled && train.carCount >= 2) {
-                // 編成両数に合わせて前後両数を整合調整（両数不一致による切り離し不発を防止）
-                if (activeSplitConfig.frontCars + activeSplitConfig.rearCars !== train.carCount) {
-                  const fCars = Math.max(1, Math.min(train.carCount - 1, activeSplitConfig.frontCars));
-                  activeSplitConfig = {
-                    ...activeSplitConfig,
-                    frontCars: fCars,
-                    rearCars: train.carCount - fCars
-                  };
-                }
-              }
-              const splitCheck = (!isYard && !isTooLong && train.carCount >= 2)
-                ? validateSplitConfig(train.carCount, activeSplitConfig)
-                : { valid: false };
-
-              if (splitCheck.valid && activeSplitConfig) {
-                const rearTrain = this.performSplit(train, activeSplitConfig, curTileData);
-                trainsPendingAdd.push(rearTrain);
+          if (canDeparture) {
+            if (!train.isSignalStopped) {
+              if (shouldReverse) {
+                train.isReversingAtStation = false;
+                this.kinematics.reverseTrainDirection(train, this.worldMap);
               } else {
-                // Phase3 ①: 併合（連結）判定。同一ホームに既に停車中の先行編成があれば合体する。
-                const leader = !isYard
-                  ? this.trains.find(other =>
-                      other.id !== train.id &&
-                      other.isStopped &&
-                      this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer)?.stationGroupId === stGroupId
-                    )
-                  : undefined;
-
-
-                if (leader && checkCoupleEligibility(leader.carCount, train.carCount, effectiveLength).eligible) {
-                  this.performCoupling(leader, train);
-                  wasAbsorbedByCoupling = true;
-                } else {
-                  // 通常の単独停車
-                  train.stopMode = arrival.mode;
-                  train.stopElapsedMinutes = 0;
-                  train.requiredStopMinutes = arrival.requiredStopMinutes;
-                  train.isReversingAtStation = (arrival.mode === 'reverse') || !!arrival.isReverse;
-                }
+                this.kinematics.resolveNextTileOrReverse(train, this.worldMap);
               }
             }
-          }
-        } else {
-          // 駅以外のマスに出たら、駅グループIDを解除
-          train.lastStationGroupId = null;
-        }
 
-        if (wasAbsorbedByCoupling) {
-          // 吸収された幽霊列車が後続サブステップのATS・閉塞に干渉しないよう、即座にメッシュ解放＆在線クリアし除外
-          this.disposeTrainMesh(train);
-          train.occupiedTiles = [];
-          train.speed = 0;
-          train.isStopped = true;
-          trainsPendingRemoval.push(train.id);
+            const toLayer = train.targetTile.layer;
+            const canEnter = this.blockSignalManager.canEnterTile(train.id, train.targetTile.x, train.targetTile.z, toLayer);
+            if (!canEnter) {
+              train.isSignalStopped = true;
+              continue;
+            }
+
+            // 乗車処理
+            this.payloadSystem.processBoarding(train, stoppedTile ?? null, this.worldMap, onPassengerFare, onPassengerCost);
+
+            train.lastDepartureMinute = currentTotalMin;
+            train.isSignalStopped = false;
+            train.isStopped = false;
+            train.stopMode = null;
+            train.stopElapsedMinutes = 0;
+            train.overrideDepartureRule = null;
+            this.audioManager.playStationBell();
+          }
           continue;
         }
 
-        // ①③ 分岐器・シーサスクロッシング通過時のダイヤ制御（タイムラインバー切替・交互切替・手動維持）
-        if (curTileData && curTileData.type.startsWith('point_switch')) {
-          const switchSched = curTileData.switchSchedule;
-          if (switchSched) {
-            if (switchSched.mode === 'alternate') {
-              // 交互切替: 列車が通過するたびに直進⇄分岐を反転
-              const nextState: SwitchState = curTileData.switchState === 'straight' ? 'diverge' : 'straight';
-              this.worldMap.setSwitchState(train.currentTile.x, train.currentTile.z, nextState, train.currentTile.layer);
-            } else if (switchSched.mode === 'timeline') {
-              // タイムラインバー方式: 現在の指定開通方向に自動切り替え（デフォルト直進）
-              const targetDir = getSwitchDirectionAtTime(switchSched, currentHour, currentMinute);
-              this.worldMap.setSwitchState(train.currentTile.x, train.currentTile.z, targetDir as SwitchState, train.currentTile.layer);
+        // 閉塞信号による停止判定
+        const toLayer = train.targetTile.layer;
+        const canEnterBlock = this.blockSignalManager.canEnterTile(train.id, train.targetTile.x, train.targetTile.z, toLayer);
+        if (!canEnterBlock) {
+          train.isSignalStopped = true;
+          continue;
+        } else {
+          train.isSignalStopped = false;
+        }
+
+        if (train.isAtsBraked) {
+          continue;
+        }
+
+        // 前進
+        train.progress += (train.speed * subDt);
+
+        let tileLoopCount = 0;
+        while (train.progress >= 1.0 && tileLoopCount++ < 10) {
+          train.progress -= 1.0;
+          train.currentTile = { ...train.targetTile };
+          hasOccupancyChanged = true;
+          if (shouldRecordHistory) {
+            this.kinematics.recordCurrentHeadSample(train, this.worldMap);
+          } else {
+            this.kinematics.updateTrainFrontPosition(train, this.worldMap);
+          }
+
+          if ((train.cargoLoad ?? 0) > 0) {
+            train.cargoTraveledTiles = (train.cargoTraveledTiles ?? 0) + 1;
+          }
+
+          const curTileData = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+          const isStationOrYard = curTileData && WorldMap.isStationTileType(curTileData.type);
+          let wasAbsorbedByCoupling = false;
+
+          if (isStationOrYard && curTileData) {
+            const isYard = curTileData.type === 'signal_yard';
+            const isCargo = curTileData.type.startsWith('cargo_station') || !!curTileData.isCargoYard;
+            const isFreight = train.model.category === 'freight';
+            const stGroupId = curTileData.stationGroupId || (() => {
+              const st = this.worldMap.getStationStartTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+              return st ? `st_${st.x}_${st.z}` : `st_${train.currentTile.x}_${train.currentTile.z}`;
+            })();
+
+            const peekNext = this.kinematics.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction, false, this.worldMap);
+            const nextIsSameStation = !!(peekNext && WorldMap.isStationTileType(peekNext.type) && (
+              peekNext.stationGroupId === stGroupId || (!peekNext.stationGroupId && !curTileData.stationGroupId)
+            ));
+
+            if (!nextIsSameStation && train.lastStationGroupId !== stGroupId) {
+              train.lastStationGroupId = stGroupId;
+
+              const effectiveLength = this.worldMap.getStationRunLength(train.currentTile.x, train.currentTile.z, train.currentTile.layer) || 1;
+              let isTooLong = train.carCount > effectiveLength;
+
+              if (!peekNext || isCargo || isYard) {
+                isTooLong = false;
+              }
+
+              const schedule = curTileData.stationSchedule;
+              const rawArrival = ScheduleEngine.resolveArrival(schedule, subStepHour, subStepMinute);
+              if (isTooLong) {
+                rawArrival.mode = 'pass';
+                rawArrival.requiredStopMinutes = 0;
+              }
+
+              let arrival = rawArrival;
+              if (rawArrival.mode !== 'pass') {
+                if (isCargo && !isFreight) {
+                  arrival = { ...rawArrival, mode: 'pass', requiredStopMinutes: 0 };
+                } else if (!isCargo && !isYard && isFreight) {
+                  arrival = { ...rawArrival, mode: 'pass', requiredStopMinutes: 0 };
+                }
+              }
+
+              if (arrival.mode === 'pass') {
+                if (arrival.isReverse) {
+                  this.kinematics.reverseTrainDirection(train, this.worldMap);
+                  train.progress = 0;
+                  break;
+                }
+              } else {
+                train.isStopped = true;
+                train.progress = 0;
+                if (shouldRecordHistory) {
+                  this.kinematics.recordCurrentHeadSample(train, this.worldMap);
+                } else {
+                  this.kinematics.updateTrainFrontPosition(train, this.worldMap);
+                }
+
+                if (isCargo && isFreight && cargoHooks) {
+                  const isCommercial = cargoHooks.isCommercialStation
+                    ? cargoHooks.isCommercialStation(train.currentTile.x, train.currentTile.z, train.currentTile.layer)
+                    : false;
+
+                  if (isCommercial) {
+                    this.payloadSystem.processCargoUnloading(train, cargoHooks, onPassengerFare, this.worldMap);
+                  } else {
+                    this.payloadSystem.processCargoLoading(train, cargoHooks, this.worldMap);
+                  }
+                } else if (!isYard && !isCargo && !isFreight) {
+                  this.payloadSystem.processAlighting(train, arrival, !peekNext, this.worldMap);
+                }
+
+                // 分割判定
+                let activeSplitConfig = arrival.splitConfig || schedule?.splitConfig;
+                if (activeSplitConfig && activeSplitConfig.enabled && train.carCount >= 2) {
+                  if (activeSplitConfig.frontCars + activeSplitConfig.rearCars !== train.carCount) {
+                    const fCars = Math.max(1, Math.min(train.carCount - 1, activeSplitConfig.frontCars));
+                    activeSplitConfig = {
+                      ...activeSplitConfig,
+                      frontCars: fCars,
+                      rearCars: train.carCount - fCars
+                    };
+                  }
+                }
+                const splitCheck = (!isYard && !isTooLong && train.carCount >= 2)
+                  ? validateSplitConfig(train.carCount, activeSplitConfig)
+                  : { valid: false };
+
+                if (splitCheck.valid && activeSplitConfig) {
+                  const rearTrain = this.couplingManager.performSplit(
+                    train,
+                    activeSplitConfig,
+                    curTileData,
+                    () => this.nextTrainId++,
+                    this.scene,
+                    this.audioManager,
+                    this.worldMap,
+                    pos => this.getDistanceFactor(pos),
+                    (id, count) => this.updateTrainCarCount(id, count),
+                    this.onTrainSplit
+                  );
+                  trainsPendingAdd.push(rearTrain);
+                } else {
+                  // 併合（連結）判定
+                  const leader = !isYard
+                    ? this.trains.find(other =>
+                        other.id !== train.id &&
+                        other.isStopped &&
+                        this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer)?.stationGroupId === stGroupId
+                      )
+                    : undefined;
+
+                  if (leader && checkCoupleEligibility(leader.carCount, train.carCount, effectiveLength).eligible) {
+                    this.couplingManager.performCoupling(
+                      leader,
+                      train,
+                      this.audioManager,
+                      pos => this.getDistanceFactor(pos),
+                      (id, count) => this.updateTrainCarCount(id, count),
+                      t => this.disposeTrainMesh(t),
+                      this.onTrainCoupled
+                    );
+                    wasAbsorbedByCoupling = true;
+                  } else {
+                    train.stopMode = arrival.mode;
+                    train.stopElapsedMinutes = 0;
+                    train.requiredStopMinutes = arrival.requiredStopMinutes;
+                    train.isReversingAtStation = (arrival.mode === 'reverse') || !!arrival.isReverse;
+                  }
+                }
+              }
+            }
+          } else {
+            train.lastStationGroupId = null;
+          }
+
+          if (wasAbsorbedByCoupling) {
+            this.disposeTrainMesh(train);
+            train.occupiedTiles = [];
+            train.speed = 0;
+            train.isStopped = true;
+            trainsPendingRemoval.push(train.id);
+            train.progress = 0;
+            break;
+          }
+
+          // 分岐器・シーサスクロッシング通過時のダイヤ制御
+          if (curTileData && curTileData.type.startsWith('point_switch')) {
+            const switchSched = curTileData.switchSchedule;
+            if (switchSched) {
+              if (switchSched.mode === 'alternate') {
+                const nextState: SwitchState = curTileData.switchState === 'straight' ? 'diverge' : 'straight';
+                this.worldMap.setSwitchState(train.currentTile.x, train.currentTile.z, nextState, train.currentTile.layer);
+              } else if (switchSched.mode === 'timeline') {
+                const targetDir = getSwitchDirectionAtTime(switchSched, currentHour, currentMinute);
+                this.worldMap.setSwitchState(train.currentTile.x, train.currentTile.z, targetDir as SwitchState, train.currentTile.layer);
+              }
+            }
+          } else if (curTileData && curTileData.type.startsWith('scissors_crossing')) {
+            const origin = this.worldMap.resolveCrossingOrigin(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+            const switchSched = origin?.switchSchedule;
+            if (origin && switchSched && switchSched.mode === 'timeline') {
+              const targetCrossing = getSwitchDirectionAtTime(switchSched, currentHour, currentMinute, true);
+              this.worldMap.setCrossingState(origin.x, origin.z, targetCrossing as CrossingState, train.currentTile.layer);
             }
           }
-        } else if (curTileData && curTileData.type.startsWith('scissors_crossing')) {
-          // シーサスクロッシング通過時のダイヤ制御
-          const origin = this.worldMap.resolveCrossingOrigin(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-          const switchSched = origin?.switchSchedule;
-          if (origin && switchSched && switchSched.mode === 'timeline') {
-            const targetCrossing = getSwitchDirectionAtTime(switchSched, currentHour, currentMinute, true);
-            this.worldMap.setCrossingState(origin.x, origin.z, targetCrossing as CrossingState, train.currentTile.layer);
+
+          if (!train.isStopped) {
+            this.kinematics.resolveNextTileOrReverse(train, this.worldMap);
+          } else {
+            train.progress = 0;
+            break;
           }
         }
 
-        // Determine next tile
-        // Phase3: 停車が確定した列車は、この時点ではまだ進路を決定しない（停車直後に折り返し処理が
-        // 走ってしまい、分割・併合直後の編成の向きや位置が不正に乱れるのを防ぐため）。
-        // 停車中の列車の進路は、実際に発車が確定した瞬間（下の isStopped ブロック内）に決定する。
-        if (!train.isStopped) {
-          this.resolveNextTileOrReverse(train);
+        if (train.progress >= 1.0) {
+          train.progress = 0.999;
         }
       }
 
-      // 次サブステップのATS・閉塞判定および滑らかな車体姿勢同期のため、先頭車位置と走行履歴を即座に更新
-      // 高速・極超高速（720倍速）であっても中間の全カーブ・全ポイント軌跡を細かく記録し、車両折れ曲がり・脱線表示崩れを防止
+      // 次サブステップ用の先頭車位置更新
       for (const t of this.trains) {
         if (!trainsPendingRemoval.includes(t.id)) {
-          this.recordCurrentHeadSample(t);
+          if (shouldRecordHistory) {
+            this.kinematics.recordCurrentHeadSample(t, this.worldMap);
+          } else {
+            this.kinematics.updateTrainFrontPosition(t, this.worldMap);
+          }
         }
       }
-    }
-  } // サブステップループ終了
+    } // サブステップループ終了
 
-    // 音声タイマー更新（フレーム単位で1回）
-    this.soundTimer += dt;
+    // =========================================================================
+    // ステップ 3: 走行音（ジョイント音）の再生制御
+    // =========================================================================
+    // 実時間（リアルタイム秒）でタイマーを加算し、高倍速時のマシンガン発音やノード爆発を防止
+    this.soundTimer += clampedDelta;
+
+    const isCabActive = this.audioManager.getIsCabActive();
+
     let closestTrain: TrainInstance | null = null;
     let closestDistFactor = 0;
     for (const train of this.trains) {
@@ -1263,62 +696,54 @@ export class TrainManager {
       }
     }
 
-    const effectiveSpeed = closestTrain ? (closestTrain.speed * speedMultiplier) : speedMultiplier;
-    const intervalSec = 1.2 / Math.min(3.0, Math.max(0.6, effectiveSpeed));
-    if (this.soundTimer >= intervalSec) {
-      this.soundTimer = 0;
-      if (closestTrain && closestDistFactor > 0.02) {
-        const cTile = this.worldMap.getTile(closestTrain.currentTile.x, closestTrain.currentTile.z, closestTrain.currentTile.layer);
-        const tTile = this.worldMap.getTile(closestTrain.targetTile.x, closestTrain.targetTile.z, closestTrain.targetTile.layer);
+    // 距離事前カリング: カメラから遠く離れている（0.04未満）列車は発音処理自体をスキップ
+    if (closestTrain && closestDistFactor >= 0.04) {
+      // 走行速度に応じたピッチ・テンポ計算（安全な最小発音インターバル 0.12秒を保証）
+      const trainSpeed = closestTrain.speed;
+      const speedFactor = Math.min(2.5, Math.max(0.6, trainSpeed * (speedMultiplier >= 60 ? 1.8 : (speedMultiplier > 1 ? 1.3 : 1.0))));
+      const intervalSec = Math.max(0.12, 1.2 / speedFactor);
 
-        // トンネル・地下判定
-        const isTunnel = (closestTrain.currentTile.layer !== undefined && closestTrain.currentTile.layer < 0) ||
-          this.worldMap.isTunnelSection(closestTrain.currentTile.x, closestTrain.currentTile.z, closestTrain.currentTile.layer);
+      if (this.soundTimer >= intervalSec) {
+        this.soundTimer = 0;
 
-        // 鉄橋判定（水上または地上2F以上の高架）
-        const isWater = this.worldMap.gridManagerRef?.isWaterAtGroundLevel(closestTrain.currentTile.x, closestTrain.currentTile.z) ?? false;
-        const isBridge = isWater || ((closestTrain.currentTile.layer ?? 1) >= 2);
+        // 前面展望中は車内モーター音・フロアノイズが主役のため、外部列車のジョイント音音量を抑えて歪みと多重干渉を防止
+        const effectiveDistFactor = isCabActive ? closestDistFactor * 0.45 : closestDistFactor;
 
-        const env: 'normal' | 'bridge' | 'tunnel' = isTunnel ? 'tunnel' : (isBridge ? 'bridge' : 'normal');
+        if (effectiveDistFactor >= 0.04) {
+          const cTile = this.worldMap.getTile(closestTrain.currentTile.x, closestTrain.currentTile.z, closestTrain.currentTile.layer);
+          const tTile = this.worldMap.getTile(closestTrain.targetTile.x, closestTrain.targetTile.z, closestTrain.targetTile.layer);
 
-        // 分岐器通過判定
-        const isSwitch = (cTile?.type.includes('switch') || cTile?.type.includes('crossing') ||
-                          tTile?.type.includes('switch') || tTile?.type.includes('crossing')) ?? false;
+          const isTunnel = (closestTrain.currentTile.layer !== undefined && closestTrain.currentTile.layer < 0) ||
+            this.worldMap.isTunnelSection(closestTrain.currentTile.x, closestTrain.currentTile.z, closestTrain.currentTile.layer);
 
-        this.audioManager.playJointSound(effectiveSpeed, env, isSwitch, closestDistFactor);
+          const isWater = this.worldMap.gridManagerRef?.isWaterAtGroundLevel(closestTrain.currentTile.x, closestTrain.currentTile.z) ?? false;
+          const isBridge = isWater || ((closestTrain.currentTile.layer ?? 1) >= 2);
+
+          const env: 'normal' | 'bridge' | 'tunnel' = isTunnel ? 'tunnel' : (isBridge ? 'bridge' : 'normal');
+
+          const isSwitch = (cTile?.type.includes('switch') || cTile?.type.includes('crossing') ||
+                            tTile?.type.includes('switch') || tTile?.type.includes('crossing')) ?? false;
+
+          const effectiveSpeed = Math.min(3.0, trainSpeed * (speedMultiplier > 1 ? 1.3 : 1.0));
+          this.audioManager.playJointSound(effectiveSpeed, env, isSwitch, effectiveDistFactor);
+        }
       }
+    } else if (this.soundTimer >= 1.2) {
+      this.soundTimer = 0;
     }
 
-    // 車両姿勢・3D描画更新（全サブステップ完了後に1回のみ）
+    // =========================================================================
+    // ステップ 4: 車両メッシュ姿勢の確定（applyCarTransforms）
+    // =========================================================================
     for (const train of this.trains) {
       if (trainsPendingRemoval.includes(train.id)) continue;
-      const fromTile = this.worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-      const toTile = this.worldMap.getTile(train.targetTile.x, train.targetTile.z, train.targetTile.layer);
-      const fromH = this.getTileInterpolatedHeight(fromTile, train.currentTile.layer);
-      const toH = this.getTileInterpolatedHeight(toTile, train.targetTile.layer);
-
-      const yaw = train.direction.lengthSq() > 0.001
-        ? Math.atan2(train.direction.x, train.direction.z)
-        : (train.pathHistory[train.pathHistory.length - 1]?.yaw ?? 0);
-
-      const heightDiff = toH - fromH;
-      const pitch = Math.abs(heightDiff) > 0.05
-        ? -Math.atan2(heightDiff, WorldMap.TILE_SIZE)
-        : 0;
-
-      const isCurving = fromTile?.type.includes('curve') || toTile?.type.includes('curve');
-      const cant = isCurving ? 0.04 : 0;
-
-      // 先頭車の現在位置に対応する階層を決定
-      const currentHeadLayer: GridLayer = (train.progress < 0.5
-        ? (train.currentTile.layer ?? 1)
-        : (train.targetTile.layer ?? train.currentTile.layer ?? 1)) as GridLayer;
-
-      this.recordPathSample(train, train.frontPosition, yaw, pitch, cant, currentHeadLayer);
-      this.applyCarTransforms(train);
+      this.kinematics.recordCurrentHeadSample(train, this.worldMap);
+      this.kinematics.applyCarTransforms(train);
     }
 
-    // Phase3 ①②: 併合で消滅した編成の除去、分割で生成された新編成の追加をループ終了後にまとめて反映
+    // =========================================================================
+    // ステップ 5: 分割・併合に伴う編成リストの更新
+    // =========================================================================
     if (trainsPendingRemoval.length > 0) {
       for (const remId of trainsPendingRemoval) {
         const remTrain = this.trains.find(t => t.id === remId);
@@ -1333,641 +758,26 @@ export class TrainManager {
       this.trains.push(...trainsPendingAdd);
     }
 
-    // 前フレームの時刻を記録（高倍速・フレームスキップ時の区間跨ぎ判定用）
     this.lastUpdateHour = currentHour;
     this.lastUpdateMinute = currentMinute;
   }
 
-  /**
-   * ⑤ 時間帯別の乗客需要係数を返す
-   * 朝夕ラッシュ多め、日中普通、深夜ほぼゼロ
-   */
   public static getHourlyDemandMultiplier(hour: number): number {
-    const h = ((hour % 24) + 24) % 24;
-    switch (h) {
-      case 0: return 0.08;
-      case 1:
-      case 2:
-      case 3: return 0.02; // 深夜はほぼゼロ
-      case 4: return 0.06;
-      case 5: return 0.25;
-      case 6: return 0.7;
-      case 7: return 2.6;  // 朝ラッシュ
-      case 8: return 3.4;  // 朝ラッシュピーク
-      case 9: return 2.0;
-      case 10:
-      case 11: return 0.9;
-      case 12:
-      case 13: return 1.2; // 昼休み
-      case 14:
-      case 15:
-      case 16: return 0.85;
-      case 17: return 2.3; // 夕ラッシュ
-      case 18: return 3.0; // 夕ラッシュピーク
-      case 19: return 2.5;
-      case 20: return 1.6;
-      case 21: return 0.9;
-      case 22: return 0.45;
-      case 23: return 0.18;
-      default: return 1.0;
-    }
+    return TrainPayloadSystem.getHourlyDemandMultiplier(hour);
   }
 
-  /**
-   * ④ 先頭車の現在状態を経路履歴に追記する（微小な移動は直前のサンプルを更新するだけに留め、
-   * 配列が際限なく増えないよう、各編成に必要な最大遅延距離を超えた古いサンプルは間引く）
-   */
-  private recordPathSample(train: TrainInstance, pos: THREE.Vector3, yaw: number, pitch: number, cant: number, layer: GridLayer) {
-    const hist = train.pathHistory;
-    const last = hist[hist.length - 1];
-    const segDist = last.pos.distanceTo(pos);
-
-    if (segDist < 0.02 && hist.length > 1) {
-      hist[hist.length - 1] = { pos: pos.clone(), yaw, pitch, cant, dist: last.dist, layer };
-    } else {
-      hist.push({ pos: pos.clone(), yaw, pitch, cant, dist: last.dist + segDist, layer });
-    }
-
-    const maxNeeded = (train.carCount - 1) * ModelFactory.CAR_SPACING + 15; // 安全マージンを15（約8マス分）に拡張
-    const newestDist = hist[hist.length - 1].dist;
-    while (hist.length > 2 && (newestDist - hist[1].dist) > maxNeeded) {
-      hist.shift();
-    }
-  }
-
-  /**
-   * ④ 履歴上で「先頭からの距離 lagDist だけ手前」に相当する状態を補間して取得する
-   */
-  private sampleHistoryAtLag(hist: PathSample[], lagDist: number): PathSample {
-    const newest = hist[hist.length - 1];
-    const targetDist = newest.dist - lagDist;
-
-    if (targetDist <= hist[0].dist) return hist[0];
-
-    for (let i = hist.length - 1; i > 0; i--) {
-      const a = hist[i - 1];
-      const b = hist[i];
-      if (targetDist >= a.dist && targetDist <= b.dist) {
-        const span = b.dist - a.dist;
-        const t = span > 1e-6 ? (targetDist - a.dist) / span : 0;
-        // ③ ヨー角の最短補間 (くるくる回転バグの防止)
-        let diffYaw = b.yaw - a.yaw;
-        while (diffYaw < -Math.PI) diffYaw += Math.PI * 2;
-        while (diffYaw > Math.PI) diffYaw -= Math.PI * 2;
-
-        return {
-          pos: new THREE.Vector3().lerpVectors(a.pos, b.pos, t),
-          yaw: a.yaw + diffYaw * t,
-          pitch: THREE.MathUtils.lerp(a.pitch, b.pitch, t),
-          cant: THREE.MathUtils.lerp(a.cant, b.cant, t),
-          dist: targetDist,
-          layer: t < 0.5 ? a.layer : b.layer
-        };
-      }
-    }
-    return newest;
-  }
-
-  /**
-   * ④ 各車両を、車両間隔ぶんだけ先頭車の走行履歴を遅れて辿った位置・向きに配置する
-   */
-  private applyCarTransforms(train: TrainInstance) {
-    for (let i = 0; i < train.cars.length; i++) {
-      const lagDist = i * ModelFactory.CAR_SPACING;
-      const sample = this.sampleHistoryAtLag(train.pathHistory, lagDist);
-      const car = train.cars[i];
-      car.position.copy(sample.pos);
-      // ④ オイラー回転順序を 'YXZ'（Yaw→Pitch→Roll）に指定！
-      // これにより進行方向Yaw回転後のローカルX軸で前上がりPitch、ローカルZ軸でCantが適用され、進行方向に対して横倒しになるのを防止。
-      car.rotation.set(sample.pitch, sample.yaw, sample.cant, 'YXZ');
-    }
-  }
-
-  /**
-   * ① 最大10両編成の全車両（先頭車〜最後尾車）が存在する全タイル座標を算出
-   * 各車両の物理位置から対応するタイルを特定し、重複を除いた配列として返却する
-   */
   public calculateOccupiedTiles(train: TrainInstance): Array<{ x: number; z: number; layer: GridLayer }> {
-    const tilesMap = new Map<string, { x: number; z: number; layer: GridLayer }>();
-
-    for (let i = 0; i < train.carCount; i++) {
-      const lagDist = i * ModelFactory.CAR_SPACING;
-      const sample = this.sampleHistoryAtLag(train.pathHistory, lagDist);
-      const tx = Math.round(sample.pos.x / WorldMap.TILE_SIZE);
-      const tz = Math.round(sample.pos.z / WorldMap.TILE_SIZE);
-
-      // 【階層跨ぎ閉塞・ATS誤爆防止】
-      // 先頭車の階層に固定せず、各車両の走行履歴サンプルが持つ階層（sample.layer）を基準とする。
-      let bestLayer: GridLayer = sample.layer ?? train.currentTile.layer;
-      let minDiff = Infinity;
-
-      // 該当座標に存在する軌道タイルを全階層から探索し、サンプルのワールド物理高さ(sample.pos.y)に最も適合する階層を特定
-      // （※立体交差等で上下に線路が重なっている場合、sample.layer に近い階層を優先して吸い寄せ誤認を防止）
-      const candidateLayers: GridLayer[] = [...GRID_LAYERS];
-      const baseLayer = sample.layer ?? train.currentTile.layer ?? 1;
-      candidateLayers.sort((l1, l2) => Math.abs(l1 - baseLayer) - Math.abs(l2 - baseLayer));
-
-      for (const lyr of candidateLayers) {
-        const t = this.worldMap.getTile(tx, tz, lyr);
-        if (t && this.isTrackTile(t)) {
-          const h = this.getTileInterpolatedHeight(t, lyr);
-          const diff = Math.abs(h - sample.pos.y);
-          // 高架の階層間隔（3.0）の半分強（1.8m）以内で最も近いものを採用
-          if (diff < minDiff && diff < 1.8) {
-            minDiff = diff;
-            bestLayer = lyr;
-          }
-        }
-      }
-
-      const key = `${tx},${bestLayer},${tz}`;
-      if (!tilesMap.has(key)) {
-        tilesMap.set(key, { x: tx, z: tz, layer: bestLayer });
-      }
-    }
-
-    // 目標タイル（targetTile）も先行ロックとして含める
-    const targetLayer = train.targetTile.layer;
-    const targetKey = `${train.targetTile.x},${targetLayer},${train.targetTile.z}`;
-    if (!tilesMap.has(targetKey)) {
-      tilesMap.set(targetKey, { x: train.targetTile.x, z: train.targetTile.z, layer: targetLayer });
-    }
-
-    return Array.from(tilesMap.values());
+    return this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
   }
 
-  /**
-   * 全アクティブ列車の在線占有タイル（occupiedTiles）を即時再計算する。
-   * 線路・駅の撤去直後や仮置き・本設置の判定直前に呼び出し、
-   * ポーズ中（一時停止中）であっても在線状態を常に最新・正確に保つ。
-   */
   public updateOccupancyNow(): void {
     for (const train of this.trains) {
-      train.occupiedTiles = this.calculateOccupiedTiles(train);
+      train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
     }
   }
 
-  /**
-   * ⑤ 指定座標・階層が運行中列車のいずれかによって占有されているかを判定
-   * （走行中・停車中列車の足元の線路・駅の破壊を防止する安全ガード）
-   */
   public isTileOccupiedByTrain(x: number, z: number, layer: GridLayer): boolean {
-    // 対象タイルが既に更地（empty）の場合、古いキャッシュに惑わされないよう
-    // 実際に列車車両の物理位置が至近距離（0.8マス以内）にあるか検証
-    const tile = this.worldMap.getTile(x, z, layer);
-    const isEmptyTile = !tile || tile.type === 'empty';
-
-    for (const train of this.trains) {
-      if (isEmptyTile) {
-        // 更地タイルの場合: 列車車両の実際の物理位置がこのマスの近くにあるか厳格にチェック
-        const isPhysicallyNear = train.cars.some(car => {
-          const distSq = (car.position.x - x * WorldMap.TILE_SIZE) ** 2 +
-                         (car.position.z - z * WorldMap.TILE_SIZE) ** 2;
-          return distSq < (0.8 * WorldMap.TILE_SIZE) ** 2;
-        });
-        if (isPhysicallyNear) return true;
-        continue;
-      }
-
-      if (train.occupiedTiles && train.occupiedTiles.some(t => t.x === x && t.z === z && t.layer === layer)) {
-        return true;
-      }
-      if ((train.currentTile.x === x && train.currentTile.z === z && train.currentTile.layer === layer) ||
-          (train.targetTile.x === x && train.targetTile.z === z && train.targetTile.layer === layer)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-
-  /**
-   * ③ 列車の折り返し処理
-   * 進行方向と反対側の先頭車両（旧最後尾）が新しい先頭車両となり、
-   * 車両が瞬間移動することなくその場から逆向きに走り出すよう物理座標と履歴を反転・再構築する。
-   */
-  private reverseTrainDirection(train: TrainInstance): void {
-    // 0. 反転直前に現在の先頭車位置・姿勢を経路履歴に同期し、サンプリング乖離を完全防止
-    this.recordCurrentHeadSample(train);
-
-    const carCount = train.carCount;
-    const origStationGroupId = train.lastStationGroupId;
-
-    // 1. 各車両の現在の完全な物理姿勢（位置・ヨー・ピッチ・カント）を高解像度でサンプリング
-    // ※列車が今いる長さ（先頭〜最後尾）だけを0.5マス刻みで精密に切り出す（ワープ・すり抜け防止）
-    const samples: PathSample[] = [];
-    const lagMax = (carCount - 1) * ModelFactory.CAR_SPACING;
-    const steps = Math.max(1, Math.ceil(lagMax / 0.5));
-
-    for (let k = 0; k <= steps; k++) {
-      const lagDist = lagMax * (k / steps);
-      const sample = this.sampleHistoryAtLag(train.pathHistory, lagDist);
-      samples.push(sample);
-    }
-    // samples[0] は旧先頭車、samples[steps] は旧最後尾車になる
-
-    // 2. 進行方向を反転
-    const newDir = train.direction.clone().negate();
-
-    // 3. 新先頭車（旧最後尾車: samples[steps]）のタイル座標と位置を設定
-    const oldRearSample = samples[steps];
-    const newFrontPos = oldRearSample.pos.clone();
-    train.frontPosition.copy(newFrontPos);
-    const curX = Math.round(newFrontPos.x / WorldMap.TILE_SIZE);
-    const curZ = Math.round(newFrontPos.z / WorldMap.TILE_SIZE);
-
-    // 勾配（スロープ）上や階層跨ぎでの折り返し時に正しい階層（layer）を特定する
-    // 旧先頭車の階層をそのまま引き継ぐのではなく、新先頭車の物理高さ(newFrontPos.y)に最も適合する軌道タイルの階層を探索
-    let bestLayer: GridLayer = train.currentTile.layer;
-    let minDiff = Infinity;
-    const allLayers = GRID_LAYERS;
-    for (const lyr of allLayers) {
-      const t = this.worldMap.getTile(curX, curZ, lyr);
-      if (t && this.isTrackTile(t)) {
-        const h = this.getTileInterpolatedHeight(t, lyr);
-        const diff = Math.abs(h - newFrontPos.y);
-        if (diff < minDiff) {
-          minDiff = diff;
-          bestLayer = lyr;
-        }
-      }
-    }
-
-    train.currentTile = { x: curX, z: curZ, layer: bestLayer };
-    const stationTile = this.worldMap.getTile(curX, curZ, train.currentTile.layer);
-    if (stationTile && WorldMap.isStationTileType(stationTile.type)) {
-      train.lastStationGroupId = stationTile.stationGroupId || `st_${curX}_${curZ}`;
-    } else if (origStationGroupId) {
-      train.lastStationGroupId = origStationGroupId;
-    }
-
-    // 4. 新先頭車の目標タイルを探索 (新進行方向に向かう出口を優先)
-    const next = this.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, newDir, true);
-    if (next) {
-      train.isTrapped = false;
-      train.direction.copy(new THREE.Vector3(next.x - train.currentTile.x, 0, next.z - train.currentTile.z).normalize());
-      train.targetTile = { x: next.x, z: next.z, layer: (next.layer ?? train.currentTile.layer) as GridLayer };
-    } else {
-      train.direction.copy(newDir);
-      train.targetTile = { ...train.currentTile };
-      train.isTrapped = true;
-      train.speed = 0;
-    }
-    train.progress = 0;
-
-    // 5. 新しい走行履歴 pathHistory を再構築
-    // 旧先頭(samples[0])から旧最後尾(samples[steps])に向かって履歴を積み直す
-    const newHistory: PathSample[] = [];
-    let accumDist = 0;
-    for (let i = 0; i <= steps; i++) {
-      const s = samples[i]; // i=0: 新最後尾(旧先頭), i=steps: 新先頭(旧最後尾)
-      const pos = s.pos.clone();
-      if (newHistory.length > 0) {
-        accumDist += pos.distanceTo(newHistory[newHistory.length - 1].pos);
-      }
-      
-      // 逆走のためヨー角は180度反転し、境界を正規化。ピッチ・カントは反転
-      let reversedYaw = s.yaw + Math.PI;
-      while (reversedYaw < -Math.PI) reversedYaw += Math.PI * 2;
-      while (reversedYaw > Math.PI) reversedYaw -= Math.PI * 2;
-
-      newHistory.push({
-        pos,
-        yaw: reversedYaw,
-        pitch: -s.pitch,
-        cant: -s.cant,
-        dist: accumDist,
-        layer: s.layer ?? bestLayer
-      });
-    }
-    train.pathHistory = newHistory;
-
-    // 7. 編成の車両メッシュ群を再生成し、新先頭車と新最後尾を正しくセット
-    for (const car of train.cars) {
-      train.mesh.remove(car);
-      disposeHierarchy(car);
-    }
-    const formation = ModelFactory.createTrainFormation(train.model, train.carCount);
-    train.cars = formation.cars;
-    for (const car of train.cars) {
-      train.mesh.add(car);
-    }
-    train.isReversed = !train.isReversed;
-    if (train.model.category === 'freight' && train.cargoLoad !== undefined) {
-      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad);
-    }
-
-    // 8. 車両の位置と向きを即時反映
-    this.applyCarTransforms(train);
-  }
-
-  /**
-   * Phase3 ①: 併合（連結）処理
-   * 後続編成(follower)を先行編成(leader)の最後尾に合体させ、「1本の統合編成（親編成の名称・ダイヤを継承）」とする。
-   * follower は完全に消去され、leader は連結作業時間（規定停車時間）を経て発車する。
-   */
-  private performCoupling(leader: TrainInstance, follower: TrainInstance): void {
-    const combinedCars = leader.carCount + follower.carCount;
-    this.disposeTrainMesh(follower);
-
-    // 【バグ修正】両編成の走行履歴（pathHistory）を結合し、追加車両が一点に収縮するのを防ぐ
-    if (leader.pathHistory.length > 0 && follower.pathHistory.length > 0) {
-      // followerの距離座標をleaderの最後尾(最古の履歴)に接続するようにオフセット調整
-      const distOffset = leader.pathHistory[0].dist - follower.pathHistory[follower.pathHistory.length - 1].dist;
-      const adjustedFollowerHist = follower.pathHistory.map(s => ({
-        pos: s.pos.clone(),
-        yaw: s.yaw,
-        pitch: s.pitch,
-        cant: s.cant,
-        dist: s.dist + distOffset,
-        layer: s.layer
-      }));
-      // leaderの履歴の「過去」としてfollowerの履歴を先頭に挿入
-      leader.pathHistory = [...adjustedFollowerHist, ...leader.pathHistory];
-    }
-
-    this.updateTrainCarCount(leader.id, combinedCars);
-
-    // アクションSE: 車両連結音（重厚な金属打撃音）
-    const distFactor = this.getDistanceFactor({ x: leader.frontPosition.x, z: leader.frontPosition.z });
-    this.audioManager.playCouplingSound(distFactor);
-
-    // ④ 併合時の乗客・積荷データの完全引き継ぎ（消滅防止）
-    const leaderMaxCap = getMaxCapacity(leader.model, combinedCars);
-    leader.passengers = Math.min(leaderMaxCap, leader.passengers + follower.passengers);
-    if (leader.model.category === 'freight' || follower.model.category === 'freight') {
-      leader.cargoCapacity = Math.max(0, (combinedCars - 1) * 3);
-      leader.cargoLoad = Math.min(leader.cargoCapacity, (leader.cargoLoad ?? 0) + (follower.cargoLoad ?? 0));
-    }
-    leader.totalPassengers += follower.totalPassengers;
-    leader.totalRevenue += follower.totalRevenue;
-    leader.totalCost += follower.totalCost;
-
-    // 連結作業時間: 規定の停車時間（2分）を経てから、統合編成として発車する
-    leader.isStopped = true;
-    leader.stopMode = 'wait';
-    leader.stopElapsedMinutes = 0;
-    leader.requiredStopMinutes = 2;
-
-    if (this.onTrainCoupled) {
-      this.onTrainCoupled(leader, follower);
-    }
-  }
-
-  /**
-   * Phase3 ②: 分割（切り離し）処理
-   * 到着した編成(train)を「前○両／後○両」に分離する。train自体は前○両の編成として縮小・継続し、
-   * 後○両は新規の独立編成（"(親編成名)-付属"）として切り出す。それぞれに個別の発車ルールを付与する。
-   */
-  private performSplit(train: TrainInstance, config: SplitConfig, tile: TileData): TrainInstance {
-    const requiredStopMinutes = 2;
-
-    // ⑤ 分割直後の「ブラックホール」バグ解消:
-    // 親編成の走行履歴から、後続編成の全車両（frontCars 〜 frontCars + rearCars - 1 両目）の各物理姿勢をサンプリング
-    // 荒いサンプリングではなく、0.5マス単位などの細かいステップでサンプリングし、カーブ等での軌跡ジャンプを防ぐ
-    const rearSamples: PathSample[] = [];
-    const startLag = config.frontCars * ModelFactory.CAR_SPACING;
-    const endLag = (config.frontCars + config.rearCars - 1) * ModelFactory.CAR_SPACING;
-    const steps = Math.max(1, Math.ceil((endLag - startLag) / 0.5));
-    for (let k = 0; k <= steps; k++) {
-      const lagDist = startLag + (endLag - startLag) * (k / steps);
-      const s = this.sampleHistoryAtLag(train.pathHistory, lagDist);
-      rearSamples.push(s);
-    }
-
-    // 【乗客・貨物の保存則厳守】
-    // 親編成の車両数を縮小（updateTrainCarCount）する前に、全乗客数・積載貨物を前方編成と後方編成に正しく配分する。
-    // 先に縮小を行うと定員縮小によって乗客が切り捨て消失し、かつ親編成からの減算漏れで増殖するバグを解消。
-    const originalPassengers = train.passengers;
-    const totalCars = config.frontCars + config.rearCars;
-    const rearPassengerRatio = config.rearCars / totalCars;
-    const rearPassengers = Math.floor(originalPassengers * rearPassengerRatio);
-    const frontPassengers = originalPassengers - rearPassengers;
-
-    // 親編成の乗客数を前方編成の割り当て分に即時更新
-    train.passengers = frontPassengers;
-
-    // 貨物列車の場合の貨物積載数・容量・発駅情報を前方・後方に正確に配分・継承（積荷完全消失バグ解消）
-    let rearCargoLoad = 0;
-    if (train.model.category === 'freight') {
-      const frontCap = Math.max(0, (config.frontCars - 1) * 3);
-      const rearCap = Math.max(0, (config.rearCars - 1) * 3);
-      const originalCargo = train.cargoLoad ?? 0;
-
-      if (frontCap + rearCap > 0 && originalCargo > 0) {
-        // 後方編成の容量比率に応じて按分配分
-        rearCargoLoad = Math.min(rearCap, Math.round(originalCargo * (rearCap / (frontCap + rearCap))));
-        let frontCargoLoad = Math.min(frontCap, originalCargo - rearCargoLoad);
-
-        // 端数や空き枠があれば可能な側へ再配分
-        let remaining = originalCargo - (frontCargoLoad + rearCargoLoad);
-        if (remaining > 0) {
-          const rearAdd = Math.min(remaining, rearCap - rearCargoLoad);
-          rearCargoLoad += rearAdd;
-          remaining -= rearAdd;
-        }
-        if (remaining > 0) {
-          const frontAdd = Math.min(remaining, frontCap - frontCargoLoad);
-          frontCargoLoad += frontAdd;
-          remaining -= frontAdd;
-        }
-
-        // 両編成の総積載容量を超過する余剰コンテナは、現在駅のヤードへ安全に返却（完全消滅防止）
-        if (remaining > 0 && tile) {
-          this.worldMap.addStationCargoContainers(tile.x, tile.z, remaining, tile.layer);
-        }
-
-        train.cargoLoad = frontCargoLoad;
-      } else {
-        train.cargoLoad = 0;
-        rearCargoLoad = 0;
-      }
-      train.cargoCapacity = frontCap;
-    }
-
-    // 元編成を前方○両に縮小（名称・ダイヤはそのまま継承）
-    this.updateTrainCarCount(train.id, config.frontCars);
-    train.isStopped = true;
-    train.stopMode = 'wait';
-    train.stopElapsedMinutes = 0;
-    train.requiredStopMinutes = requiredStopMinutes;
-    train.overrideDepartureRule = config.frontDeparture;
-    train.isReversingAtStation = false;
-    if (train.model.category === 'freight') {
-      train.cargoCapacity = Math.max(0, (config.frontCars - 1) * 3);
-      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad ?? 0);
-    }
-    this.applyCarTransforms(train);
-
-    // アクションSE: 切り離し音（ブレーキ管空気緩解 プシュー音）
-    const distFactor = this.getDistanceFactor({ x: train.frontPosition.x, z: train.frontPosition.z });
-    this.audioManager.playDecouplingSound(distFactor);
-
-    // 後方○両を新規の独立編成として生成
-    const rearId = this.nextTrainId++;
-    const { group: rearGroup, cars: rearCars } = ModelFactory.createTrainFormation(train.model, config.rearCars);
-    this.scene.add(rearGroup);
-
-    let rearFrontPos: THREE.Vector3;
-    let rearDir: THREE.Vector3;
-    let rearTileX: number;
-    let rearTileZ: number;
-    let rearLayer: GridLayer = train.currentTile.layer;
-    let rearTargetTile: { x: number; z: number; layer: GridLayer };
-    const rearHistory: PathSample[] = [];
-
-    if (config.rearReverses) {
-      // 後続編成が折り返し逆走発車する場合:
-      // 新先頭車は旧最後尾車 (rearSamples[rearSamples.length - 1])
-      const newFrontSample = rearSamples[rearSamples.length - 1];
-      rearFrontPos = newFrontSample.pos.clone();
-      rearDir = train.direction.clone().negate();
-      rearTileX = Math.round(rearFrontPos.x / WorldMap.TILE_SIZE);
-      rearTileZ = Math.round(rearFrontPos.z / WorldMap.TILE_SIZE);
-
-      // 新先頭車の物理高さから最適レイヤーを探索
-      rearLayer = (newFrontSample.layer ?? train.currentTile.layer) as GridLayer;
-      let minDiff = Infinity;
-      for (const lyr of GRID_LAYERS) {
-        const t = this.worldMap.getTile(rearTileX, rearTileZ, lyr);
-        if (t && this.isTrackTile(t)) {
-          const h = this.getTileInterpolatedHeight(t, lyr);
-          const diff = Math.abs(h - newFrontSample.pos.y);
-          if (diff < minDiff) {
-            minDiff = diff;
-            rearLayer = lyr;
-          }
-        }
-      }
-
-      const next = this.findNextTrackTile(rearTileX, rearTileZ, rearLayer, rearDir, true);
-      if (next) {
-        rearDir.copy(new THREE.Vector3(next.x - rearTileX, 0, next.z - rearTileZ).normalize());
-        rearTargetTile = { x: next.x, z: next.z, layer: (next.layer ?? rearLayer) as GridLayer };
-      } else {
-        rearTargetTile = { x: rearTileX, z: rearTileZ, layer: rearLayer };
-      }
-
-      // 新編成の最古（新最後尾＝旧先頭 rearSamples[0]）から最新（新先頭＝旧最後尾 rearSamples[rearSamples.length - 1]）へ
-      let accumDist = 0;
-      for (let k = 0; k < rearSamples.length; k++) {
-        const s = rearSamples[k];
-        if (rearHistory.length > 0) {
-          accumDist += s.pos.distanceTo(rearHistory[rearHistory.length - 1].pos);
-        }
-        let reversedYaw = s.yaw + Math.PI;
-        while (reversedYaw < -Math.PI) reversedYaw += Math.PI * 2;
-        while (reversedYaw > Math.PI) reversedYaw -= Math.PI * 2;
-        rearHistory.push({
-          pos: s.pos.clone(),
-          yaw: reversedYaw,
-          pitch: -s.pitch,
-          cant: -s.cant,
-          dist: accumDist,
-          layer: s.layer ?? rearLayer
-        });
-      }
-    } else {
-      // 後続編成がそのまま同方向に通常進行する場合:
-      // 先頭車は分割点 (rearSamples[0])
-      const frontSample = rearSamples[0];
-      rearFrontPos = frontSample.pos.clone();
-      rearDir = train.direction.clone();
-      rearTileX = Math.round(rearFrontPos.x / WorldMap.TILE_SIZE);
-      rearTileZ = Math.round(rearFrontPos.z / WorldMap.TILE_SIZE);
-
-      // 分割点先頭車の物理高さから最適レイヤーを探索
-      rearLayer = (frontSample.layer ?? train.currentTile.layer) as GridLayer;
-      let minDiff = Infinity;
-      for (const lyr of GRID_LAYERS) {
-        const t = this.worldMap.getTile(rearTileX, rearTileZ, lyr);
-        if (t && this.isTrackTile(t)) {
-          const h = this.getTileInterpolatedHeight(t, lyr);
-          const diff = Math.abs(h - frontSample.pos.y);
-          if (diff < minDiff) {
-            minDiff = diff;
-            rearLayer = lyr;
-          }
-        }
-      }
-
-      const next = this.findNextTrackTile(rearTileX, rearTileZ, rearLayer, rearDir, false);
-      if (next) {
-        rearTargetTile = { x: next.x, z: next.z, layer: (next.layer ?? rearLayer) as GridLayer };
-      } else {
-        rearTargetTile = { ...train.targetTile };
-      }
-
-      // 履歴は最古（最後尾 k = rearSamples.length - 1）から最新（先頭 k = 0）へ
-      let accumDist = 0;
-      for (let k = rearSamples.length - 1; k >= 0; k--) {
-        const s = rearSamples[k];
-        if (rearHistory.length > 0) {
-          accumDist += s.pos.distanceTo(rearHistory[rearHistory.length - 1].pos);
-        }
-        rearHistory.push({
-          pos: s.pos.clone(),
-          yaw: s.yaw,
-          pitch: s.pitch,
-          cant: s.cant,
-          dist: accumDist,
-          layer: s.layer ?? rearLayer
-        });
-      }
-    }
-
-    const rearTrain: TrainInstance = {
-      id: rearId,
-      name: `${train.name}-付属`,
-      model: train.model,
-      carCount: config.rearCars,
-      mesh: rearGroup,
-      frontPosition: rearFrontPos,
-      currentTile: { x: rearTileX, z: rearTileZ, layer: rearLayer },
-      targetTile: rearTargetTile,
-      direction: rearDir,
-      progress: 0,
-      speed: train.speed,
-      isStopped: true,
-      isAtsBraked: false,
-      isSignalStopped: false,
-      occupiedTiles: [],
-      stopTimer: 0,
-      passengers: rearPassengers,
-      capacity: train.model.baseCapacity * config.rearCars,
-      isReversed: config.rearReverses ? !train.isReversed : train.isReversed,
-      cars: rearCars,
-      heightY: train.heightY,
-      pathHistory: rearHistory,
-      totalPassengers: 0,
-      totalRevenue: 0,
-      totalCost: 0,
-      monthlyProfit: 0,
-      fleetId: train.fleetId ? `${train.fleetId}-split` : undefined,
-      lastStationGroupId: tile.stationGroupId ?? null,
-      isReversingAtStation: config.rearReverses,
-      cargoLoad: rearCargoLoad,
-      cargoCapacity: train.model.category === 'freight' ? Math.max(0, (config.rearCars - 1) * 3) : 0,
-      cargoPickup: train.cargoPickup ? { ...train.cargoPickup } : null,
-      cargoTraveledTiles: train.cargoTraveledTiles ?? 0,
-      stopMode: 'wait',
-      stopElapsedMinutes: 0,
-      requiredStopMinutes,
-      overrideDepartureRule: config.rearDeparture
-    };
-
-    if (train.model.category === 'freight') {
-      VehicleMeshBuilder.updateTrainCargoVisual(rearCars, rearCargoLoad);
-    }
-
-    // ⑤ 後続編成の全車両を走行履歴に基づいて正しい位置・向きに即座に配置
-    this.applyCarTransforms(rearTrain);
-
-    if (this.onTrainSplit) {
-      this.onTrainSplit(train, rearTrain);
-    }
-
-    return rearTrain;
+    return this.collisionSystem.isTileOccupiedByTrain(x, z, layer, this.trains, this.worldMap);
   }
 
   public getFollowTarget(trainIndex: number = 0): FollowTarget | null {
@@ -1980,9 +790,6 @@ export class TrainManager {
     };
   }
 
-  /**
-   * 列車IDを指定して前面展望・カメラ追従ターゲットを取得する
-   */
   public getFollowTargetByTrainId(trainId: number): FollowTarget | null {
     const train = this.getTrainById(trainId);
     if (!train) return null;
@@ -1993,452 +800,579 @@ export class TrainManager {
     };
   }
 
-  /**
-   * 【廃車の不法投棄解消】列車編成メッシュおよび全車両パーツの完全VRAM解放
-   * ルートメッシュだけでなく、cars 配列の各車両メッシュ・ジオメトリ・マテリアル・テクスチャを再帰的に破棄
-   */
   private disposeTrainMesh(train: TrainInstance): void {
-    if (!train) return;
-    if (train.mesh) {
-      this.scene.remove(train.mesh);
-      disposeHierarchy(train.mesh);
+    for (const car of train.cars) {
+      train.mesh.remove(car);
+      disposeHierarchy(car);
     }
-    if (train.cars && Array.isArray(train.cars)) {
-      for (const car of train.cars) {
-        if (car && car !== train.mesh) {
-          this.scene.remove(car);
-          disposeHierarchy(car);
-        }
-      }
-    }
-    train.mesh = undefined as any;
-    train.cars = [];
+    this.scene.remove(train.mesh);
+    disposeHierarchy(train.mesh);
   }
 
-  public removeAllTrains() {
-    for (const t of this.trains) {
-      this.disposeTrainMesh(t);
-      this.blockSignalManager.unregisterTrain(t.id);
+  public removeAllTrains(): void {
+    for (const train of this.trains) {
+      this.disposeTrainMesh(train);
+      this.blockSignalManager.unregisterTrain(train.id);
     }
     this.trains = [];
   }
 
-  /**
-   * ① 指定した列車編成を1つだけ撤去する
-   */
   public removeTrain(id: number): boolean {
     const idx = this.trains.findIndex(t => t.id === id);
     if (idx === -1) return false;
     const train = this.trains[idx];
     this.disposeTrainMesh(train);
-    this.trains.splice(idx, 1);
     this.blockSignalManager.unregisterTrain(id);
+    this.trains.splice(idx, 1);
     return true;
   }
 
-  /**
-   * 運行中列車の編成両数を動的に変更（増車・減車）する
-   */
   public updateTrainCarCount(trainId: number, newCarCount: number): boolean {
-    const train = this.trains.find(t => t.id === trainId);
+    const train = this.getTrainById(trainId);
     if (!train) return false;
+    if (newCarCount < 1 || newCarCount > 10) return false;
+    if (train.carCount === newCarCount) return true;
 
-    // 古いメッシュをシーンから除去し GPU メモリ解放
-    this.disposeTrainMesh(train);
+    for (const car of train.cars) {
+      train.mesh.remove(car);
+      disposeHierarchy(car);
+    }
 
-    // 新しい編成メッシュを生成してシーンに追加
-    const { group: trainGroup, cars } = ModelFactory.createTrainFormation(train.model, newCarCount);
-    this.scene.add(trainGroup);
-
+    const { cars: newCars } = ModelFactory.createTrainFormation(train.model, newCarCount);
     train.carCount = newCarCount;
-    train.mesh = trainGroup;
-    train.cars = cars;
     train.capacity = train.model.baseCapacity * newCarCount;
+    train.passengers = Math.min(train.passengers, train.capacity);
+    train.cars = newCars;
+
+    for (const car of newCars) {
+      train.mesh.add(car);
+    }
+
     if (train.model.category === 'freight') {
       train.cargoCapacity = Math.max(0, (newCarCount - 1) * 3);
-      if ((train.cargoLoad ?? 0) > train.cargoCapacity) {
-        train.cargoLoad = train.cargoCapacity;
-      }
+      train.cargoLoad = Math.min(train.cargoCapacity, train.cargoLoad ?? 0);
       VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad ?? 0);
     }
-    const currentMaxCap = getMaxCapacity(train.model, newCarCount);
-    if (train.passengers > currentMaxCap) {
-      train.passengers = currentMaxCap;
-    }
 
-    // 各車両の位置・向きを走行履歴（pathHistory）からサンプリングして配置（カーブ・勾配・カントに沿って美しく追従）
-    if (train.pathHistory && train.pathHistory.length > 0) {
-      // ③ 増車時の「ブラックホール収縮」バグ防止:
-      // 増車によって必要な過去の履歴距離が現在の保持距離を超える場合、最後尾サンプルの向きに基づいて
-      // 過去方向へ履歴を外挿補完し、追加された車両が hist[0] の1点に重なるのを完全に防止する
-      const requiredDist = (newCarCount - 1) * ModelFactory.CAR_SPACING + 4;
-      const hist = train.pathHistory;
-      const newest = hist[hist.length - 1];
-      const oldest = hist[0];
-      const currentDistSpan = newest.dist - oldest.dist;
+    const maxLag = (newCarCount - 1) * ModelFactory.CAR_SPACING + 15;
+    const hist = train.pathHistory;
+    if (hist.length > 0) {
+      const newestDist = hist[hist.length - 1].dist;
+      const oldestDist = hist[0].dist;
+      const currentSpan = newestDist - oldestDist;
 
-      if (currentDistSpan < requiredDist) {
-        const shortfall = requiredDist - currentDistSpan;
-        // 最後尾付近の方向ベクトルを取得（過去に向かって延長するため進行方向と逆向きに伸ばす）
-        let forwardDir: THREE.Vector3;
-        if (hist.length >= 2) {
-          forwardDir = hist[1].pos.clone().sub(oldest.pos);
-          if (forwardDir.lengthSq() > 1e-4) {
-            forwardDir.normalize();
-          } else {
-            forwardDir = new THREE.Vector3(Math.sin(oldest.yaw), 0, Math.cos(oldest.yaw)).normalize();
-          }
-        } else {
-          forwardDir = new THREE.Vector3(Math.sin(oldest.yaw), 0, Math.cos(oldest.yaw)).normalize();
-        }
+      if (currentSpan < maxLag) {
+        const needed = maxLag - currentSpan;
+        const oldest = hist[0];
+        const second = hist.length > 1 ? hist[1] : null;
+        const backDir = second
+          ? new THREE.Vector3().subVectors(oldest.pos, second.pos).normalize()
+          : train.direction.clone().negate();
 
-        const steps = Math.max(1, Math.ceil(shortfall / 0.5));
-        const stepDist = shortfall / steps;
+        if (backDir.lengthSq() < 0.001) backDir.copy(train.direction).negate();
 
-        const oldestPos = oldest.pos.clone();
-        const oldestDist = oldest.dist;
-        const oldestYaw = oldest.yaw;
-        const oldestPitch = oldest.pitch;
-        const oldestCant = oldest.cant;
-
-        // 不足している過去分のサンプルを最後尾から後方へ生成（oldestDist から手前へ完全連続）
-        const extensionSamples: PathSample[] = [];
-        for (let k = steps; k >= 1; k--) {
-          const d = k * stepDist;
-          const pos = oldestPos.clone().addScaledVector(forwardDir, -d);
-          extensionSamples.push({
-            pos,
-            yaw: oldestYaw,
-            pitch: oldestPitch,
-            cant: oldestCant,
-            dist: oldestDist - d,
-            layer: oldest.layer ?? train.currentTile.layer
+        const extSteps = Math.ceil(needed / 0.5);
+        const prefix: PathSample[] = [];
+        for (let i = extSteps; i >= 1; i--) {
+          const stepDist = i * 0.5;
+          prefix.push({
+            pos: oldest.pos.clone().addScaledVector(backDir, stepDist),
+            yaw: oldest.yaw,
+            pitch: oldest.pitch,
+            cant: oldest.cant,
+            dist: oldest.dist - stepDist,
+            layer: oldest.layer
           });
         }
-        train.pathHistory = [...extensionSamples, ...hist];
+        train.pathHistory = [...prefix, ...hist];
       }
-
-      this.applyCarTransforms(train);
-    } else {
-      const frontPos = train.frontPosition;
-      const dir = train.direction;
-      cars.forEach((car, i) => {
-        car.rotation.order = 'YXZ';
-        car.position.copy(frontPos).addScaledVector(dir, -i * ModelFactory.CAR_SPACING);
-        car.rotation.set(0, 0, 0);
-      });
     }
 
+    this.kinematics.applyCarTransforms(train);
+    train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
     return true;
   }
 
-  /**
-   * ⑤ 月次/日次の列車運行維持費を計上する（各車両モデルの運行維持費×30日分）
-   */
-  public deductPeriodicOperatingCosts() {
+  public deductPeriodicOperatingCosts(): void {
     for (const train of this.trains) {
-      const cost = getRunningCostPerDay(train.model, train.carCount) * 30;
-      train.totalCost += cost;
+      const dailyCost = getRunningCostPerDay(train.model, train.carCount);
+      train.totalCost += dailyCost;
       train.monthlyProfit = train.totalRevenue - train.totalCost;
     }
   }
 
-  /**
-   * ① 運行中列車の全データ（状態・履歴・収支・ダイヤ）を JSON 文字列としてシリアライズ
-   */
   public serialize(): string {
-    const data = {
-      nextTrainId: this.nextTrainId,
-      trains: this.trains.map(t => ({
-        id: t.id,
-        name: t.name,
-        modelId: t.model.id,
-        carCount: t.carCount,
-        frontPosition: { x: t.frontPosition.x, y: t.frontPosition.y, z: t.frontPosition.z },
-        currentTile: { ...t.currentTile },
-        targetTile: { ...t.targetTile },
-        direction: { x: t.direction.x, y: t.direction.y, z: t.direction.z },
-        progress: t.progress,
-        speed: t.speed,
-        isStopped: t.isStopped,
-        isAtsBraked: t.isAtsBraked,
-        isSignalStopped: t.isSignalStopped,
-        occupiedTiles: t.occupiedTiles,
-        stopTimer: t.stopTimer,
-        passengers: t.passengers,
-        capacity: t.capacity,
-        isReversed: t.isReversed,
-        heightY: t.heightY,
-        pathHistory: t.pathHistory.map(h => ({
-          pos: { x: h.pos.x, y: h.pos.y, z: h.pos.z },
-          yaw: h.yaw,
-          pitch: h.pitch,
-          cant: h.cant,
-          dist: h.dist,
-          layer: h.layer
-        })),
-        totalPassengers: t.totalPassengers,
-        totalRevenue: t.totalRevenue,
-        totalCost: t.totalCost,
-        monthlyProfit: t.monthlyProfit,
-        fleetId: t.fleetId,
-        lastStationGroupId: t.lastStationGroupId,
-        isReversingAtStation: t.isReversingAtStation,
-        scheduledDepartureMinute: t.scheduledDepartureMinute,
-        cargoLoad: t.cargoLoad,
-        cargoCapacity: t.cargoCapacity,
-        cargoPickup: t.cargoPickup,
-        cargoTraveledTiles: t.cargoTraveledTiles,
-        stopMode: t.stopMode,
-        stopElapsedMinutes: t.stopElapsedMinutes,
-        requiredStopMinutes: t.requiredStopMinutes,
-        overrideDepartureRule: t.overrideDepartureRule
-      }))
-    };
+    const data = this.trains.map(t => ({
+      id: t.id,
+      name: t.name,
+      modelId: t.model.id,
+      carCount: t.carCount,
+      currentTile: t.currentTile,
+      targetTile: t.targetTile,
+      direction: { x: t.direction.x, y: t.direction.y, z: t.direction.z },
+      progress: t.progress,
+      speed: t.speed,
+      isStopped: t.isStopped,
+      passengers: t.passengers,
+      totalPassengers: t.totalPassengers,
+      totalRevenue: t.totalRevenue,
+      totalCost: t.totalCost,
+      monthlyProfit: t.monthlyProfit,
+      fleetId: t.fleetId,
+      isReversed: t.isReversed,
+      isReversingAtStation: t.isReversingAtStation,
+      scheduledDepartureMinute: t.scheduledDepartureMinute,
+      cargoLoad: t.cargoLoad,
+      cargoCapacity: t.cargoCapacity,
+      cargoPickup: t.cargoPickup,
+      cargoTraveledTiles: t.cargoTraveledTiles,
+      stopMode: t.stopMode,
+      stopElapsedMinutes: t.stopElapsedMinutes,
+      requiredStopMinutes: t.requiredStopMinutes,
+      overrideDepartureRule: t.overrideDepartureRule,
+      lastDepartureMinute: t.lastDepartureMinute
+    }));
     return JSON.stringify(data);
   }
 
-  /**
-   * ① セーブデータから運行中の全列車を完全復元（メッシュ再生成・姿勢復元）
-   */
+  private getExitWorldPos(tile: TileData, exit: TileExit): THREE.Vector3 {
+    const half = WorldMap.TILE_SIZE * 0.5;
+    const elev = tile.elevationOffset ?? 0;
+    const lyr = (tile.layer ?? 1) as GridLayer;
+    const h = exit.worldHeight !== undefined
+      ? exit.worldHeight
+      : layerToHeight(lyr, elev);
+    const d = WorldMap.DIRS[exit.idx];
+    return new THREE.Vector3(
+      tile.x * WorldMap.TILE_SIZE + d.x * half,
+      h,
+      tile.z * WorldMap.TILE_SIZE + d.z * half
+    );
+  }
+
+  private sampleTileTrack(
+    tile: TileData,
+    entryExit: TileExit,
+    exitExit: TileExit,
+    stepSize: number = 0.25
+  ): IntermediateSample[] {
+    const pEntry = this.getExitWorldPos(tile, entryExit);
+    const pExit = this.getExitWorldPos(tile, exitExit);
+    const lyr = (tile.layer ?? 1) as GridLayer;
+    const centerH = (pEntry.y + pExit.y) * 0.5;
+    const pCenter = new THREE.Vector3(tile.x * WorldMap.TILE_SIZE, centerH, tile.z * WorldMap.TILE_SIZE);
+
+    const isCurving = tile.type.includes('curve');
+    const cant = isCurving ? 0.04 : 0;
+    const heightDiff = pExit.y - pEntry.y;
+    const pitch = Math.abs(heightDiff) > 0.05 ? -Math.atan2(heightDiff, WorldMap.TILE_SIZE) : 0;
+
+    const samples: IntermediateSample[] = [];
+
+    if (!isCurving) {
+      const lineLen = pEntry.distanceTo(pExit);
+      const numSteps = Math.max(2, Math.ceil(lineLen / stepSize));
+      const fwd = new THREE.Vector3().subVectors(pExit, pEntry).normalize();
+      const yaw = Math.atan2(fwd.x, fwd.z);
+
+      for (let i = 0; i <= numSteps; i++) {
+        const t = i / numSteps;
+        const pos = new THREE.Vector3().lerpVectors(pEntry, pExit, t);
+        samples.push({ pos, yaw, pitch, cant, layer: lyr });
+      }
+    } else {
+      const numSteps = Math.max(4, Math.ceil((Math.PI * 0.25 * WorldMap.TILE_SIZE) / stepSize));
+      for (let i = 0; i <= numSteps; i++) {
+        const t = i / numSteps;
+        const oneMinusT = 1 - t;
+        const pos = new THREE.Vector3()
+          .addScaledVector(pEntry, oneMinusT * oneMinusT)
+          .addScaledVector(pCenter, 2 * oneMinusT * t)
+          .addScaledVector(pExit, t * t);
+
+        const tangent = new THREE.Vector3()
+          .addScaledVector(new THREE.Vector3().subVectors(pCenter, pEntry), 2 * oneMinusT)
+          .addScaledVector(new THREE.Vector3().subVectors(pExit, pCenter), 2 * t)
+          .normalize();
+
+        const yaw = Math.atan2(tangent.x, tangent.z);
+        samples.push({ pos, yaw, pitch, cant, layer: lyr });
+      }
+    }
+
+    return samples;
+  }
+
+  private findConnectedNeighborTile(
+    tile: TileData,
+    exit: TileExit
+  ): { neighbor: TileData; matchedExit: TileExit } | null {
+    const curLayer = (tile.layer ?? 1) as GridLayer;
+    let nx: number;
+    let nz: number;
+    if (exit.targetOffset) {
+      nx = tile.x + exit.targetOffset.dx;
+      nz = tile.z + exit.targetOffset.dz;
+    } else {
+      const d = WorldMap.DIRS[exit.idx];
+      nx = tile.x + d.x;
+      nz = tile.z + d.z;
+    }
+    const backIdx = WorldMap.opposite(exit.idx);
+
+    let neighbor = this.worldMap.getTile(nx, nz, curLayer);
+    let nExits = neighbor && this.kinematics.isTrackTile(neighbor) ? WorldMap.getTileExits(neighbor) : [];
+    let nExit = nExits.find(e => e.idx === backIdx);
+
+    if (!nExit) {
+      for (const candLayer of GRID_LAYERS) {
+        if (candLayer === curLayer) continue;
+        const candTile = this.worldMap.getTile(nx, nz, candLayer);
+        if (!candTile || !this.kinematics.isTrackTile(candTile)) continue;
+        const candExits = WorldMap.getTileExits(candTile);
+        const candExit = candExits.find(e => e.idx === backIdx);
+        if (candExit) {
+          if (exit.worldHeight !== undefined && candExit.worldHeight !== undefined) {
+            if (Math.abs(exit.worldHeight - candExit.worldHeight) <= 0.05) {
+              neighbor = candTile;
+              nExit = candExit;
+              break;
+            }
+          } else if (exit.level === candExit.level) {
+            neighbor = candTile;
+            nExit = candExit;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!neighbor || !nExit) return null;
+
+    if (exit.worldHeight !== undefined && nExit.worldHeight !== undefined) {
+      if (Math.abs(exit.worldHeight - nExit.worldHeight) > 0.05) return null;
+    } else if (nExit.level !== exit.level) {
+      return null;
+    }
+
+    return { neighbor, matchedExit: nExit };
+  }
+
+  private reconstructPathHistoryOnLoad(
+    train: TrainInstance,
+    currentTile: TileData,
+    targetTile: TileData,
+    fwdDir: THREE.Vector3,
+    maxNeededDist: number
+  ): PathSample[] {
+    const rawSamples: IntermediateSample[] = [];
+
+    const startH = this.kinematics.getTileInterpolatedHeight(currentTile, train.currentTile.layer);
+    const endH = this.kinematics.getTileInterpolatedHeight(targetTile, train.targetTile.layer);
+    const fromPos = new THREE.Vector3(currentTile.x * WorldMap.TILE_SIZE, startH, currentTile.z * WorldMap.TILE_SIZE);
+    const toPos = new THREE.Vector3(targetTile.x * WorldMap.TILE_SIZE, endH, targetTile.z * WorldMap.TILE_SIZE);
+    const currentFrontPos = new THREE.Vector3().lerpVectors(fromPos, toPos, train.progress);
+
+    const fwdYaw = Math.atan2(fwdDir.x, fwdDir.z);
+    const heightDiff = endH - startH;
+    const fwdPitch = Math.abs(heightDiff) > 0.05 ? -Math.atan2(heightDiff, WorldMap.TILE_SIZE) : 0;
+    const isCurving = currentTile.type.includes('curve') || targetTile.type.includes('curve');
+    const fwdCant = isCurving ? 0.04 : 0;
+    const currentLayer = (train.progress < 0.5 ? train.currentTile.layer : train.targetTile.layer) as GridLayer;
+
+    rawSamples.push({
+      pos: currentFrontPos.clone(),
+      yaw: fwdYaw,
+      pitch: fwdPitch,
+      cant: fwdCant,
+      layer: currentLayer
+    });
+
+    const headingIdx = this.kinematics.vecToDirIdx(fwdDir);
+    const backToTileIdx = WorldMap.opposite(headingIdx);
+    const curExits = WorldMap.getTileExits(currentTile);
+
+    let rearExit: TileExit | undefined;
+    let forwardExit: TileExit | undefined;
+
+    if (currentTile.type.startsWith('point_switch')) {
+      const forwardRot = ((currentTile.rotation % 4) + 4) % 4;
+      const backRot = WorldMap.opposite(forwardRot);
+      const branchRot = currentTile.switchBranchSide === 'left' ? WorldMap.rotateCCW(forwardRot) : WorldMap.rotateCW(forwardRot);
+
+      if (backToTileIdx === forwardRot || backToTileIdx === branchRot) {
+        forwardExit = curExits.find(e => e.idx === backToTileIdx);
+        rearExit = curExits.find(e => e.idx === backRot);
+      } else {
+        forwardExit = curExits.find(e => e.idx === (currentTile.switchState === 'diverge' ? branchRot : forwardRot));
+        rearExit = curExits.find(e => e.idx === backRot);
+      }
+    } else {
+      rearExit = curExits.find(e => e.idx === backToTileIdx);
+      forwardExit = curExits.find(e => e.idx !== backToTileIdx);
+    }
+
+    if (forwardExit && rearExit) {
+      const tileSamples = this.sampleTileTrack(currentTile, rearExit, forwardExit, 0.25);
+      let closestIdx = 0;
+      let closestDistSq = Infinity;
+      for (let i = 0; i < tileSamples.length; i++) {
+        const dSq = tileSamples[i].pos.distanceToSquared(currentFrontPos);
+        if (dSq < closestDistSq) {
+          closestDistSq = dSq;
+          closestIdx = i;
+        }
+      }
+      for (let i = closestIdx - 1; i >= 0; i--) {
+        rawSamples.push(tileSamples[i]);
+      }
+    }
+
+    let traversedDist = 0;
+    for (let i = 1; i < rawSamples.length; i++) {
+      traversedDist += rawSamples[i].pos.distanceTo(rawSamples[i - 1].pos);
+    }
+
+    let activeTile = currentTile;
+    let activeExit = rearExit;
+    let loopGuard = 0;
+
+    while (traversedDist < maxNeededDist && activeExit && loopGuard++ < 60) {
+      const connected = this.findConnectedNeighborTile(activeTile, activeExit);
+      if (!connected) break;
+
+      const nextTile = connected.neighbor;
+      const entryExit = connected.matchedExit;
+      const nextExits = WorldMap.getTileExits(nextTile);
+
+      let oppositeExit: TileExit | undefined;
+      if (nextTile.type.startsWith('point_switch')) {
+        const fRot = ((nextTile.rotation % 4) + 4) % 4;
+        const bRot = WorldMap.opposite(fRot);
+        const brRot = nextTile.switchBranchSide === 'left' ? WorldMap.rotateCCW(fRot) : WorldMap.rotateCW(fRot);
+
+        if (entryExit.idx === bRot) {
+          const targetExitIdx = nextTile.switchState === 'diverge' ? brRot : fRot;
+          oppositeExit = nextExits.find(e => e.idx === targetExitIdx);
+        } else {
+          oppositeExit = nextExits.find(e => e.idx === bRot);
+        }
+      } else {
+        oppositeExit = nextExits.find(e => e.idx !== entryExit.idx);
+      }
+
+      if (!oppositeExit) break;
+
+      const tileSamples = this.sampleTileTrack(nextTile, oppositeExit, entryExit, 0.25);
+      for (let i = tileSamples.length - 1; i >= 0; i--) {
+        const s = tileSamples[i];
+        if (rawSamples.length > 0) {
+          traversedDist += s.pos.distanceTo(rawSamples[rawSamples.length - 1].pos);
+        }
+        rawSamples.push(s);
+        if (traversedDist >= maxNeededDist) break;
+      }
+
+      activeTile = nextTile;
+      activeExit = oppositeExit;
+    }
+
+    if (traversedDist < maxNeededDist && rawSamples.length > 0) {
+      const oldest = rawSamples[rawSamples.length - 1];
+      const secondOldest = rawSamples.length > 1 ? rawSamples[rawSamples.length - 2] : null;
+      const tangent = secondOldest
+        ? new THREE.Vector3().subVectors(secondOldest.pos, oldest.pos).normalize()
+        : fwdDir.clone();
+
+      const deficit = maxNeededDist - traversedDist;
+      const steps = Math.ceil(deficit / 0.5);
+      for (let i = 1; i <= steps; i++) {
+        const d = i * 0.5;
+        rawSamples.push({
+          pos: oldest.pos.clone().sub(tangent.clone().multiplyScalar(d)),
+          yaw: oldest.yaw,
+          pitch: oldest.pitch,
+          cant: oldest.cant,
+          layer: oldest.layer
+        });
+      }
+    }
+
+    const pathHistory: PathSample[] = [];
+    const ordered = rawSamples.slice().reverse();
+    let accumDist = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      const s = ordered[i];
+      if (pathHistory.length > 0) {
+        accumDist += s.pos.distanceTo(pathHistory[pathHistory.length - 1].pos);
+      }
+      pathHistory.push({
+        pos: s.pos,
+        yaw: s.yaw,
+        pitch: s.pitch,
+        cant: s.cant,
+        dist: accumDist,
+        layer: s.layer
+      });
+    }
+
+    return pathHistory;
+  }
+
   public deserialize(jsonString: string): boolean {
     try {
       const data = JSON.parse(jsonString);
-      if (!data || !Array.isArray(data.trains)) return false;
+      if (!Array.isArray(data)) return false;
 
-      // 既存列車メッシュをシーンから全て除去
       this.removeAllTrains();
 
-      this.nextTrainId = data.nextTrainId || 1;
-
-      for (const tData of data.trains) {
-        const model = getVehicleById(tData.modelId);
+      for (const item of data) {
+        const model = getVehicleById(item.modelId);
         if (!model) continue;
 
-        const { group, cars } = ModelFactory.createTrainFormation(model, tData.carCount);
+        const tile = this.worldMap.getTile(item.currentTile.x, item.currentTile.z, item.currentTile.layer);
+        if (!tile) continue;
+
+        const targetTile = this.worldMap.getTile(item.targetTile.x, item.targetTile.z, item.targetTile.layer);
+        if (!targetTile) continue;
+
+        const { group, cars } = ModelFactory.createTrainFormation(model, item.carCount);
         this.scene.add(group);
 
-        const frontPos = new THREE.Vector3(tData.frontPosition.x, tData.frontPosition.y, tData.frontPosition.z);
-        const dir = new THREE.Vector3(tData.direction.x, tData.direction.y, tData.direction.z);
+        const dir = new THREE.Vector3(item.direction.x, item.direction.y, item.direction.z).normalize();
+        const startH = this.kinematics.getTileInterpolatedHeight(tile, item.currentTile.layer);
+        const endH = this.kinematics.getTileInterpolatedHeight(targetTile, item.targetTile.layer);
+        const fromPos = new THREE.Vector3(item.currentTile.x * WorldMap.TILE_SIZE, startH, item.currentTile.z * WorldMap.TILE_SIZE);
+        const toPos = new THREE.Vector3(item.targetTile.x * WorldMap.TILE_SIZE, endH, item.targetTile.z * WorldMap.TILE_SIZE);
+        const frontPos = new THREE.Vector3().lerpVectors(fromPos, toPos, item.progress ?? 0);
 
-        const pathHistory: PathSample[] = (tData.pathHistory || []).map((h: any) => ({
-          pos: new THREE.Vector3(h.pos.x, h.pos.y, h.pos.z),
-          yaw: h.yaw,
-          pitch: h.pitch,
-          cant: h.cant,
-          dist: h.dist,
-          layer: (h.layer ?? tData.currentTile?.layer ?? 1) as GridLayer
-        }));
+        const maxNeededDist = (item.carCount - 1) * ModelFactory.CAR_SPACING + 15;
+        const pathHistory = this.reconstructPathHistoryOnLoad(
+          {
+            id: item.id,
+            name: item.name,
+            model,
+            carCount: item.carCount,
+            mesh: group,
+            frontPosition: frontPos,
+            currentTile: item.currentTile,
+            targetTile: item.targetTile,
+            direction: dir,
+            progress: item.progress ?? 0,
+            speed: item.speed,
+            isStopped: item.isStopped,
+            isAtsBraked: false,
+            occupiedTiles: [],
+            stopTimer: 0,
+            passengers: item.passengers ?? 0,
+            capacity: model.baseCapacity * item.carCount,
+            isReversed: item.isReversed ?? false,
+            cars,
+            heightY: startH,
+            pathHistory: [],
+            totalPassengers: item.totalPassengers ?? 0,
+            totalRevenue: item.totalRevenue ?? 0,
+            totalCost: item.totalCost ?? 0,
+            monthlyProfit: item.monthlyProfit ?? 0,
+            fleetId: item.fleetId,
+            lastStationGroupId: null
+          },
+          tile,
+          targetTile,
+          dir,
+          maxNeededDist
+        );
+
+        const isFreight = model.category === 'freight';
+        const cargoCapacity = isFreight ? Math.max(0, (item.carCount - 1) * 3) : 0;
+        const actualCargoLoad = isFreight
+          ? (item.cargoLoad !== undefined ? Math.min(cargoCapacity, item.cargoLoad) : 0)
+          : undefined;
 
         const train: TrainInstance = {
-          id: tData.id,
-          name: tData.name,
+          id: item.id,
+          name: item.name,
           model,
-          carCount: tData.carCount,
+          carCount: item.carCount,
           mesh: group,
           frontPosition: frontPos,
-          currentTile: { ...tData.currentTile },
-          targetTile: { ...tData.targetTile },
+          currentTile: item.currentTile,
+          targetTile: item.targetTile,
           direction: dir,
-          progress: tData.progress ?? 0,
-          speed: tData.speed ?? model.speedTilesPerMinute ?? 1.5,
-          isStopped: !!tData.isStopped,
-          isAtsBraked: !!tData.isAtsBraked,
-          isSignalStopped: !!tData.isSignalStopped,
-          occupiedTiles: tData.occupiedTiles ?? [],
-          stopTimer: tData.stopTimer ?? 0,
-          passengers: model.category === 'freight' ? 0 : (tData.passengers ?? 0),
-          capacity: model.category === 'freight' ? 0 : (tData.capacity ?? model.baseCapacity * tData.carCount),
-          isReversed: !!tData.isReversed,
+          progress: item.progress ?? 0,
+          speed: item.speed,
+          isStopped: item.isStopped,
+          isAtsBraked: false,
+          isSignalStopped: false,
+          isTrapped: false,
+          occupiedTiles: [],
+          stopTimer: 0,
+          passengers: item.passengers ?? 0,
+          capacity: model.baseCapacity * item.carCount,
+          isReversed: item.isReversed ?? false,
           cars,
-          heightY: tData.heightY ?? 0,
+          heightY: THREE.MathUtils.lerp(startH, endH, item.progress ?? 0),
           pathHistory,
-          totalPassengers: tData.totalPassengers ?? 0,
-          totalRevenue: tData.totalRevenue ?? 0,
-          totalCost: tData.totalCost ?? 0,
-          monthlyProfit: tData.monthlyProfit ?? 0,
-          fleetId: tData.fleetId,
-          lastStationGroupId: tData.lastStationGroupId ?? null,
-          isReversingAtStation: !!tData.isReversingAtStation,
-          scheduledDepartureMinute: tData.scheduledDepartureMinute ?? null,
-          cargoLoad: tData.cargoLoad ?? 0,
-          cargoCapacity: tData.cargoCapacity ?? (model.category === 'freight' ? Math.max(0, (tData.carCount - 1) * 3) : 0),
-          cargoPickup: tData.cargoPickup ?? null,
-          cargoTraveledTiles: tData.cargoTraveledTiles ?? 0,
-          stopMode: tData.stopMode ?? null,
-          stopElapsedMinutes: tData.stopElapsedMinutes ?? 0,
-          requiredStopMinutes: tData.requiredStopMinutes ?? 0,
-          overrideDepartureRule: tData.overrideDepartureRule ?? null
+          totalPassengers: item.totalPassengers ?? 0,
+          totalRevenue: item.totalRevenue ?? 0,
+          totalCost: item.totalCost ?? 0,
+          monthlyProfit: item.monthlyProfit ?? 0,
+          fleetId: item.fleetId,
+          lastStationGroupId: null,
+          isReversingAtStation: item.isReversingAtStation ?? false,
+          scheduledDepartureMinute: item.scheduledDepartureMinute ?? null,
+          cargoLoad: actualCargoLoad,
+          cargoCapacity,
+          cargoPickup: item.cargoPickup ?? null,
+          cargoTraveledTiles: item.cargoTraveledTiles ?? 0,
+          stopMode: item.stopMode ?? null,
+          stopElapsedMinutes: item.stopElapsedMinutes ?? 0,
+          requiredStopMinutes: item.requiredStopMinutes ?? 0,
+          overrideDepartureRule: item.overrideDepartureRule ?? null,
+          lastDepartureMinute: item.lastDepartureMinute
         };
 
-        // 車両の3D姿勢を復元
-        if (train.pathHistory.length > 0) {
-          this.applyCarTransforms(train);
-        }
-        train.occupiedTiles = this.calculateOccupiedTiles(train);
+        this.kinematics.applyCarTransforms(train);
 
-        if (model.category === 'freight') {
-          VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad ?? 0);
+        if (isFreight) {
+          VehicleMeshBuilder.updateTrainCargoVisual(train.cars, actualCargoLoad ?? 0);
+        }
+
+        train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
+
+        if (train.id >= this.nextTrainId) {
+          this.nextTrainId = train.id + 1;
         }
 
         this.trains.push(train);
       }
+
       return true;
-    } catch (e) {
-      console.error('Failed to deserialize TrainManager data:', e);
+    } catch {
       return false;
     }
   }
 
-  /**
-   * 駅周囲5マス四方の建物（住宅・商業・工業）の発展状況から、乗客発生数を算出する。
-   * 家が3〜4軒程度の小さな集落では十数人〜20人程度、ビル街で100〜200人規模になるよう適正化。
-   */
   public calculateStationPassengerDemand(
     centerX: number,
     centerZ: number,
     currentHour: number,
     getDemandMultiplier?: (x: number, z: number, hour: number) => number
   ): number {
-    let residenceCount = 0;
-    let commercialCount = 0;
-    let industrialCount = 0;
-    let weightedScore = 0;
-
-    // 駅周囲5マス四方（11×11マス）を走査
-    for (let dx = -5; dx <= 5; dx++) {
-      for (let dz = -5; dz <= 5; dz++) {
-        if (dx === 0 && dz === 0) continue;
-        const tx = centerX + dx;
-        const tz = centerZ + dz;
-        const t = this.worldMap.getTile(tx, tz, 1);
-        if (!t) continue;
-
-        const chebyshevDist = Math.max(Math.abs(dx), Math.abs(dz));
-        // 距離減衰: 近いほど駅を利用しやすい (1〜2マス: 1.0, 3マス: 0.85, 4マス: 0.7, 5マス: 0.55)
-        const distWeight = chebyshevDist <= 2 ? 1.0 : (chebyshevDist === 3 ? 0.85 : (chebyshevDist === 4 ? 0.7 : 0.55));
-
-        if (t.type === 'residence') {
-          residenceCount++;
-          // 住宅1軒あたり: 2.5〜4.5人程度（家が3軒なら 8〜14人程度）
-          weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
-        } else if (t.type === 'commercial') {
-          commercialCount++;
-          // 商業施設1軒あたり: 4.0〜7.0人程度（買い物・通勤客）
-          weightedScore += (4.0 + (t.level ?? 1) * 1.5) * distWeight;
-        } else if (t.type === 'industrial') {
-          industrialCount++;
-          // 工業1軒あたり: 2.0〜4.0人程度（従業員の通勤）
-          weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
-        }
-      }
-    }
-
-    // 周囲に建物が一切ない場合（野原・更地）は乗客発生ほぼゼロ
-    if (residenceCount === 0 && commercialCount === 0 && industrialCount === 0) {
-      return 0;
-    }
-
-    // 時間帯需要倍率の取得（朝夕ラッシュ、日中、深夜）
-    const demandMult = getDemandMultiplier
-      ? getDemandMultiplier(centerX, centerZ, currentHour)
-      : TrainManager.getHourlyDemandMultiplier(currentHour);
-
-    // ±15%のランダムな微小変動
-    const fluctuation = 0.85 + Math.random() * 0.3;
-    const calculated = Math.round(weightedScore * demandMult * fluctuation);
-
-    return Math.max(1, calculated);
+    return this.payloadSystem.calculateStationPassengerDemand(centerX, centerZ, currentHour, this.worldMap, getDemandMultiplier);
   }
 
-  /**
-   * 全旅客駅の待機乗客数を5分ごとに定期更新
-   * （1時間あたりの発生数を12等分し、5分に1回 1/12 ずつ自然に集客・補充）
-   */
   public updateFiveMinuteStationPassengers(
     currentHour: number,
     getDemandMultiplier?: (x: number, z: number, hour: number) => number
   ): void {
-    const stations = this.worldMap.stationManager.getStations();
-    for (const st of stations) {
-      if (st.isSignalYard || st.isCargoStation) continue;
-      for (const platform of st.platforms) {
-        if (platform.isSignalYard || platform.isCargoStation || platform.tiles.length === 0) continue;
-        const midIdx = Math.floor(platform.tiles.length / 2);
-        const centerTile = platform.tiles[midIdx];
-        const tileLayer = (centerTile.layer ?? 1) as GridLayer;
-
-        const demand = this.calculateStationPassengerDemand(centerTile.x, centerTile.z, currentHour, getDemandMultiplier);
-        if (demand <= 0) continue;
-
-        // 駅タイルの現在の待機客に補充（最大上限キャップあり）
-        const curTile = this.worldMap.getTile(centerTile.x, centerTile.z, tileLayer);
-        if (!curTile) continue;
-
-        const maxCap = Math.max(10, Math.round(demand * 2.5));
-        const currentWait = curTile.stationPassengers ?? 0;
-
-        // 現在の1時間あたりの増加数（demand の 40%）
-        const hourlyIncremental = Math.max(1, Math.round(demand * 0.4));
-        // 12等分した5分あたりの増加量 (1/12)
-        const fiveMinIncremental = hourlyIncremental / 12;
-
-        // 端数アキュムレータに蓄積
-        curTile.passengerAccumulator = (curTile.passengerAccumulator ?? 0) + fiveMinIncremental;
-
-        // 1人以上蓄積されたら整数部を取り出して待機乗客数に加算
-        const wholePassengers = Math.floor(curTile.passengerAccumulator);
-        if (wholePassengers > 0) {
-          curTile.passengerAccumulator -= wholePassengers;
-          const newWait = Math.min(maxCap, currentWait + wholePassengers);
-          curTile.stationPassengers = newWait;
-
-          for (const t of platform.tiles) {
-            const tData = this.worldMap.getTile(t.x, t.z, (t.layer ?? 1) as GridLayer);
-            if (tData) {
-              tData.stationPassengers = newWait;
-              tData.passengerAccumulator = curTile.passengerAccumulator;
-            }
-          }
-        }
-      }
-    }
+    this.payloadSystem.updateFiveMinuteStationPassengers(currentHour, this.worldMap, getDemandMultiplier);
   }
 
-  /**
-   * 全旅客駅の待機乗客数を初期設定（ゲーム開始時やマップロード時の初期補充）
-   */
   public updateHourlyStationPassengers(
     currentHour: number,
     getDemandMultiplier?: (x: number, z: number, hour: number) => number
   ): void {
-    const stations = this.worldMap.stationManager.getStations();
-    for (const st of stations) {
-      if (st.isSignalYard || st.isCargoStation) continue;
-      for (const platform of st.platforms) {
-        if (platform.isSignalYard || platform.isCargoStation || platform.tiles.length === 0) continue;
-        const midIdx = Math.floor(platform.tiles.length / 2);
-        const centerTile = platform.tiles[midIdx];
-        const tileLayer = (centerTile.layer ?? 1) as GridLayer;
-
-        const demand = this.calculateStationPassengerDemand(centerTile.x, centerTile.z, currentHour, getDemandMultiplier);
-        if (demand <= 0) continue;
-
-        const curTile = this.worldMap.getTile(centerTile.x, centerTile.z, tileLayer);
-        if (!curTile) continue;
-
-        const maxCap = Math.max(10, Math.round(demand * 2.5));
-        const currentWait = curTile.stationPassengers ?? 0;
-        const incremental = Math.max(1, Math.round(demand * 0.4));
-        const newWait = Math.min(maxCap, currentWait + incremental);
-
-        curTile.stationPassengers = newWait;
-        for (const t of platform.tiles) {
-          const tData = this.worldMap.getTile(t.x, t.z, (t.layer ?? 1) as GridLayer);
-          if (tData) tData.stationPassengers = newWait;
-        }
-      }
-    }
+    this.payloadSystem.updateHourlyStationPassengers(currentHour, this.worldMap, getDemandMultiplier);
   }
 }
-

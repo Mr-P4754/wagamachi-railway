@@ -6,12 +6,17 @@ import { TrackMeshBuilder } from '../tracks/TrackMeshBuilder';
  * 駅舎・プラットホーム・上屋メッシュ生成ビルダー
  */
 export class StationMeshBuilder {
+  private static signTextureCache = new Map<string, THREE.CanvasTexture>();
+
   /**
    * 複数マス対応駅ホームの生成
    * @param rotation 0: 南北方向, 1: 東西方向
    * @param isElevated 高架駅かどうか
    * @param part 'single'(単独1両), 'start'(起点スロープ), 'mid'(中間), 'end'(終端スロープ)
    * @param platformSide 'left'(線路の左側), 'right'(線路の右側)
+   * @param stationName 駅名
+   * @param pierHeight 橋脚の高さ
+   * @param isGhost 仮置き・ホバープレビュー用ゴーストかどうか（true時は看板テクスチャ生成を抑止）
    */
   public static createStation(
     rotation: number = 0,
@@ -19,7 +24,8 @@ export class StationMeshBuilder {
     part: 'single' | 'start' | 'mid' | 'end' = 'single',
     platformSide: 'left' | 'right' = 'right',
     stationName: string = '駅',
-    pierHeight: number = 3.0
+    pierHeight: number = 3.0,
+    isGhost: boolean = false
   ): THREE.Group {
     const group = new THREE.Group();
     const railBaseHeight = isElevated ? 0.2 : 0;
@@ -62,8 +68,10 @@ export class StationMeshBuilder {
       group.add(canopy);
 
       const signGeo = new THREE.BoxGeometry(0.05, 0.25, 0.65);
-      const signTex = StationMeshBuilder.createSignTexture(stationName);
-      const signMat = new THREE.MeshBasicMaterial({ map: signTex });
+      // ゴースト時はテクスチャ生成をスキップして単色共有マテリアルを適用
+      const signMat = isGhost
+        ? GameMaterials.concreteMat
+        : new THREE.MeshBasicMaterial({ map: StationMeshBuilder.createSignTexture(stationName) });
       const sign = new THREE.Mesh(signGeo, signMat);
       sign.name = 'stationSign';
       sign.position.set(0.95 * sideMult, railBaseHeight + 1.25, 0);
@@ -77,12 +85,17 @@ export class StationMeshBuilder {
   }
 
   /**
-   * 駅名看板用 CanvasTexture を生成
+   * 駅名看板用 CanvasTexture を生成（キャッシュプール化）
    */
   public static createSignTexture(text: string): THREE.Texture {
     if (typeof document === 'undefined') {
       return new THREE.Texture();
     }
+    const cached = StationMeshBuilder.signTextureCache.get(text);
+    if (cached) {
+      return cached;
+    }
+
     const canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 64;
@@ -102,6 +115,8 @@ export class StationMeshBuilder {
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
+    texture.userData = { keepAlive: true };
+    StationMeshBuilder.signTextureCache.set(text, texture);
     return texture;
   }
 
@@ -117,18 +132,10 @@ export class StationMeshBuilder {
         if (m.material) {
           if (Array.isArray(m.material)) {
             m.material.forEach(mat => {
-              const oldTex = (mat as any).map;
-              if (oldTex && oldTex.dispose && oldTex !== newTex) {
-                oldTex.dispose();
-              }
               (mat as any).map = newTex;
               mat.needsUpdate = true;
             });
           } else {
-            const oldTex = (m.material as any).map;
-            if (oldTex && oldTex.dispose && oldTex !== newTex) {
-              oldTex.dispose();
-            }
             (m.material as any).map = newTex;
             (m.material as any).needsUpdate = true;
           }

@@ -13,7 +13,7 @@ import { WorldMap } from '../simulation/WorldMap';
 export class TerrainRenderer {
   public terrainGroup: THREE.Group = new THREE.Group();
   private chunkGroups: Map<string, THREE.Group> = new Map();
-  private tunnelChecker: ((x: number, z: number) => boolean) | null = null;
+  private tunnelChecker: ((x: number, z: number) => number[] | boolean) | null = null;
 
   // 山岳マテリアル（緑豊かな山林・山肌）
   private mountainTopMat = new THREE.MeshStandardMaterial({
@@ -149,17 +149,48 @@ export class TerrainRenderer {
 
       if (cell.elevation > 1) {
         const totalHeight = (cell.elevation - 1) * 3.0;
-        const hasTunnel = this.tunnelChecker ? this.tunnelChecker(cell.x, cell.z) : false;
-        if (hasTunnel) {
-          // 山岳トンネル開口部: 天井高さ1.4mを確保し、その上部に乗る山頂・崖ブロックのみを描画
-          const tunnelClearance = 1.4;
-          const mountainThickness = Math.max(0.4, totalHeight - tunnelClearance);
-          const centerY = tunnelClearance + mountainThickness / 2;
-          dummy.position.set(wx, centerY, wz);
-          dummy.rotation.set(0, 0, 0);
-          dummy.scale.set(tileSize * 0.99, mountainThickness, tileSize * 0.99);
-          dummy.updateMatrix();
-          mountainTransforms.push(dummy.matrix.clone());
+        const checkerResult = this.tunnelChecker ? this.tunnelChecker(cell.x, cell.z) : [];
+        const tunnelLayers: number[] = Array.isArray(checkerResult)
+          ? checkerResult
+          : (checkerResult ? [1] : []);
+
+        if (tunnelLayers.length > 0) {
+          // 山岳トンネル開口部（1階層あたり高さ1.8mクリアランス）をくり抜き、
+          // トンネルの上下・中間に残る山岳ブロック（ソリッド区間）を分割生成
+          const sortedLayers = [...tunnelLayers].sort((a, b) => a - b);
+          let currentY = 0;
+
+          for (const layer of sortedLayers) {
+            const voidStart = (layer - 1) * 3.0;
+            const voidEnd = Math.min(totalHeight, voidStart + 1.8);
+
+            // トンネル開口部より下に山ブロックが存在する場合（例: 2Fトンネルの下の1F山肌）
+            if (voidStart > currentY) {
+              const thickness = voidStart - currentY;
+              if (thickness > 0.05) {
+                const centerY = currentY + thickness / 2;
+                dummy.position.set(wx, centerY, wz);
+                dummy.rotation.set(0, 0, 0);
+                dummy.scale.set(tileSize * 0.99, thickness, tileSize * 0.99);
+                dummy.updateMatrix();
+                mountainTransforms.push(dummy.matrix.clone());
+              }
+            }
+            currentY = Math.max(currentY, voidEnd);
+          }
+
+          // 最上部トンネルより上に残る山頂・山肌ブロック
+          if (currentY < totalHeight) {
+            const thickness = totalHeight - currentY;
+            if (thickness > 0.05) {
+              const centerY = currentY + thickness / 2;
+              dummy.position.set(wx, centerY, wz);
+              dummy.rotation.set(0, 0, 0);
+              dummy.scale.set(tileSize * 0.99, thickness, tileSize * 0.99);
+              dummy.updateMatrix();
+              mountainTransforms.push(dummy.matrix.clone());
+            }
+          }
         } else {
           dummy.position.set(wx, totalHeight / 2, wz);
           dummy.rotation.set(0, 0, 0);
@@ -228,9 +259,9 @@ export class TerrainRenderer {
   }
 
   /**
-   * 山岳トンネル判定コールバックを設定
+   * 山岳トンネル判定コールバックを設定（指定マスに存在するトンネルの階層配列またはbooleanを返す）
    */
-  public setTunnelChecker(checker: (x: number, z: number) => boolean): void {
+  public setTunnelChecker(checker: (x: number, z: number) => number[] | boolean): void {
     this.tunnelChecker = checker;
   }
 
