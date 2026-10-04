@@ -171,7 +171,7 @@ export class GameApp {
       miniMap: this.miniMap, scheduleUI: this.scheduleUI, switchScheduleUI: this.switchScheduleUI,
       worldLabelManager: this.worldLabelManager, visualEffectManager: this.visualEffectManager, cityGrowth: this.cityGrowth,
       onClearPendingPlacements: () => this.placementController.cancelPendingPlacements(),
-      onLayerSwitched: (l) => this.switchActiveLayer(l, false)
+      onLayerSwitched: (l) => this.switchActiveLayer(l, false, true)
     });
     this.interactionController = new InteractionController({
       scene: this.renderer.scene, domElement: this.renderer.renderer.domElement, cameraManager: this.cameraManager,
@@ -198,16 +198,6 @@ export class GameApp {
     this.renderer.setGraphicsQuality(initialQuality);
     this.cameraManager.updateFrustum(window.innerWidth, window.innerHeight);
     this.uiManager.setGraphicsQualityUI(initialQuality);
-
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.has('test_cutouts')) this.persistenceService.setupTestCutouts();
-    else {
-      this.persistenceService.initWorld();
-      this.uiManager.showTitleScreen(this.gameState.hasSaveData());
-    }
-
-    this.lastTime = performance.now();
-    requestAnimationFrame(this.gameLoop.bind(this));
   }
 
   private setupUIHandlers(): void {
@@ -318,8 +308,8 @@ export class GameApp {
       ui.setTimeLightingMode(mode, (this.lastEffectiveTime = this.renderer.getTimeOfDay()));
     };
     ui.onGridToggled = (v) => this.renderer.setGridVisible(v);
-    ui.onStartNewGame = (s, t) => this.persistenceService.startNewGame(s, t);
-    ui.onResumeGame = () => this.persistenceService.resumeGame();
+    ui.onStartNewGame = async (s, t) => { await this.persistenceService.startNewGame(s, t); };
+    ui.onResumeGame = async () => { await this.persistenceService.resumeGame(); };
     ui.onRotateCameraCCW = () => this.cameraManager.rotateStepCCW();
     ui.onRotateCameraCW = () => this.cameraManager.rotateStepCW();
     ui.onToggleXRay = () => { const a = this.cameraManager.toggleXRayMode(); this.terrainRenderer.setTransparentMode(a); ui.setXRayActive(a); };
@@ -441,9 +431,9 @@ export class GameApp {
     ui.setTimeLightingMode(this.renderer.getLightingMode(), this.renderer.getTimeOfDay());
   }
 
-  public switchActiveLayer(layer: GridLayer | 'all', playSound: boolean = true): void {
+  public switchActiveLayer(layer: GridLayer | 'all', playSound: boolean = true, force: boolean = false): void {
     const targetLayer: GridLayer = layer === 'all' ? 1 : layer;
-    if (this.worldMap.activeLayer === targetLayer && this.currentDisplayLayer === layer) return;
+    if (!force && this.worldMap.activeLayer === targetLayer && this.currentDisplayLayer === layer) return;
     this.worldMap.setActiveLayer(targetLayer);
     this.currentDisplayLayer = layer;
     this.inputController.setActiveLayer(targetLayer);
@@ -748,11 +738,31 @@ export class GameApp {
     this.worldLabelManager.update(activeCam, this.cameraManager.viewMode, displayLayer, this.worldMap, this.trainManager);
   }
 
+  /**
+   * ゲームの非同期初期化処理（IndexedDBからのデータロード・初期都市生成）
+   */
+  public async init(): Promise<void> {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has('test_cutouts')) {
+      this.persistenceService.setupTestCutouts();
+    } else {
+      await this.persistenceService.initWorld();
+      const hasSave = await this.persistenceService.hasSaveData();
+      this.uiManager.showTitleScreen(hasSave);
+    }
+    this.applyLayerSlicing(this.currentDisplayLayer);
+
+    this.lastTime = performance.now();
+    requestAnimationFrame(this.gameLoop.bind(this));
+  }
+
   public getGridManager(): GridManager { return this.gridManager; }
   public getCameraManager(): CameraManager { return this.cameraManager; }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  (window as any).gameApp = new GameApp();
-  (window as any).game = (window as any).gameApp;
+window.addEventListener('DOMContentLoaded', async () => {
+  const app = new GameApp();
+  (window as any).gameApp = app;
+  (window as any).game = app;
+  await app.init();
 });

@@ -78,9 +78,7 @@ export class Economy {
     return this.isInfiniteFunds || this.funds >= 0;
   }
 
-  constructor() {
-    this.loadFromStorage();
-  }
+  constructor() {}
 
   public toggleInfiniteFunds(): boolean {
     this.isInfiniteFunds = !this.isInfiniteFunds;
@@ -356,7 +354,6 @@ export class Economy {
     while (this.monthlyHistory.length > Economy.MAX_MONTHLY_HISTORY) {
       this.monthlyHistory.shift();
     }
-    this.saveToStorage();
   }
 
   /**
@@ -367,7 +364,6 @@ export class Economy {
     while (this.yearlyHistory.length > Economy.MAX_YEARLY_HISTORY) {
       this.yearlyHistory.shift();
     }
-    this.saveToStorage();
   }
 
   public getMonthlyHistory(): FinancialSnapshot[] {
@@ -378,74 +374,67 @@ export class Economy {
     return [...this.yearlyHistory];
   }
 
-  public saveToStorage() {
-    try {
-      const data = {
-        funds: this.funds,
-        population: this.population,
-        year: this.year,
-        month: this.month,
-        day: this.day,
-        periodFareIncome: this.periodFareIncome,
-        periodCargoIncome: this.periodCargoIncome,
-        periodConstructionCost: this.periodConstructionCost,
-        periodMaintenanceCost: this.periodMaintenanceCost,
-        fiscalYearFareIncome: this.fiscalYearFareIncome,
-        fiscalYearCargoIncome: this.fiscalYearCargoIncome,
-        fiscalYearMaintenanceCost: this.fiscalYearMaintenanceCost,
-        fiscalYearConstructionCost: this.fiscalYearConstructionCost,
-        pendingCorporateTax: this.pendingCorporateTax,
-        pendingPropertyTax: this.pendingPropertyTax,
-        pendingTotalTax: this.pendingTotalTax,
-        lastSettledYear: this.lastSettledYear,
-        monthlyHistory: this.monthlyHistory,
-        yearlyHistory: this.yearlyHistory
-      };
-      localStorage.setItem('wagamachi_economy_data', JSON.stringify(data));
-    } catch (e) {
-      console.warn('LocalStorage save failed', e);
-    }
+  /**
+   * 経済・財務データのシリアライズ
+   */
+  public serialize(): any {
+    return {
+      funds: this.funds,
+      population: this.population,
+      year: this.year,
+      month: this.month,
+      day: this.day,
+      periodFareIncome: this.periodFareIncome,
+      periodCargoIncome: this.periodCargoIncome,
+      periodConstructionCost: this.periodConstructionCost,
+      periodMaintenanceCost: this.periodMaintenanceCost,
+      fiscalYearFareIncome: this.fiscalYearFareIncome,
+      fiscalYearCargoIncome: this.fiscalYearCargoIncome,
+      fiscalYearMaintenanceCost: this.fiscalYearMaintenanceCost,
+      fiscalYearConstructionCost: this.fiscalYearConstructionCost,
+      pendingCorporateTax: this.pendingCorporateTax,
+      pendingPropertyTax: this.pendingPropertyTax,
+      pendingTotalTax: this.pendingTotalTax,
+      lastSettledYear: this.lastSettledYear,
+      monthlyHistory: this.monthlyHistory,
+      yearlyHistory: this.yearlyHistory
+    };
   }
 
-  public loadFromStorage(): boolean {
-    try {
-      const raw = localStorage.getItem('wagamachi_economy_data') || localStorage.getItem('stk_3d_economy');
-      if (raw) {
-        const data = JSON.parse(raw);
-        const safeNum = (v: any, def: number) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
-        this.funds = safeNum(data.funds, 100000000);
-        this.population = safeNum(data.population, 0);
-        this.year = safeNum(data.year, 2026) >= 2026 ? data.year : 2026;
-        this.month = safeNum(data.month, 4);
-        this.day = safeNum(data.day, 1);
-        this.periodFareIncome = safeNum(data.periodFareIncome, 0);
-        this.periodCargoIncome = safeNum(data.periodCargoIncome, 0);
-        this.periodConstructionCost = safeNum(data.periodConstructionCost, 0);
-        this.periodMaintenanceCost = safeNum(data.periodMaintenanceCost, 0);
-        this.fiscalYearFareIncome = safeNum(data.fiscalYearFareIncome, 0);
-        this.fiscalYearCargoIncome = safeNum(data.fiscalYearCargoIncome, 0);
-        this.fiscalYearMaintenanceCost = safeNum(data.fiscalYearMaintenanceCost, 0);
-        this.fiscalYearConstructionCost = safeNum(data.fiscalYearConstructionCost, 0);
-        this.pendingCorporateTax = safeNum(data.pendingCorporateTax, 0);
-        this.pendingPropertyTax = safeNum(data.pendingPropertyTax, 0);
-        this.pendingTotalTax = safeNum(data.pendingTotalTax, 0);
-        this.lastSettledYear = safeNum(data.lastSettledYear, 2025);
-        if (Array.isArray(data.monthlyHistory)) {
-          this.monthlyHistory = data.monthlyHistory.filter((s: any) => s && typeof s.year === 'number');
-        } else {
-          this.monthlyHistory = [];
-        }
-        if (Array.isArray(data.yearlyHistory)) {
-          this.yearlyHistory = data.yearlyHistory.filter((s: any) => s && typeof s.year === 'number');
-        } else {
-          this.yearlyHistory = [];
-        }
-        return true;
-      }
-    } catch (e) {
-      console.warn('LocalStorage load failed', e);
+  /**
+   * 経済・財務データのデシリアライズ
+   */
+  public deserialize(data: any): boolean {
+    if (!data) return false;
+    const safeNum = (v: any, def: number) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
+    this.funds = safeNum(data.funds, 100000000);
+    this.population = safeNum(data.population, 0);
+    this.year = safeNum(data.year, 2026) >= 2026 ? data.year : 2026;
+    this.month = safeNum(data.month, 4);
+    this.day = safeNum(data.day, 1);
+    this.periodFareIncome = safeNum(data.periodFareIncome, 0);
+    this.periodCargoIncome = safeNum(data.periodCargoIncome, 0);
+    this.periodConstructionCost = safeNum(data.periodConstructionCost, 0);
+    this.periodMaintenanceCost = safeNum(data.periodMaintenanceCost, 0);
+    this.fiscalYearFareIncome = safeNum(data.fiscalYearFareIncome, 0);
+    this.fiscalYearCargoIncome = safeNum(data.fiscalYearCargoIncome, 0);
+    this.fiscalYearMaintenanceCost = safeNum(data.fiscalYearMaintenanceCost, 0);
+    this.fiscalYearConstructionCost = safeNum(data.fiscalYearConstructionCost, 0);
+    this.pendingCorporateTax = safeNum(data.pendingCorporateTax, 0);
+    this.pendingPropertyTax = safeNum(data.pendingPropertyTax, 0);
+    this.pendingTotalTax = safeNum(data.pendingTotalTax, 0);
+    this.lastSettledYear = safeNum(data.lastSettledYear, 2025);
+    if (Array.isArray(data.monthlyHistory)) {
+      this.monthlyHistory = data.monthlyHistory.filter((s: any) => s && typeof s.year === 'number');
+    } else {
+      this.monthlyHistory = [];
     }
-    return false;
+    if (Array.isArray(data.yearlyHistory)) {
+      this.yearlyHistory = data.yearlyHistory.filter((s: any) => s && typeof s.year === 'number');
+    } else {
+      this.yearlyHistory = [];
+    }
+    return true;
   }
 
   public resetAll() {
@@ -468,10 +457,6 @@ export class Economy {
     this.lastSettledYear = 2025;
     this.monthlyHistory = [];
     this.yearlyHistory = [];
-    try {
-      localStorage.removeItem('wagamachi_economy_data');
-      localStorage.removeItem('stk_3d_economy');
-    } catch (e) {}
   }
 
   /**

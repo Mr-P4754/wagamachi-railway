@@ -24,6 +24,7 @@ import { VisualEffectManager } from '../graphics/VisualEffectManager';
 import { isTrackLikeType } from '../controllers/PlacementController';
 import { BuildingBakery } from '../graphics/structures/BuildingBakery';
 import { UndoManager } from '../core/UndoManager';
+import { db, SavedTileRecord, SavedTrainRecord, SavedEconomyRecord, SavedSystemRecord } from './Database';
 
 export interface PersistenceServiceDependencies {
   gameState: GameState;
@@ -54,7 +55,7 @@ export interface PersistenceServiceDependencies {
 }
 
 /**
- * ゲームデータの永続化（セーブ・ロード・リセット）および初期都市生成を担当するサービス
+ * ゲームデータの永続化（IndexedDB セーブ・ロード・リセット）および初期都市生成を担当するサービス
  */
 export class PersistenceService {
   public static readonly GRAPHICS_QUALITY_KEY = 'wagamachi_graphics_quality';
@@ -99,12 +100,11 @@ export class PersistenceService {
   }
 
   private deps: PersistenceServiceDependencies;
+  private isSaving: boolean = false;
 
   constructor(deps: PersistenceServiceDependencies) {
     this.deps = deps;
   }
-
-  private isSaving: boolean = false;
 
   /**
    * メインスレッドの描画（requestAnimationFrame）や入力処理を阻害しないよう、
@@ -115,7 +115,23 @@ export class PersistenceService {
   }
 
   /**
-   * 現在のゲーム状態を localStorage へ非同期・分割保存
+   * セーブデータが存在するか確認（IndexedDB またはレガシー localStorage）
+   */
+  public async hasSaveData(): Promise<boolean> {
+    try {
+      const tileCount = await db.tiles.count();
+      if (tileCount > 0) return true;
+      const legacy = localStorage.getItem('wagamachi_save_data') ||
+                     localStorage.getItem('saikyo_save_data') ||
+                     localStorage.getItem('stk_3d_world');
+      return !!legacy;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 現在のゲーム状態を IndexedDB (Dexie) へ非同期・原子的トランザクション保存
    * @param isManual 手動セーブ（ユーザー操作）か定期オートセーブか
    */
   public async saveGame(isManual: boolean = false): Promise<void> {
@@ -132,118 +148,132 @@ export class PersistenceService {
     try {
       const { worldMap, zoneManager, economy, trainManager, fleetController, timeManager, uiManager, scheduleUI } = this.deps;
 
-      // 【ステップA: 経済・時間・列車・ゾーン・系統テンプレートデータの収集とシリアライズ】
-      const timeData = {
-        year: timeManager.year,
-        month: timeManager.month,
-        day: timeManager.day,
-        hour: timeManager.hour,
-        minute: timeManager.minute,
-        speedLevel: timeManager.speedLevel
+      // 【ステップA: タイルデータの抽出】
+      const tileRecords: SavedTileRecord[] = [];
+      for (const t of worldMap.getAllTiles()) {
+        // シーサスクロッシングの従属マス(B/C/D)は起点(A)から復元されるため重複登録を除外
+        if (t.groupOrigin && t.crossingRole !== 0) continue;
+        if (t.type !== 'empty') {
+          tileRecords.push({
+            id: `${t.x},${t.z},${t.layer ?? 1}`,
+            x: t.x,
+            z: t.z,
+            layer: (t.layer ?? 1) as GridLayer,
+            type: t.type,
+            rotation: t.rotation,
+            level: t.level,
+            elevationOffset: t.elevationOffset,
+            curveDir: t.curveDir,
+            switchState: t.switchState,
+            switchBranchSide: t.switchBranchSide,
+            switchSchedule: t.switchSchedule,
+            crossingState: t.crossingState,
+            crossingRoadAxis: t.crossingRoadAxis,
+            slopePart: t.slopePart,
+            slopeReversed: t.slopeReversed,
+            cargoContainers: t.cargoContainers,
+            stationName: t.stationName,
+            stationGroupId: t.stationGroupId,
+            stationPlatformId: t.stationPlatformId,
+            stationPart: t.stationPart,
+            stationPlatformSide: t.stationPlatformSide,
+            stationSchedule: t.stationSchedule,
+            stationPassengers: t.stationPassengers,
+            isCargoYard: t.isCargoYard,
+            // 互換キー
+            rot: t.rotation,
+            lvl: t.level,
+            sw: t.switchState,
+            branchSide: t.switchBranchSide,
+            crossState: t.crossingState,
+            roadAxis: t.crossingRoadAxis,
+            slopeRev: t.slopeReversed,
+            cargoYard: t.isCargoYard
+          });
+        }
+      }
+
+      // 【ステップB: 列車・経済・システム設定データの抽出】
+      const rawTrains = trainManager.serialize();
+      const trainsList: any[] = rawTrains ? JSON.parse(rawTrains) : [];
+      const trainRecords: SavedTrainRecord[] = trainsList.map((t: any) => ({
+        id: t.id,
+        data: t,
+        fleetId: t.fleetId
+      }));
+
+      const economyRecord: SavedEconomyRecord = {
+        id: 'current',
+        ...economy.serialize()
       };
-      const timeDataStr = JSON.stringify(timeData);
-      const fleetDataStr = JSON.stringify(fleetController.serializeFleetData());
-      const nextFleetIdStr = String(fleetController.nextFleetId);
-      const trainsDataStr = trainManager.serialize();
-      const zoneDataStr = zoneManager.serialize();
-      const templatesStr = scheduleUI.serializeTemplates();
 
-      // 描画フレームを阻害しないよう一度イベントループへ譲渡
-      await this.yieldToMain();
-
-      // 【ステップB: ワールドマップデータの取得（ダーティフラグ＆キャッシュ活用）】
-      const worldDataStr = worldMap.serialize();
-
-      // 描画フレームを阻害しないよう再度イベントループへ譲渡
-      await this.yieldToMain();
-
-      // 【ステップC: localStorage への分割書き込み（個別 try-catch と容量超過ハンドリング）】
-      let hasQuotaError = false;
-
-      // 軽量メタデータの書き込み
-      const metadataItems: Array<{ key: string; value: string }> = [
-        { key: 'wagamachi_time_data', value: timeDataStr },
-        { key: 'wagamachi_fleet_data', value: fleetDataStr },
-        { key: 'wagamachi_next_fleet_id', value: nextFleetIdStr },
-        { key: 'wagamachi_trains_data', value: trainsDataStr },
-        { key: 'wagamachi_zone_data', value: zoneDataStr },
-        { key: 'wagamachi_route_templates', value: templatesStr }
+      const systemRecords: SavedSystemRecord[] = [
+        {
+          key: 'time',
+          value: {
+            year: timeManager.year,
+            month: timeManager.month,
+            day: timeManager.day,
+            hour: timeManager.hour,
+            minute: timeManager.minute,
+            speedLevel: timeManager.speedLevel
+          }
+        },
+        { key: 'fleet', value: fleetController.serializeFleetData() },
+        { key: 'next_fleet_id', value: fleetController.nextFleetId },
+        { key: 'zones', value: zoneManager.serialize() },
+        { key: 'route_templates', value: scheduleUI.serializeTemplates() },
+        { key: 'stations', value: worldMap.stationManager.serialize() },
+        { key: 'world_meta', value: { gridSize: worldMap.gridSize } }
       ];
 
-      for (const item of metadataItems) {
-        try {
-          localStorage.setItem(item.key, item.value);
-        } catch (e: any) {
-          if (e?.name === 'QuotaExceededError' || e?.code === 22 || e?.code === 1014) {
-            hasQuotaError = true;
-            console.warn(`[PersistenceService] localStorage 容量上限超過: ${item.key}`, e);
-          } else {
-            console.error(`[PersistenceService] 保存エラー: ${item.key}`, e);
-          }
-        }
-      }
-
-      // 経済データの保存
-      try {
-        economy.saveToStorage();
-      } catch (e: any) {
-        if (e?.name === 'QuotaExceededError' || e?.code === 22 || e?.code === 1014) {
-          hasQuotaError = true;
-          console.warn('[PersistenceService] localStorage 容量上限超過: wagamachi_economy_data', e);
-        } else {
-          console.error('[PersistenceService] 経済データ保存エラー', e);
-        }
-      }
-
-      // 最もサイズの大きいワールドマップデータの書き込み前に再度フレーム譲渡
+      // メインスレッドのフレームドロップを回避するため非同期タスク譲渡
       await this.yieldToMain();
 
-      try {
-        localStorage.setItem('wagamachi_save_data', worldDataStr);
-      } catch (e: any) {
-        if (e?.name === 'QuotaExceededError' || e?.code === 22 || e?.code === 1014) {
-          hasQuotaError = true;
-          console.warn('[PersistenceService] localStorage 容量上限超過: wagamachi_save_data', e);
-        } else {
-          console.error('[PersistenceService] ワールドマップ保存エラー', e);
-        }
-      }
+      // 【ステップC: IndexedDB への一括トランザクション書き込み】
+      await db.transaction('rw', [db.tiles, db.trains, db.economy, db.system], async () => {
+        await db.tiles.clear();
+        await db.tiles.bulkPut(tileRecords);
 
-      // 手動セーブ完了時のトースト通知
-      if (isManual) {
-        if (hasQuotaError) {
-          uiManager.showToast(
-            '保存容量上限',
-            'ブラウザの保存容量上限（約5MB）に達したため、一部のデータが保存できませんでした。<br>不要な路線やセーブデータを整理してください。',
-            'warning'
-          );
-        } else {
-          uiManager.showToast('セーブ完了', 'ゲームデータを保存しました。', 'success');
+        await db.trains.clear();
+        if (trainRecords.length > 0) {
+          await db.trains.bulkPut(trainRecords);
         }
-      }
-    } catch (err) {
-      console.error('[PersistenceService] セーブ処理中に予期せぬエラーが発生しました:', err);
+
+        await db.economy.put(economyRecord);
+
+        await db.system.bulkPut(systemRecords);
+      });
+
       if (isManual) {
-        this.deps.uiManager.showToast('セーブ失敗', 'セーブデータの保存中にエラーが発生しました。', 'danger');
+        uiManager.showToast('セーブ完了', 'ゲームデータを IndexedDB に安全に保存しました。', 'success');
       }
+    } catch (err: any) {
+      console.error('[PersistenceService] セーブ処理中にエラーが発生しました:', err);
+      const isQuota = err?.name === 'QuotaExceededError';
+      const message = isQuota
+        ? 'ブラウザのストレージ容量上限に達したため、一部のデータが保存できませんでした。'
+        : 'データベースへの書き込み中にエラーが発生しました。プライベートブラウズ設定をご確認ください。';
+      this.deps.uiManager.showToast('セーブ失敗', message, 'danger');
     } finally {
       this.isSaving = false;
     }
   }
 
   /**
-   * 都市データの初期ロードまたは初期都市生成
+   * 都市データの初期ロードまたは初期都市生成（非同期）
    */
-  public initWorld(): void {
-    if (!this.loadGame()) {
+  public async initWorld(): Promise<void> {
+    const loaded = await this.loadGame();
+    if (!loaded) {
       this.buildInitialCity();
     }
   }
 
   /**
-   * セーブデータの読み込み、パース、バージョン検証、各サブシステムへのデシリアライズ委譲
+   * セーブデータの読み込み、各サブシステムへのデシリアライズ委譲（非同期）
    */
-  public loadGame(): boolean {
+  public async loadGame(): Promise<boolean> {
     const {
       worldMap,
       zoneManager,
@@ -251,105 +281,245 @@ export class PersistenceService {
       economy,
       trainManager,
       fleetController,
-      terrainRenderer,
       visualEffectManager,
-      renderer
+      scheduleUI,
+      terrainRenderer,
+      renderer,
+      getGridManager
     } = this.deps;
 
-    const saved = localStorage.getItem('wagamachi_save_data') || localStorage.getItem('saikyo_save_data') || localStorage.getItem('stk_3d_world');
-    if (!saved) return false;
+    try {
+      const tileCount = await db.tiles.count();
 
-    economy.loadFromStorage();
-    worldMap.deserialize(saved);
-
-    // 運行系統ダイヤテンプレートの復元
-    const savedTemplates = localStorage.getItem('wagamachi_route_templates');
-    if (savedTemplates) {
-      this.deps.scheduleUI.deserializeTemplates(savedTemplates);
-    }
-
-    const savedZones = localStorage.getItem('wagamachi_zone_data') || localStorage.getItem('saikyo_zone_data');
-    if (savedZones) {
-      zoneManager.deserialize(savedZones);
-      visualEffectManager.refreshZoneOverlay(zoneManager.getAllZones().map(c => ({ x: c.x, z: c.z })));
-    }
-    for (const t of worldMap.getAllTiles()) {
-      if (t.isCargoYard || t.type.startsWith('cargo_station')) {
-        visualEffectManager.updateCargoYardVisual(t.x, t.z, (t.layer ?? 1) as GridLayer);
+      // 【ステップA: IndexedDB が空の場合の後方互換マイグレーション判定】
+      if (tileCount === 0) {
+        const legacySave = localStorage.getItem('wagamachi_save_data') ||
+                           localStorage.getItem('saikyo_save_data') ||
+                           localStorage.getItem('stk_3d_world');
+        if (legacySave) {
+          return await this.migrateFromLocalStorage(legacySave);
+        }
+        return false;
       }
-    }
 
-    // ゲーム内日時の復元
-    const savedTime = localStorage.getItem('wagamachi_time_data') || localStorage.getItem('saikyo_time_data');
-    if (savedTime) {
-      try {
-        const t = JSON.parse(savedTime);
-        if (t && typeof t.hour === 'number' && typeof t.minute === 'number') {
-          timeManager.year = t.year ?? timeManager.year;
-          timeManager.month = t.month ?? timeManager.month;
-          timeManager.day = t.day ?? timeManager.day;
-          timeManager.hour = t.hour;
-          timeManager.minute = t.minute;
-          if (typeof t.speedLevel === 'number') {
-            timeManager.setSpeedLevel(t.speedLevel as SpeedLevel);
-            this.deps.uiManager.setSpeedUI(t.speedLevel);
+      // 【ステップB: IndexedDB からのデータ復元】
+      // 1. システムメタデータ
+      const systemEntries = await db.system.toArray();
+      const systemMap = new Map<string, any>(systemEntries.map(e => [e.key, e.value]));
+
+      // 2. 経済データ
+      const savedEconomy = await db.economy.get('current');
+      if (savedEconomy) {
+        economy.deserialize(savedEconomy);
+      }
+
+      // 3. タイルデータおよび駅構成
+      const savedTiles = await db.tiles.toArray();
+      const stationData = systemMap.get('stations');
+      worldMap.deserialize({ tiles: savedTiles, stations: stationData });
+
+      // 4. 運行系統ダイヤテンプレート
+      const savedTemplates = systemMap.get('route_templates');
+      if (savedTemplates) {
+        scheduleUI.deserializeTemplates(typeof savedTemplates === 'string' ? savedTemplates : JSON.stringify(savedTemplates));
+      }
+
+      // 5. ゾーンデータ
+      const savedZones = systemMap.get('zones');
+      if (savedZones) {
+        zoneManager.deserialize(typeof savedZones === 'string' ? savedZones : JSON.stringify(savedZones));
+        visualEffectManager.refreshZoneOverlay(zoneManager.getAllZones().map(c => ({ x: c.x, z: c.z })));
+      }
+      for (const t of worldMap.getAllTiles()) {
+        if (t.isCargoYard || t.type.startsWith('cargo_station')) {
+          visualEffectManager.updateCargoYardVisual(t.x, t.z, (t.layer ?? 1) as GridLayer);
+        }
+      }
+
+      // 6. 日時・スピード設定
+      const savedTime = systemMap.get('time');
+      if (savedTime && typeof savedTime.hour === 'number' && typeof savedTime.minute === 'number') {
+        timeManager.year = savedTime.year ?? timeManager.year;
+        timeManager.month = savedTime.month ?? timeManager.month;
+        timeManager.day = savedTime.day ?? timeManager.day;
+        timeManager.hour = savedTime.hour;
+        timeManager.minute = savedTime.minute;
+        if (typeof savedTime.speedLevel === 'number') {
+          timeManager.setSpeedLevel(savedTime.speedLevel as SpeedLevel);
+          this.deps.uiManager.setSpeedUI(savedTime.speedLevel);
+        }
+        economy.syncDate(timeManager.year, timeManager.month, timeManager.day);
+      }
+
+      // 7. 運行中列車および車両基地保有リスト
+      const savedNextFleetId = systemMap.get('next_fleet_id');
+      if (savedNextFleetId) {
+        fleetController.nextFleetId = parseInt(savedNextFleetId, 10) || fleetController.nextFleetId;
+      }
+
+      const savedTrains = await db.trains.toArray();
+      let trainsLoaded = false;
+      if (savedTrains.length > 0) {
+        const trainArray = savedTrains.map(t => t.data);
+        trainsLoaded = trainManager.deserialize(JSON.stringify(trainArray));
+      }
+
+      const savedFleet = systemMap.get('fleet');
+      if (savedFleet) {
+        const fleetArray = typeof savedFleet === 'string' ? JSON.parse(savedFleet) : savedFleet;
+        if (Array.isArray(fleetArray)) {
+          fleetController.deserializeFleetData(fleetArray);
+        }
+      }
+
+      fleetController.ensureIntegrityWithRunningTrains();
+
+      // フォールバック初期列車
+      if (!trainsLoaded && fleetController.getFleetRegistry().length === 0) {
+        const track = worldMap.getAllTiles().find(t => t.type.includes('station') || t.type.includes('rail'));
+        if (track) {
+          const vehicle = getVehicleById('commuter-train');
+          if (vehicle) {
+            const train = trainManager.spawnTrain(track.x, track.z, vehicle, 2);
+            if (train) {
+              fleetController.registerNewFleetItem({
+                id: `fleet-${fleetController.nextFleetId++}`,
+                name: `${vehicle.name} 1号`,
+                model: vehicle,
+                cars: 2,
+                status: 'deployed',
+                activeTrainId: train.id
+              });
+            }
           }
-          economy.syncDate(timeManager.year, timeManager.month, timeManager.day);
         }
-      } catch (e) {
-        console.warn('Failed to restore time data:', e);
       }
-    }
 
-    // 運行中列車および車両基地保有リストの復元
-    const savedTrains = localStorage.getItem('wagamachi_trains_data') || localStorage.getItem('saikyo_trains_data');
-    const savedFleet = localStorage.getItem('wagamachi_fleet_data') || localStorage.getItem('saikyo_fleet_data');
-    const savedNextFleetId = localStorage.getItem('wagamachi_next_fleet_id') || localStorage.getItem('saikyo_next_fleet_id');
-    if (savedNextFleetId) {
-      fleetController.nextFleetId = parseInt(savedNextFleetId, 10) || fleetController.nextFleetId;
+      terrainRenderer.build(getGridManager(), renderer.scene);
+      return true;
+    } catch (err) {
+      console.error('[PersistenceService] ロード処理中にエラーが発生しました:', err);
+      this.deps.uiManager.showToast('ロード失敗', 'セーブデータの読み込み中にエラーが発生しました。', 'danger');
+      return false;
     }
+  }
 
-    let trainsLoaded = false;
-    if (savedTrains) {
-      trainsLoaded = trainManager.deserialize(savedTrains);
-    }
+  /**
+   * レガシー localStorage からの自動マイグレーション処理
+   */
+  private async migrateFromLocalStorage(legacyWorldJson: string): Promise<boolean> {
+    const {
+      worldMap,
+      zoneManager,
+      timeManager,
+      economy,
+      trainManager,
+      fleetController,
+      visualEffectManager,
+      scheduleUI,
+      terrainRenderer,
+      renderer,
+      getGridManager
+    } = this.deps;
 
-    if (savedFleet) {
-      try {
-        const parsedFleet = JSON.parse(savedFleet);
-        if (Array.isArray(parsedFleet)) {
-          fleetController.deserializeFleetData(parsedFleet);
+    try {
+      console.info('[PersistenceService] localStorage から IndexedDB へのマイグレーションを開始します...');
+
+      // 1. 旧ワールドマップ復元
+      worldMap.deserialize(legacyWorldJson);
+
+      // 2. 旧経済データ復元
+      const legacyEconomy = localStorage.getItem('wagamachi_economy_data') || localStorage.getItem('stk_3d_economy');
+      if (legacyEconomy) {
+        try {
+          economy.deserialize(JSON.parse(legacyEconomy));
+        } catch (e) {
+          console.warn('[PersistenceService] 旧経済データパース失敗:', e);
         }
-      } catch (e) {
-        console.error('Failed to restore fleetRegistry:', e);
       }
-    }
 
-    // データの整合性修復
-    fleetController.ensureIntegrityWithRunningTrains();
+      // 3. 旧ダイヤテンプレート
+      const legacyTemplates = localStorage.getItem('wagamachi_route_templates');
+      if (legacyTemplates) {
+        scheduleUI.deserializeTemplates(legacyTemplates);
+      }
 
-    // レガシーセーブデータ等で列車データがなかった場合のみフォールバックで初期列車を生成
-    if (!trainsLoaded && fleetController.getFleetRegistry().length === 0) {
-      const track = worldMap.getAllTiles().find(t => t.type.includes('station') || t.type.includes('rail'));
-      if (track) {
-        const vehicle = getVehicleById('commuter-train');
-        if (vehicle) {
-          const train = trainManager.spawnTrain(track.x, track.z, vehicle, 2);
-          if (train) {
-            fleetController.registerNewFleetItem({
-              id: `fleet-${fleetController.nextFleetId++}`,
-              name: `${vehicle.name} 1号`,
-              model: vehicle,
-              cars: 2,
-              status: 'deployed',
-              activeTrainId: train.id
-            });
+      // 4. 旧ゾーンデータ
+      const legacyZones = localStorage.getItem('wagamachi_zone_data') || localStorage.getItem('saikyo_zone_data');
+      if (legacyZones) {
+        zoneManager.deserialize(legacyZones);
+        visualEffectManager.refreshZoneOverlay(zoneManager.getAllZones().map(c => ({ x: c.x, z: c.z })));
+      }
+
+      // 5. 旧日時データ
+      const legacyTime = localStorage.getItem('wagamachi_time_data') || localStorage.getItem('saikyo_time_data');
+      if (legacyTime) {
+        try {
+          const t = JSON.parse(legacyTime);
+          if (t && typeof t.hour === 'number' && typeof t.minute === 'number') {
+            timeManager.year = t.year ?? timeManager.year;
+            timeManager.month = t.month ?? timeManager.month;
+            timeManager.day = t.day ?? timeManager.day;
+            timeManager.hour = t.hour;
+            timeManager.minute = t.minute;
+            if (typeof t.speedLevel === 'number') {
+              timeManager.setSpeedLevel(t.speedLevel as SpeedLevel);
+              this.deps.uiManager.setSpeedUI(t.speedLevel);
+            }
+            economy.syncDate(timeManager.year, timeManager.month, timeManager.day);
           }
+        } catch (e) {
+          console.warn('[PersistenceService] 旧日時データパース失敗:', e);
         }
       }
+
+      // 6. 旧列車およびFleetデータ
+      const legacyNextFleetId = localStorage.getItem('wagamachi_next_fleet_id') || localStorage.getItem('saikyo_next_fleet_id');
+      if (legacyNextFleetId) {
+        fleetController.nextFleetId = parseInt(legacyNextFleetId, 10) || fleetController.nextFleetId;
+      }
+      const legacyTrains = localStorage.getItem('wagamachi_trains_data') || localStorage.getItem('saikyo_trains_data');
+      if (legacyTrains) {
+        trainManager.deserialize(legacyTrains);
+      }
+      const legacyFleet = localStorage.getItem('wagamachi_fleet_data') || localStorage.getItem('saikyo_fleet_data');
+      if (legacyFleet) {
+        try {
+          const parsedFleet = JSON.parse(legacyFleet);
+          if (Array.isArray(parsedFleet)) {
+            fleetController.deserializeFleetData(parsedFleet);
+          }
+        } catch (e) {
+          console.warn('[PersistenceService] 旧Fleetデータパース失敗:', e);
+        }
+      }
+      fleetController.ensureIntegrityWithRunningTrains();
+
+      // 7. IndexedDB へ新規保存
+      await this.saveGame(false);
+
+      // 8. マイグレーション完了後、localStorage の旧キーを安全に全削除
+      const legacyKeys = [
+        'wagamachi_save_data', 'wagamachi_economy_data', 'wagamachi_zone_data',
+        'wagamachi_trains_data', 'wagamachi_fleet_data', 'wagamachi_next_fleet_id',
+        'wagamachi_time_data', 'wagamachi_route_templates', 'stk_3d_world',
+        'stk_3d_economy', 'saikyo_save_data', 'saikyo_zone_data',
+        'saikyo_trains_data', 'saikyo_fleet_data', 'saikyo_next_fleet_id',
+        'saikyo_time_data'
+      ];
+      for (const k of legacyKeys) {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      }
+
+      terrainRenderer.build(getGridManager(), renderer.scene);
+      console.info('[PersistenceService] localStorage から IndexedDB への移行が正常に完了しました！');
+      return true;
+    } catch (err) {
+      console.error('[PersistenceService] マイグレーション処理中にエラーが発生しました:', err);
+      return false;
     }
-    terrainRenderer.build(this.deps.getGridManager(), renderer.scene);
-    return true;
   }
 
   /**
@@ -436,9 +606,9 @@ export class PersistenceService {
   }
 
   /**
-   * 新規作成によるゲーム開始
+   * 新規作成によるゲーム開始（非同期）
    */
-  public startNewGame(mapSize: MapSize, terrainType: TerrainType): void {
+  public async startNewGame(mapSize: MapSize, terrainType: TerrainType): Promise<void> {
     const {
       gameState,
       renderer,
@@ -502,12 +672,13 @@ export class PersistenceService {
   }
 
   /**
-   * セーブデータからのゲーム再開
+   * セーブデータからのゲーム再開（非同期）
    */
-  public resumeGame(): void {
-    const { gameState, cameraManager, uiManager } = this.deps;
+  public async resumeGame(): Promise<void> {
+    const { gameState, cameraManager, uiManager, onLayerSwitched } = this.deps;
     gameState.resumeGame();
-    this.initWorld();
+    await this.initWorld();
+    onLayerSwitched(1);
     cameraManager.target.set(0, 0, 0);
     cameraManager.stopTracking();
     cameraManager.setQuarterViewMode();
@@ -515,9 +686,9 @@ export class PersistenceService {
   }
 
   /**
-   * ゲームデータのリセット（初期化してタイトルへ復帰）
+   * ゲームデータのリセット（IndexedDB クリア・初期化してタイトルへ復帰）
    */
-  public resetGame(): void {
+  public async resetGame(): Promise<void> {
     const {
       renderer,
       worldMap,
@@ -543,21 +714,32 @@ export class PersistenceService {
       cityGrowth
     } = this.deps;
 
-    // ストレージキーの完全クリーンアップ
-    localStorage.removeItem('wagamachi_save_data');
-    localStorage.removeItem('wagamachi_zone_data');
-    localStorage.removeItem('wagamachi_trains_data');
-    localStorage.removeItem('wagamachi_fleet_data');
-    localStorage.removeItem('wagamachi_next_fleet_id');
-    localStorage.removeItem('wagamachi_time_data');
-    localStorage.removeItem('stk_3d_world');
-    localStorage.removeItem('saikyo_save_data');
-    localStorage.removeItem('saikyo_zone_data');
-    localStorage.removeItem('saikyo_trains_data');
-    localStorage.removeItem('saikyo_fleet_data');
-    localStorage.removeItem('saikyo_next_fleet_id');
-    localStorage.removeItem('saikyo_time_data');
-    localStorage.removeItem('wagamachi_route_templates');
+    // IndexedDB テーブルの全消去
+    try {
+      await db.transaction('rw', [db.tiles, db.trains, db.economy, db.system], async () => {
+        await db.tiles.clear();
+        await db.trains.clear();
+        await db.economy.clear();
+        await db.system.clear();
+      });
+    } catch (e) {
+      console.warn('[PersistenceService] IndexedDB クリア時の警告:', e);
+    }
+
+    // レガシー localStorage キーの残骸も完全クリーンアップ
+    const legacyKeys = [
+      'wagamachi_save_data', 'wagamachi_economy_data', 'wagamachi_zone_data',
+      'wagamachi_trains_data', 'wagamachi_fleet_data', 'wagamachi_next_fleet_id',
+      'wagamachi_time_data', 'wagamachi_route_templates', 'stk_3d_world',
+      'stk_3d_economy', 'saikyo_save_data', 'saikyo_zone_data',
+      'saikyo_trains_data', 'saikyo_fleet_data', 'saikyo_next_fleet_id',
+      'saikyo_time_data'
+    ];
+    for (const k of legacyKeys) {
+      try {
+        localStorage.removeItem(k);
+      } catch {}
+    }
 
     scheduleUI.resetTemplates();
 

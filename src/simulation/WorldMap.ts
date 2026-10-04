@@ -2815,52 +2815,67 @@ export class WorldMap {
     return serialized;
   }
 
-  public deserialize(jsonStr: string) {
+  public deserialize(jsonOrData: string | { tiles: any[]; stations?: any } | any[]) {
     try {
-      const parsed = JSON.parse(jsonStr);
-      this.clearAll();
-
       let data: any[];
       let stationData: StationSaveData | null = null;
 
-      if (Array.isArray(parsed)) {
-        // 旧バージョン互換（配列形式）
-        data = parsed;
-      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tiles)) {
-        // 新バージョン（v2形式）
-        data = parsed.tiles;
-        stationData = parsed.stations ?? null;
+      if (typeof jsonOrData === 'string') {
+        const parsed = JSON.parse(jsonOrData);
+        if (Array.isArray(parsed)) {
+          data = parsed;
+        } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tiles)) {
+          data = parsed.tiles;
+          stationData = parsed.stations ?? null;
+        } else {
+          return;
+        }
+      } else if (Array.isArray(jsonOrData)) {
+        data = jsonOrData;
+      } else if (jsonOrData && typeof jsonOrData === 'object' && Array.isArray(jsonOrData.tiles)) {
+        data = jsonOrData.tiles;
+        stationData = jsonOrData.stations ?? null;
       } else {
         return;
       }
 
+      this.clearAll();
+
       for (const item of data) {
         const lyr: GridLayer = (item.layer ?? 1) as GridLayer;
         const isElevated = item.type.includes('elevated') || lyr >= 2;
+        const rot = item.rotation ?? item.rot ?? 0;
+        const lvl = item.level ?? item.lvl ?? 1;
+        const slopeRev = !!(item.slopeReversed ?? item.slopeRev);
 
         if (item.type.startsWith('point_switch')) {
-          this.placeSwitch(item.x, item.z, item.rot || 0, isElevated, item.branchSide || 'right', lyr);
-          if (item.sw === 'diverge') {
+          const branchSide = item.switchBranchSide ?? item.branchSide ?? 'right';
+          const swState = item.switchState ?? item.sw ?? 'straight';
+          this.placeSwitch(item.x, item.z, rot, isElevated, branchSide, lyr);
+          if (swState === 'diverge') {
             this.togglePointSwitch(item.x, item.z, lyr);
           }
-          if (item.switchSchedule) {
+          const schedule = item.switchSchedule;
+          if (schedule) {
             const swTile = this.getTile(item.x, item.z, lyr);
-            if (swTile) swTile.switchSchedule = item.switchSchedule;
+            if (swTile) swTile.switchSchedule = schedule;
           }
         } else if (item.type.startsWith('scissors_crossing')) {
-          this.placeScissorsCrossing(item.x, item.z, item.rot || 0, isElevated, lyr);
-          const target: CrossingState = item.crossState || 'straight';
+          this.placeScissorsCrossing(item.x, item.z, rot, isElevated, lyr);
+          const target: CrossingState = item.crossingState ?? item.crossState ?? 'straight';
           this.setCrossingState(item.x, item.z, target, lyr);
-          if (item.switchSchedule) {
+          const schedule = item.switchSchedule;
+          if (schedule) {
             const crTile = this.getTile(item.x, item.z, lyr);
-            if (crTile) crTile.switchSchedule = item.switchSchedule;
+            if (crTile) crTile.switchSchedule = schedule;
           }
-        } else if (item.type.startsWith('rail_curve') && item.curveDir !== undefined) {
-          this.placeCurve(item.x, item.z, item.curveDir, isElevated, lyr);
+        } else if (item.type.startsWith('rail_curve')) {
+          const curveDir = item.curveDir ?? 'N_E';
+          this.placeCurve(item.x, item.z, curveDir, isElevated, lyr);
         } else if (item.type === 'rail_slope') {
           const tile = this.getOrCreateTile(item.x, item.z, lyr);
           if (tile) {
-            this.applySlopeTile(tile, item.rot || 0, !!item.slopeRev, item.slopePart || 0, lyr);
+            this.applySlopeTile(tile, rot, slopeRev, item.slopePart || 0, lyr);
             // 【バグ修正】スロープ最上段(part 3)の場合、接続先の上の階層にもタイルを登録して断線を防ぐ
             if ((item.slopePart || 0) === 3) {
               const upperLayer: GridLayer = lyr === 1 ? 2 : ((lyr + 1) as GridLayer);
@@ -2870,19 +2885,19 @@ export class WorldMap {
         } else if (item.type === 'rail_slope_underground') {
           const tile = this.getOrCreateTile(item.x, item.z, lyr);
           if (tile) {
-            this.applyUndergroundSlopeTile(tile, item.rot || 0, !!item.slopeRev, item.slopePart || 0, lyr);
+            this.applyUndergroundSlopeTile(tile, rot, slopeRev, item.slopePart || 0, lyr);
             // 【バグ修正】地下スロープ最下段(part 3)の場合、地下1F(layer -1)にもタイルを登録
             if ((item.slopePart || 0) === 3) {
               this.grid3D.set(item.x, -1, item.z, tile);
             }
             if ((item.slopePart || 0) === 0 || (item.slopePart || 0) === 1) {
-              this.groundHoleHandler?.add(item.x, item.z, item.rot || 0);
+              this.groundHoleHandler?.add(item.x, item.z, rot);
             }
           }
         } else if (item.type === 'level_crossing') {
-          this.applyLevelCrossing(item.x, item.z, item.rot || 0, item.roadAxis ?? (1 - (item.rot || 0)), item.lvl || 1, lyr);
+          this.applyLevelCrossing(item.x, item.z, rot, item.crossingRoadAxis ?? item.roadAxis ?? (1 - rot), lvl, lyr);
         } else if (item.type.includes('station') || item.type === 'signal_yard') {
-          this.setTile(item.x, item.z, item.type, item.rot || 0, item.lvl || 1, item.stationPlatformSide || 'right', lyr);
+          this.setTile(item.x, item.z, item.type, rot, lvl, item.stationPlatformSide || 'right', lyr);
           const restored = this.getTile(item.x, item.z, lyr);
           if (restored) {
             if (item.stationName) restored.stationName = item.stationName;
@@ -2891,15 +2906,16 @@ export class WorldMap {
             if (item.stationPart) restored.stationPart = item.stationPart;
             if (item.stationPlatformSide) restored.stationPlatformSide = item.stationPlatformSide;
             if (item.stationSchedule) restored.stationSchedule = item.stationSchedule;
+            if (item.stationPassengers !== undefined) restored.stationPassengers = item.stationPassengers;
             if (restored.mesh && item.stationName) {
               ModelFactory.updateStationSign(restored.mesh, item.stationName);
             }
           }
         } else {
-          this.setTile(item.x, item.z, item.type, item.rot || 0, item.lvl || 1, 'right', lyr);
+          this.setTile(item.x, item.z, item.type, rot, lvl, 'right', lyr);
         }
 
-        if (item.cargoYard) {
+        if (item.isCargoYard || item.cargoYard) {
           const restored = this.getTile(item.x, item.z, lyr);
           if (restored) restored.isCargoYard = true;
         }

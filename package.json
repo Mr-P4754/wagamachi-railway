@@ -10,6 +10,7 @@
     "bundle:txt": "npx tsx generate_shared_txt.ts"
   },
   "dependencies": {
+    "dexie": "^4.4.6",
     "three": "^0.160.0"
   },
   "devDependencies": {
