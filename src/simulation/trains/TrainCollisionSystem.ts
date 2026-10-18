@@ -74,19 +74,31 @@ export class TrainCollisionSystem {
     if (!followerTile || !leaderTile) return false;
     if (!leaderTile.type.startsWith('station')) return false;
 
+    // 同じ階層かつ同じ線路軸上にいなければ別ホームなので不可
+    if (follower.currentTile.layer !== leader.currentTile.layer) return false;
+    const isEastWest = Math.abs(leader.direction.x) > 0.5;
+    if (isEastWest && follower.currentTile.z !== leader.currentTile.z) return false;
+    if (!isEastWest && follower.currentTile.x !== leader.currentTile.x) return false;
+
+    // 駅ID(stationGroupId)ではなく、番線・ホームID(stationPlatformId)で同一ホームか判定する
+    const leaderPlatformId = leaderTile.stationPlatformId ?? leaderTile.stationGroupId;
+    if (!leaderPlatformId) return false;
+
     const targetTileData = worldMap.getTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer);
-    let followerStationGroupId = followerTile.stationGroupId ?? targetTileData?.stationGroupId;
+    let followerPlatformId =
+      (followerTile.stationPlatformId ?? followerTile.stationGroupId) ??
+      (targetTileData?.stationPlatformId ?? targetTileData?.stationGroupId);
 
     // 手前の線路から駅へ進入中（targetTileの次が駅）の場合も検出
-    if (!followerStationGroupId) {
+    if (!followerPlatformId) {
       const next1 = this.kinematics.findNextTrackTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer, follower.direction, false, worldMap);
       if (next1) {
         const next1Tile = worldMap.getTile(next1.x, next1.z, (next1.layer ?? follower.targetTile.layer) as GridLayer);
-        followerStationGroupId = next1Tile?.stationGroupId;
+        followerPlatformId = next1Tile?.stationPlatformId ?? next1Tile?.stationGroupId;
       }
     }
 
-    if (!followerStationGroupId || followerStationGroupId !== leaderTile.stationGroupId) return false;
+    if (!followerPlatformId || followerPlatformId !== leaderPlatformId) return false;
 
     const effectiveLength = worldMap.getStationRunLength(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer) || 1;
     return checkCoupleEligibility(leader.carCount, follower.carCount, effectiveLength).eligible;

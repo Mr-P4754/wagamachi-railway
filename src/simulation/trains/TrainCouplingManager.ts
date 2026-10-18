@@ -30,6 +30,7 @@ export class TrainCouplingManager {
   ): boolean {
     if (!leader.isStopped) return false;
     if (leader.carCount <= 0 || follower.carCount <= 0) return false;
+    if (leader.currentTile.layer !== follower.currentTile.layer) return false;
 
     // 先行列車の最後尾車両を取得
     const rearIndex = leader.carCount - 1;
@@ -46,12 +47,16 @@ export class TrainCouplingManager {
     const dz = rearCar.position.z - follower.frontPosition.z;
     const horizontalDist = Math.hypot(dx, dz);
 
+    // ★追加: 進行方向に対する横方向のズレ（隣のホーム・別線路）を厳密に排除
+    // 1マスの幅は2.0m。同一線路上の連結であれば横ズレ(lateralDist)はほぼ0になる
+    const lateralDist = Math.abs(dx * follower.direction.z - dz * follower.direction.x);
+    if (lateralDist > 0.45) {
+      return false;
+    }
+
     // 後続列車の進行方向との内積（follower が最後尾に向かって進んでいるか）
     const dot = dx * follower.direction.x + dz * follower.direction.z;
 
-    // 車両中心間隔は ModelFactory.CAR_SPACING (1.95)。
-    // 最後尾車両中心と後続車先頭前端の接触距離は半車長（約 0.95〜1.25）。
-    // 後続列車が最後尾車両に接近し、接触距離（<= 1.35）に達したか判定
     if (horizontalDist <= 1.35 && dot >= -0.3) {
       return true;
     }
@@ -115,11 +120,13 @@ export class TrainCouplingManager {
     leader.totalRevenue += follower.totalRevenue;
     leader.totalCost += follower.totalCost;
 
-    // 連結作業時間: 2分
+    // 連結作業時間: 既存の駅ダイヤモードを維持しつつ最低2分待機させる（'wait'への強制上書きを廃止）
     leader.isStopped = true;
-    leader.stopMode = 'wait';
+    if (!leader.stopMode || leader.stopMode === 'pass') {
+      leader.stopMode = 'hold';
+    }
     leader.stopElapsedMinutes = 0;
-    leader.requiredStopMinutes = 2;
+    leader.requiredStopMinutes = Math.max(leader.requiredStopMinutes ?? 0, 2);
 
     if (onTrainCoupled) {
       onTrainCoupled(leader, follower);
@@ -344,7 +351,8 @@ export class TrainCouplingManager {
       totalCost: 0,
       monthlyProfit: 0,
       fleetId: train.fleetId ? `${train.fleetId}-split` : undefined,
-      lastStationGroupId: tile.stationGroupId ?? null,
+      // ★修正: stationPlatformId を優先してセット
+      lastStationGroupId: tile.stationPlatformId ?? tile.stationGroupId ?? null,
       isReversingAtStation: false, // 既に performSplit 内で rearDir と rearHistory を反転構築しているため、発車時の再反転フラグは false にする
       cargoLoad: rearCargoLoad,
       cargoCapacity: train.model.category === 'freight' ? Math.max(0, (config.rearCars - 1) * 3) : 0,

@@ -373,7 +373,12 @@ export class TrainKinematics {
     train.currentTile = { x: curX, z: curZ, layer: bestLayer };
     const stationTile = worldMap.getTile(curX, curZ, train.currentTile.layer);
     if (stationTile && WorldMap.isStationTileType(stationTile.type)) {
-      train.lastStationGroupId = stationTile.stationGroupId || `st_${curX}_${curZ}`;
+      // ★修正: stationGroupId ではなく stationPlatformId を優先してセットし、折り返し直後の同一ホーム端での再停車を防止
+      train.lastStationGroupId =
+        stationTile.stationPlatformId ||
+        origStationGroupId ||
+        stationTile.stationGroupId ||
+        `plat_${curX}_${curZ}_${bestLayer}`;
     } else if (origStationGroupId) {
       train.lastStationGroupId = origStationGroupId;
     }

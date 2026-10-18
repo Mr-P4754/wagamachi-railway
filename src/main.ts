@@ -123,7 +123,21 @@ export class GameApp {
 
     this.scheduleUI = new ScheduleUI(this.worldMap);
     this.scheduleUI.setUIManager(this.uiManager);
-    this.scheduleUI.onScheduleChanged = (tile) => { for (const t of this.worldMap.getStationTiles(tile.x, tile.z)) t.stationSchedule = tile.stationSchedule; };
+    this.scheduleUI.onScheduleChanged = (tile) => {
+      const lyr = (tile.layer ?? 1) as GridLayer;
+      if (!tile.stationSchedule) return;
+      for (const t of this.worldMap.getStationTiles(tile.x, tile.z, lyr)) {
+        t.stationSchedule = {
+          ...tile.stationSchedule,
+          departures: [...(tile.stationSchedule.departures || [])],
+          timeZones: (tile.stationSchedule.timeZones || []).map(z => ({ ...z })),
+          reverseDepartures: [...(tile.stationSchedule.reverseDepartures || [])],
+          splitDepartures: [...(tile.stationSchedule.splitDepartures || [])],
+          splitConfig: tile.stationSchedule.splitConfig ? { ...tile.stationSchedule.splitConfig } : undefined
+        };
+      }
+      this.worldMap.markDirty();
+    };
     this.switchScheduleUI = new SwitchScheduleUI(this.worldMap);
     this.switchScheduleUI.onScheduleChanged = (tile) => {
       if (tile.type.startsWith('scissors_crossing')) {

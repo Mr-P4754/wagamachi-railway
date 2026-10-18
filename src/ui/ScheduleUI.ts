@@ -645,9 +645,17 @@ export class ScheduleUI {
   }
 
   public open(tile: TileData): void {
-    if (!tile.stationSchedule) tile.stationSchedule = createDefaultStationSchedule();
-    this.backupSchedule = cloneStationSchedule(tile.stationSchedule);
-    this.currentTile = tile;
+    const lyr = (tile.layer ?? 1) as GridLayer;
+    // 常にそのホーム（番線）の先頭タイルを正本として取得
+    const startTile = this.worldMap.getStationStartTile(tile.x, tile.z, lyr) || tile;
+    if (!startTile.stationSchedule) {
+      startTile.stationSchedule = createDefaultStationSchedule();
+    }
+    // ホーム内の全タイルに現在のスケジュールを同期しておく
+    this.applyScheduleToPlatform(startTile, startTile.stationSchedule);
+
+    this.backupSchedule = cloneStationSchedule(startTile.stationSchedule);
+    this.currentTile = startTile;
     this.container.classList.remove('hidden');
     this.render();
   }
@@ -661,7 +669,10 @@ export class ScheduleUI {
   }
 
   private notifyChanged(): void {
-    if (this.currentTile) this.onScheduleChanged(this.currentTile);
+    if (this.currentTile && this.currentTile.stationSchedule) {
+      this.applyScheduleToPlatform(this.currentTile, this.currentTile.stationSchedule);
+      this.onScheduleChanged(this.currentTile);
+    }
     this.render();
   }
 
@@ -792,20 +803,30 @@ export class ScheduleUI {
   }
 
   /**
-   * 現在の駅ホームを構成するすべてのタイルに同一スケジュールをディープコピー適用
+   * 現在の駅ホーム（番線）を構成するすべてのタイルに同一スケジュールをディープコピー適用
    */
   private applyScheduleToPlatform(originTile: TileData, newSchedule: StationSchedule): void {
     const layer = (originTile.layer ?? 1) as GridLayer;
+    const masterCopy = cloneStationSchedule(newSchedule);
+    originTile.stationSchedule = masterCopy;
+    if (this.currentTile && this.currentTile.x === originTile.x && this.currentTile.z === originTile.z && (this.currentTile.layer ?? 1) === layer) {
+      this.currentTile.stationSchedule = masterCopy;
+    }
+
+    // 同じホーム（番線）の全タイルに適用（隣の別ホームには影響しない）
+    const platformTiles = this.worldMap.getStationTiles(originTile.x, originTile.z, layer);
+    for (const t of platformTiles) {
+      t.stationSchedule = cloneStationSchedule(masterCopy);
+    }
+
     const platInfo = this.worldMap.stationManager.getPlatformByTile(originTile.x, originTile.z, layer);
     if (platInfo && platInfo.platform && platInfo.platform.tiles) {
       for (const t of platInfo.platform.tiles) {
         const tile = this.worldMap.getTile(t.x, t.z, t.layer);
         if (tile) {
-          tile.stationSchedule = cloneStationSchedule(newSchedule);
+          tile.stationSchedule = cloneStationSchedule(masterCopy);
         }
       }
-    } else {
-      originTile.stationSchedule = cloneStationSchedule(newSchedule);
     }
     this.worldMap.markDirty();
   }

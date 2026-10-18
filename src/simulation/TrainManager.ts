@@ -848,18 +848,21 @@ export class TrainManager {
             const isCargo = curTileData.type.startsWith('cargo_station') || !!curTileData.isCargoYard;
             const isFreight = train.model.category === 'freight';
             const isExternal = false;
-            const stGroupId = curTileData.stationGroupId || (() => {
+
+            // ★修正: 駅全体(stationGroupId)ではなく、番線(stationPlatformId)単位で識別する
+            const stPlatformId = curTileData.stationPlatformId || curTileData.stationGroupId || (() => {
               const st = this.worldMap.getStationStartTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
-              return st ? `st_${st.x}_${st.z}` : `st_${train.currentTile.x}_${train.currentTile.z}`;
+              return st ? `plat_${st.x}_${st.z}_${st.layer ?? 1}` : `plat_${train.currentTile.x}_${train.currentTile.z}_${train.currentTile.layer}`;
             })();
 
             const peekNext = this.kinematics.findNextTrackTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer, train.direction, false, this.worldMap);
+            const peekNextPlatId = peekNext ? (peekNext.stationPlatformId || peekNext.stationGroupId) : undefined;
             const nextIsSameStation = !!(peekNext && WorldMap.isStationTileType(peekNext.type) && (
-              peekNext.stationGroupId === stGroupId || (!peekNext.stationGroupId && !curTileData.stationGroupId)
+              peekNextPlatId === stPlatformId || (!peekNextPlatId && !curTileData.stationPlatformId && !curTileData.stationGroupId)
             ));
 
-            if (!nextIsSameStation && train.lastStationGroupId !== stGroupId) {
-              train.lastStationGroupId = stGroupId;
+            if (!nextIsSameStation && train.lastStationGroupId !== stPlatformId) {
+              train.lastStationGroupId = stPlatformId;
 
               const effectiveLength = this.worldMap.getStationRunLength(train.currentTile.x, train.currentTile.z, train.currentTile.layer) || 1;
               let isTooLong = train.carCount > effectiveLength;
@@ -958,13 +961,19 @@ export class TrainManager {
                   );
                   trainsPendingAdd.push(rearTrain);
                 } else {
-                  // 併合（連結）判定
+                  // 併合（連結）判定: 必ず「同一番線（stationPlatformId）」かつ「同一階層・同一路線軸」の列車のみ対象とする
                   const leader = !isYard
-                    ? this.trains.find(other =>
-                        other.id !== train.id &&
-                        other.isStopped &&
-                        this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer)?.stationGroupId === stGroupId
-                      )
+                    ? this.trains.find(other => {
+                        if (other.id === train.id || !other.isStopped) return false;
+                        if (other.currentTile.layer !== train.currentTile.layer) return false;
+                        const otherTile = this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer);
+                        if (!otherTile) return false;
+                        const otherPlatId = otherTile.stationPlatformId || otherTile.stationGroupId;
+                        if (!otherPlatId || otherPlatId !== stPlatformId) return false;
+                        // 同じ線路軸上にいるか確認
+                        const isEW = curTileData.rotation % 2 === 1;
+                        return isEW ? (other.currentTile.z === train.currentTile.z) : (other.currentTile.x === train.currentTile.x);
+                      })
                     : undefined;
 
                   if (leader && checkCoupleEligibility(leader.carCount, train.carCount, effectiveLength).eligible) {
