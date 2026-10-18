@@ -116,7 +116,7 @@ export class InputController {
     }
 
     const half = Math.floor(mapSize / 2);
-    const isValidTile = finalTx >= -half && finalTx < half && finalTz >= -half && finalTz < half;
+    const isValidTile = finalTx >= -half && finalTx <= half && finalTz >= -half && finalTz <= half;
 
     return {
       tileX: finalTx,

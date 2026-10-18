@@ -54,13 +54,14 @@ export class WorldLabelManager {
     // 全体視点（quarter_view）以外（車窓モード中など）はすべて非表示
     if (viewMode !== 'quarter_view') {
       if (this.containerVisible) {
-        this.container.style.visibility = 'hidden';
+        this.container.style.display = 'none';
+        this.clear();
         this.containerVisible = false;
       }
       return;
     }
     if (!this.containerVisible) {
-      this.container.style.visibility = 'visible';
+      this.container.style.display = '';
       this.containerVisible = true;
     }
 

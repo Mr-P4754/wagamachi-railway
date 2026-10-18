@@ -1,8 +1,12 @@
+import { AssetDepreciationManager, AssetCategory } from './AssetDepreciationManager';
+
 export interface FinancialReportData {
   fareIncome: number; // 旅客運賃収入
   cargoIncome: number; // 貨物輸送収入
   constructionCost: number;
   maintenanceCost: number;
+  depreciationCost?: number; // 減価償却費
+  bookValue?: number; // 固定資産簿価
   netProfit: number;
   landValue: number;
   totalPopulation: number;
@@ -21,6 +25,8 @@ export interface FinancialSnapshot {
   cargoIncome?: number; // 貨物運賃収入
   maintenanceCost: number; // 運行・維持管理費
   constructionCost: number; // 建設・設備投資費
+  depreciationCost?: number; // 当期減価償却費
+  bookValue?: number; // 固定資産簿価
   netProfit: number; // 純利益
   population: number; // 総人口
   trackLength: number; // 鉄道総延長 (km)
@@ -55,6 +61,11 @@ export class Economy {
   public fiscalYearCargoIncome: number = 0;
   public fiscalYearMaintenanceCost: number = 0;
   public fiscalYearConstructionCost: number = 0;
+
+  // 固定資産・減価償却台帳
+  public depreciationManager: AssetDepreciationManager = new AssetDepreciationManager();
+  public lastDepreciationCost: number = 0;
+  public lastTotalBookValue: number = 0;
 
   // 確定税額（3月31日確定、5月30日納付）
   public pendingCorporateTax: number = 0;
@@ -106,10 +117,33 @@ export class Economy {
 
   /**
    * ② 営業収入（運賃売上）に計上しない、純粋な資金返金・資産売却代金
-   * （車両減車売却や仮置きキャンセル等の返金に使用し、売上過剰課税から除外する）
+   * （車両減車売却や仮置きキャンセル、Undo等の返金に使用し、売上過剰課税から除外する）
+   * @param amount 返金・売却額
+   * @param isConstruction 建設費・固定資産の取り消しを伴うか（Undoや設置キャンセル時）
+   * @param category 資産カテゴリ
    */
-  public refundFunds(amount: number) {
+  public refundFunds(
+    amount: number,
+    isConstruction: boolean = false,
+    category: AssetCategory = 'infrastructure'
+  ) {
     this.funds += amount;
+    if (isConstruction && amount > 0) {
+      this.periodConstructionCost = Math.max(0, this.periodConstructionCost - amount);
+      this.fiscalYearConstructionCost = Math.max(0, this.fiscalYearConstructionCost - amount);
+      this.depreciationManager.removeLatestAsset(amount, category);
+    }
+  }
+
+  /**
+   * 資金支出が可能かどうかの事前判定（引き落としは行わない）
+   */
+  public canSpend(amount: number, isConstruction: boolean = true): boolean {
+    if (this.isInfiniteFunds || amount <= 0) return true;
+    if (isConstruction) {
+      return this.canInvest && this.funds >= amount;
+    }
+    return true;
   }
 
   /**
@@ -123,12 +157,22 @@ export class Economy {
     this.periodMaintenanceCost = 0;
   }
 
-  public spendFunds(amount: number, isConstruction: boolean = true): boolean {
+  public spendFunds(
+    amount: number,
+    isConstruction: boolean = true,
+    category: AssetCategory = 'infrastructure',
+    assetName?: string
+  ): boolean {
     // 資金無限モード時は残高チェックをパスし、資金を減算しない
     if (this.isInfiniteFunds) {
       if (isConstruction) {
         this.periodConstructionCost += amount;
         this.fiscalYearConstructionCost += amount;
+        if (amount > 0) {
+          this.depreciationManager.registerAsset(category, amount, assetName || (category === 'vehicle' ? '鉄道車両' : 'インフラ設備'), this.year);
+        } else if (amount < 0) {
+          this.depreciationManager.removeLatestAsset(-amount, category);
+        }
       } else {
         this.periodMaintenanceCost += amount;
         this.fiscalYearMaintenanceCost += amount;
@@ -144,6 +188,12 @@ export class Economy {
       this.funds -= amount;
       this.periodConstructionCost += amount;
       this.fiscalYearConstructionCost += amount;
+      if (amount > 0) {
+        this.depreciationManager.registerAsset(category, amount, assetName || (category === 'vehicle' ? '鉄道車両' : 'インフラ設備'), this.year);
+      } else if (amount < 0) {
+        // 返金（マイナス支出）時: 資産台帳からも安全に減額
+        this.depreciationManager.removeLatestAsset(-amount, category);
+      }
       return true;
     }
 
@@ -155,17 +205,19 @@ export class Economy {
   }
 
   public addPopulation(amount: number) {
-    this.population += amount;
+    this.population = Math.max(0, this.population + amount);
   }
 
   /**
    * 毎年3月31日 23:59 に呼び出される税額確定処理
-   * 前年度の実績から法人税（黒字の30%）および保有資産に応じた固定資産税を算出する
+   * 日本の鉄道会計基準に基づく減価償却費控除および固定資産簿価連動の固定資産税を算出する
    */
   public assessAnnualTax(trackTiles: number, stationTiles: number, totalCars: number, currentYear?: number): {
     fiscalYear: number;
     operatingProfit: number;
     constructionCost: number;
+    depreciationCost: number;
+    totalBookValue: number;
     taxableIncome: number;
     corporateTax: number;
     propertyTax: number;
@@ -184,20 +236,30 @@ export class Economy {
     const totalOperatingRevenue = this.fiscalYearFareIncome + this.fiscalYearCargoIncome;
     const operatingProfit = totalOperatingRevenue - this.fiscalYearMaintenanceCost;
 
-    // 設備投資額（建設費・車両購入費等）
+    // 設備投資額（キャッシュフロー上の支出額）
     const constructionCost = this.fiscalYearConstructionCost;
 
-    // 課税所得（設備投資控除後）: 利益を街の開発に再投資した分は損金算入（全額経費控除）
-    const taxableIncome = operatingProfit - constructionCost;
+    // 当期減価償却費の計算と固定資産簿価の更新
+    const depResult = this.depreciationManager.processAnnualDepreciation();
+    const depreciationCost = depResult.totalDepreciation;
+    const totalBookValue = depResult.totalBookValue;
+    this.lastDepreciationCost = depreciationCost;
+    this.lastTotalBookValue = totalBookValue;
 
-    // 法人税: 課税所得が黒字の場合のみ30%。設備投資で再投資した場合は0円（節税成功）
+    // 課税所得（営業利益 - 当期減価償却費）: 投資全額即時償却ではなく、耐用年数に応じた減価償却費を経費として損金算入
+    const taxableIncome = operatingProfit - depreciationCost;
+
+    // 法人税: 課税所得が黒字の場合のみ30%
     const corporateTax = taxableIncome > 0 ? Math.floor(taxableIncome * 0.3) : 0;
 
-    // 固定資産税: 線路1マス1万円、駅ホーム1マス5万円、車両1両15万円
-    const trackTax = trackTiles * 10000;
-    const stationTax = stationTiles * 50000;
-    const carTax = totalCars * 150000;
-    const propertyTax = trackTax + stationTax + carTax;
+    // 固定資産税: 保有固定資産の現在簿価に標準税率1.4%を乗じて算出（年数が経ち簿価が減少するほど安くなる）
+    // 最低限の維持インフラ基盤税（未登録資産や償却済資産の保守枠）を担保
+    const minimumPropertyBase = (trackTiles * 2000) + (stationTiles * 10000) + (totalCars * 30000);
+    const propertyTax = Math.floor(Math.max(totalBookValue * 0.014, minimumPropertyBase));
+
+    const trackTax = Math.floor(trackTiles * 2000);
+    const stationTax = Math.floor(stationTiles * 10000);
+    const carTax = Math.floor(totalCars * 30000);
 
     const totalTax = corporateTax + propertyTax;
 
@@ -215,6 +277,8 @@ export class Economy {
       fiscalYear,
       operatingProfit,
       constructionCost,
+      depreciationCost,
+      totalBookValue,
       taxableIncome,
       corporateTax,
       propertyTax,
@@ -337,6 +401,8 @@ export class Economy {
       cargoIncome: this.periodCargoIncome,
       constructionCost: this.periodConstructionCost,
       maintenanceCost: this.periodMaintenanceCost,
+      depreciationCost: this.lastDepreciationCost,
+      bookValue: this.depreciationManager.getTotalBookValue(),
       netProfit,
       landValue: (this.population * 25000) + (trackTiles * 1500000),
       totalPopulation: this.population,
@@ -344,6 +410,10 @@ export class Economy {
       trainCount,
       stationCount
     };
+  }
+
+  public getTotalBookValue(): number {
+    return this.depreciationManager.getTotalBookValue();
   }
 
   /**
@@ -397,7 +467,10 @@ export class Economy {
       pendingTotalTax: this.pendingTotalTax,
       lastSettledYear: this.lastSettledYear,
       monthlyHistory: this.monthlyHistory,
-      yearlyHistory: this.yearlyHistory
+      yearlyHistory: this.yearlyHistory,
+      lastDepreciationCost: this.lastDepreciationCost,
+      lastTotalBookValue: this.lastTotalBookValue,
+      depreciationLedger: this.depreciationManager.toSnapshot()
     };
   }
 
@@ -424,6 +497,15 @@ export class Economy {
     this.pendingPropertyTax = safeNum(data.pendingPropertyTax, 0);
     this.pendingTotalTax = safeNum(data.pendingTotalTax, 0);
     this.lastSettledYear = safeNum(data.lastSettledYear, 2025);
+    this.lastDepreciationCost = safeNum(data.lastDepreciationCost, 0);
+    this.lastTotalBookValue = safeNum(data.lastTotalBookValue, 0);
+
+    if (data.depreciationLedger) {
+      this.depreciationManager.loadFromSnapshot(data.depreciationLedger);
+    } else {
+      this.depreciationManager.clear();
+    }
+
     if (Array.isArray(data.monthlyHistory)) {
       this.monthlyHistory = data.monthlyHistory.filter((s: any) => s && typeof s.year === 'number');
     } else {
@@ -455,6 +537,9 @@ export class Economy {
     this.pendingPropertyTax = 0;
     this.pendingTotalTax = 0;
     this.lastSettledYear = 2025;
+    this.lastDepreciationCost = 0;
+    this.lastTotalBookValue = 0;
+    this.depreciationManager.clear();
     this.monthlyHistory = [];
     this.yearlyHistory = [];
   }

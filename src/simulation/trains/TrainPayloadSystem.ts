@@ -4,11 +4,18 @@ import { getMaxCapacity, getRunningCostPerTrip } from '../VehicleCatalog';
 import { VehicleMeshBuilder } from '../../graphics/vehicles/VehicleMeshBuilder';
 import { ArrivalDecision } from '../../core/ScheduleEngine';
 import { TrainInstance, CargoHooks, CARGO_FARE_PER_CONTAINER_PER_TILE } from './types';
+import { ExternalConnectionManager } from '../ExternalConnectionManager';
 
 /**
  * 旅客・貨物ペイロード・駅需要専門クラス
  */
 export class TrainPayloadSystem {
+  public externalConnectionManager?: ExternalConnectionManager;
+
+  public setExternalConnectionManager(mgr: ExternalConnectionManager): void {
+    this.externalConnectionManager = mgr;
+  }
+
   /**
    * 時間帯別の乗客需要係数を返す
    */
@@ -50,12 +57,21 @@ export class TrainPayloadSystem {
     train: TrainInstance,
     arrival: ArrivalDecision,
     isDeadEnd: boolean,
-    worldMap: WorldMap
+    worldMap: WorldMap,
+    onPassengerFare?: (amount: number) => void
   ): void {
     if (train.passengers <= 0) return;
 
+    const currentTileData = worldMap.getTile(
+      train.currentTile.x,
+      train.currentTile.z,
+      train.currentTile.layer
+    );
+    const isExternalGateway = !!currentTileData?.isExternalConnection || currentTileData?.type === 'external_connection';
+
     let alighting = 0;
-    if (arrival.isReverse || arrival.mode === 'reverse' || isDeadEnd) {
+    if (arrival.isReverse || arrival.mode === 'reverse' || isDeadEnd || isExternalGateway) {
+      // 終端または隣町ゲートウェイ到着時は全員降車
       alighting = train.passengers;
     } else {
       const alightRatio = 0.35 + Math.random() * 0.25;
@@ -64,6 +80,17 @@ export class TrainPayloadSystem {
     train.passengers = Math.max(0, train.passengers - alighting);
 
     if (alighting > 0) {
+      // 隣町ゲートウェイ到着時の長距離越境特別ボーナス運賃
+      if (isExternalGateway && onPassengerFare) {
+        const bonusFare = Math.round(train.model.farePerRide * 0.8 * alighting);
+        train.totalRevenue += bonusFare;
+        train.monthlyProfit = train.totalRevenue - train.totalCost;
+        onPassengerFare(bonusFare);
+        if (currentTileData?.externalCityId) {
+          this.externalConnectionManager?.recordPassengersTransported(currentTileData.externalCityId, alighting);
+        }
+      }
+
       const platInfo = worldMap.stationManager.getPlatformByTile(
         train.currentTile.x,
         train.currentTile.z,
@@ -97,6 +124,7 @@ export class TrainPayloadSystem {
     const isCargo = stoppedTile.type.startsWith('cargo_station') || !!stoppedTile.isCargoYard;
     if (isYard || isCargo) return;
 
+    const isExternalGateway = !!stoppedTile.isExternalConnection || stoppedTile.type === 'external_connection';
     const waiting = stoppedTile.stationPassengers ?? 0;
     const maxCap = getMaxCapacity(train.model, train.carCount);
     const freeSeats = Math.max(0, maxCap - train.passengers);
@@ -119,10 +147,16 @@ export class TrainPayloadSystem {
         }
       }
 
-      const fare = Math.round(train.model.farePerRide * boarding);
+      // 隣町ゲートウェイからの長距離幹線運賃（1.5倍プレミアム）
+      const fareMultiplier = isExternalGateway ? 1.5 : 1.0;
+      const fare = Math.round(train.model.farePerRide * fareMultiplier * boarding);
       train.totalPassengers += boarding;
       train.totalRevenue += fare;
       train.monthlyProfit = train.totalRevenue - train.totalCost;
+
+      if (isExternalGateway && stoppedTile.externalCityId) {
+        this.externalConnectionManager?.recordPassengersTransported(stoppedTile.externalCityId, boarding);
+      }
 
       if (platInfo) {
         worldMap.stationManager.addBoardingRecord(
@@ -150,11 +184,27 @@ export class TrainPayloadSystem {
     cargoHooks: CargoHooks | undefined,
     worldMap: WorldMap
   ): void {
-    if (!cargoHooks) return;
     const capacity = train.cargoCapacity ?? 0;
     const freeSlots = capacity - (train.cargoLoad ?? 0);
     if (freeSlots <= 0) return;
 
+    const curTile = worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+
+    // 隣町・外部都市への直通線路からの貨物輸入（特産品コンテナ積み込み）
+    if (curTile?.isExternalConnection || curTile?.type === 'external_connection') {
+      const available = curTile.cargoContainers ?? 0;
+      if (available > 0) {
+        const loaded = Math.min(freeSlots, available);
+        curTile.cargoContainers = available - loaded;
+        train.cargoLoad = (train.cargoLoad ?? 0) + loaded;
+        train.cargoPickup = { x: train.currentTile.x, z: train.currentTile.z };
+        train.cargoTraveledTiles = 0;
+        VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad);
+        return;
+      }
+    }
+
+    if (!cargoHooks) return;
     const loaded = cargoHooks.tryLoad(train.currentTile.x, train.currentTile.z, freeSlots, train.currentTile.layer);
     if (loaded > 0) {
       train.cargoLoad = (train.cargoLoad ?? 0) + loaded;
@@ -182,7 +232,7 @@ export class TrainPayloadSystem {
   }
 
   /**
-   * 商業エリアの貨物駅での荷降ろし・運賃計算処理 (Cargo Unloading)
+   * 商業エリアの貨物駅または隣町ゲートウェイでの荷降ろし・運賃計算処理 (Cargo Unloading / Export)
    */
   public processCargoUnloading(
     train: TrainInstance,
@@ -190,7 +240,40 @@ export class TrainPayloadSystem {
     onPassengerFare: (amount: number) => void,
     worldMap: WorldMap
   ): void {
-    if (!cargoHooks || (train.cargoLoad ?? 0) <= 0) return;
+    if ((train.cargoLoad ?? 0) <= 0) return;
+
+    const curTile = worldMap.getTile(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
+    const isExternalGateway = !!curTile?.isExternalConnection || curTile?.type === 'external_connection';
+
+    // 隣町ゲートウェイへの輸出（全量荷降ろし＋1.5倍輸出プレミアム売上）
+    if (isExternalGateway) {
+      const delivered = train.cargoLoad ?? 0;
+      if (delivered > 0) {
+        const manhattanDist = train.cargoPickup
+          ? (Math.abs(train.currentTile.x - train.cargoPickup.x) + Math.abs(train.currentTile.z - train.cargoPickup.z))
+          : Math.min(train.cargoTraveledTiles ?? 1, 64);
+        const distanceTiles = Math.max(1, Math.min(train.cargoTraveledTiles ?? 1, Math.round(manhattanDist * 1.5) + 4));
+        const revenue = Math.round(distanceTiles * delivered * CARGO_FARE_PER_CONTAINER_PER_TILE * 1.5);
+
+        train.totalPassengers += delivered;
+        train.totalRevenue += revenue;
+        train.monthlyProfit = train.totalRevenue - train.totalCost;
+
+        if (curTile?.externalCityId) {
+          this.externalConnectionManager?.recordCargoExported(curTile.externalCityId, delivered);
+        }
+
+        onPassengerFare(revenue);
+
+        train.cargoLoad = 0;
+        train.cargoPickup = null;
+        train.cargoTraveledTiles = 0;
+        VehicleMeshBuilder.updateTrainCargoVisual(train.cars, 0);
+      }
+      return;
+    }
+
+    if (!cargoHooks) return;
 
     const toUnload = train.cargoLoad ?? 0;
     const unloadResult = cargoHooks.tryUnload(train.currentTile.x, train.currentTile.z, toUnload, train.currentTile.layer);
@@ -239,6 +322,8 @@ export class TrainPayloadSystem {
     VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad ?? 0);
   }
 
+  private stationScoreCache = new Map<string, { version: number; score: number }>();
+
   /**
    * 駅周辺の建物から乗客需要を算出
    */
@@ -249,36 +334,48 @@ export class TrainPayloadSystem {
     worldMap: WorldMap,
     getDemandMultiplier?: (x: number, z: number, hour: number) => number
   ): number {
-    let residenceCount = 0;
-    let commercialCount = 0;
-    let industrialCount = 0;
+    const cacheKey = `${centerX},${centerZ}`;
+    const cached = this.stationScoreCache.get(cacheKey);
     let weightedScore = 0;
 
-    for (let dx = -5; dx <= 5; dx++) {
-      for (let dz = -5; dz <= 5; dz++) {
-        if (dx === 0 && dz === 0) continue;
-        const tx = centerX + dx;
-        const tz = centerZ + dz;
-        const t = worldMap.getTile(tx, tz, 1);
-        if (!t) continue;
+    if (cached && cached.version === worldMap.structureVersion) {
+      weightedScore = cached.score;
+    } else {
+      let residenceCount = 0;
+      let commercialCount = 0;
+      let industrialCount = 0;
 
-        const chebyshevDist = Math.max(Math.abs(dx), Math.abs(dz));
-        const distWeight = chebyshevDist <= 2 ? 1.0 : (chebyshevDist === 3 ? 0.85 : (chebyshevDist === 4 ? 0.7 : 0.55));
+      for (let dx = -5; dx <= 5; dx++) {
+        for (let dz = -5; dz <= 5; dz++) {
+          if (dx === 0 && dz === 0) continue;
+          const tx = centerX + dx;
+          const tz = centerZ + dz;
+          const t = worldMap.getTile(tx, tz, 1);
+          if (!t) continue;
 
-        if (t.type === 'residence') {
-          residenceCount++;
-          weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
-        } else if (t.type === 'commercial') {
-          commercialCount++;
-          weightedScore += (4.0 + (t.level ?? 1) * 1.5) * distWeight;
-        } else if (t.type === 'industrial') {
-          industrialCount++;
-          weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
+          const chebyshevDist = Math.max(Math.abs(dx), Math.abs(dz));
+          const distWeight = chebyshevDist <= 2 ? 1.0 : (chebyshevDist === 3 ? 0.85 : (chebyshevDist === 4 ? 0.7 : 0.55));
+
+          if (t.type === 'residence') {
+            residenceCount++;
+            weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
+          } else if (t.type === 'commercial') {
+            commercialCount++;
+            weightedScore += (4.0 + (t.level ?? 1) * 1.5) * distWeight;
+          } else if (t.type === 'industrial') {
+            industrialCount++;
+            weightedScore += (2.5 + (t.level ?? 1) * 0.8) * distWeight;
+          }
         }
       }
+
+      if (residenceCount === 0 && commercialCount === 0 && industrialCount === 0) {
+        weightedScore = 0;
+      }
+      this.stationScoreCache.set(cacheKey, { version: worldMap.structureVersion, score: weightedScore });
     }
 
-    if (residenceCount === 0 && commercialCount === 0 && industrialCount === 0) {
+    if (weightedScore <= 0) {
       return 0;
     }
 

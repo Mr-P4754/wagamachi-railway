@@ -31,6 +31,7 @@ import { PlacementController, isTrackLikeType } from './controllers/PlacementCon
 import { PersistenceService } from './services/PersistenceService';
 import { InteractionController } from './controllers/InteractionController';
 import { UndoManager } from './core/UndoManager';
+import { ExternalConnectionManager } from './simulation/ExternalConnectionManager';
 
 /**
  * ゲーム全体の初期化・オーケストレーションおよびメインループ進行を担当する Facade クラス
@@ -46,6 +47,7 @@ export class GameApp {
   private trainManager: TrainManager;
   private cityGrowth: CityGrowth;
   private economy = new Economy();
+  private externalConnectionManager = new ExternalConnectionManager();
   private timeManager: TimeManager;
   private uiManager = new UIManager();
   private inputController: InputController;
@@ -88,6 +90,7 @@ export class GameApp {
       return c ? Math.max(0, (c.elevation - 1) * 3.0) : 0;
     });
     this.trainManager = new TrainManager(this.renderer.scene, this.worldMap, this.audioManager);
+    this.trainManager.setExternalConnectionManager(this.externalConnectionManager);
     this.cityGrowth = new CityGrowth(this.worldMap, this.gridManager);
     this.cityGrowth.setZoneManager(this.zoneManager);
     this.timeManager = new TimeManager(this.economy.year, this.economy.month, this.economy.day, 6, 0);
@@ -125,7 +128,24 @@ export class GameApp {
     this.switchScheduleUI.onScheduleChanged = (tile) => {
       if (tile.type.startsWith('scissors_crossing')) {
         const orig = this.worldMap.resolveCrossingOrigin(tile.x, tile.z, tile.layer);
-        if (orig) orig.switchSchedule = tile.switchSchedule;
+        if (orig) {
+          orig.switchSchedule = tile.switchSchedule;
+          const along = (orig.rotation % 2 === 1) ? 1 : 2;
+          const across = WorldMap.rotateCW(along);
+          const alongVec = WorldMap.DIRS[along];
+          const acrossVec = WorldMap.DIRS[across];
+          const lyr = (orig.layer ?? 1) as GridLayer;
+          const positions = [
+            { x: orig.x, z: orig.z },
+            { x: orig.x + alongVec.x, z: orig.z + alongVec.z },
+            { x: orig.x + acrossVec.x, z: orig.z + acrossVec.z },
+            { x: orig.x + alongVec.x + acrossVec.x, z: orig.z + alongVec.z + acrossVec.z }
+          ];
+          for (const p of positions) {
+            const t = this.worldMap.getTile(p.x, p.z, lyr);
+            if (t) t.switchSchedule = orig.switchSchedule;
+          }
+        }
       }
     };
 
@@ -150,6 +170,7 @@ export class GameApp {
         this.applyLayerSlicing(this.currentDisplayLayer);
         this.scheduleUI.refreshOrClose();
         this.switchScheduleUI.refreshOrClose();
+        this.externalConnectionManager.checkConnections(this.worldMap);
       }
     });
     this.placementController = new PlacementController({
@@ -157,14 +178,21 @@ export class GameApp {
       economy: this.economy, audioManager: this.audioManager, uiManager: this.uiManager, inputController: this.inputController,
       getFleetController: () => this.fleetController,
       undoManager: this.undoManager,
-      onPlacementExecuted: () => { this.applyLayerSlicing(this.currentDisplayLayer); this.miniMap.requestStaticUpdate(); this.terrainRenderer.rebuildAll(this.gridManager, this.renderer.scene); },
+      onPlacementExecuted: () => {
+        this.applyLayerSlicing(this.currentDisplayLayer);
+        this.miniMap.requestStaticUpdate();
+        this.terrainRenderer.rebuildAll(this.gridManager, this.renderer.scene);
+        this.externalConnectionManager.checkConnections(this.worldMap, (city) => {
+          this.uiManager.showToast('祝・幹線開通！', `${city.name}との直通線路が開通しました！広域輸送が開始されます。`, 'info');
+        });
+      },
       onCargoYardVisualUpdate: (x, z, l) => this.visualEffectManager.updateCargoYardVisual(x, z, l)
     });
     this.persistenceService = new PersistenceService({
       gameState: this.gameState, worldMap: this.worldMap, getGridManager: () => this.gridManager,
       setGridManager: (gm) => { this.gridManager = gm; this.placementController.setGridManager(gm); },
       trainManager: this.trainManager, fleetController: this.fleetController, economy: this.economy,
-      undoManager: this.undoManager,
+      undoManager: this.undoManager, externalConnectionManager: this.externalConnectionManager,
       timeManager: this.timeManager, zoneManager: this.zoneManager, demandEngine: this.demandEngine,
       uiManager: this.uiManager, audioManager: this.audioManager, cameraManager: this.cameraManager,
       terrainRenderer: this.terrainRenderer, renderer: this.renderer, chunkManager: this.chunkManager,
@@ -176,7 +204,7 @@ export class GameApp {
     this.interactionController = new InteractionController({
       scene: this.renderer.scene, domElement: this.renderer.renderer.domElement, cameraManager: this.cameraManager,
       worldMap: this.worldMap, getGridManager: () => this.gridManager, trainManager: this.trainManager, economy: this.economy,
-      undoManager: this.undoManager,
+      undoManager: this.undoManager, externalConnectionManager: this.externalConnectionManager,
       timeManager: this.timeManager, zoneManager: this.zoneManager, demandEngine: this.demandEngine, uiManager: this.uiManager,
       audioManager: this.audioManager, inputController: this.inputController, miniMap: this.miniMap, terrainRenderer: this.terrainRenderer,
       scheduleUI: this.scheduleUI, switchScheduleUI: this.switchScheduleUI, placementController: this.placementController,
@@ -184,7 +212,12 @@ export class GameApp {
       onLayerSwitchRequested: (l, snd) => this.switchActiveLayer(l, snd), onToggleInfiniteFunds: () => this.toggleInfiniteFunds(),
       onExitCabView: () => this.exitCabView(), getCabTargetTrainId: () => this.cabTargetTrainId,
       getSelectedTilePos: () => this.selectedTilePos, setSelectedTilePos: (pos) => { this.selectedTilePos = pos; },
-      getSelectedTrainId: () => this.selectedTrainId, setSelectedTrainId: (id) => { this.selectedTrainId = id; }
+      getSelectedTrainId: () => this.selectedTrainId, setSelectedTrainId: (id) => {
+        this.selectedTrainId = id;
+        if (id !== null) {
+          this.cabTargetTrainId = id;
+        }
+      }
     });
     this.setupUIHandlers();
     this.uiManager.updateUndoButton(false);
@@ -204,6 +237,7 @@ export class GameApp {
     const { uiManager: ui, timeManager: tm, fleetController: fc, placementController: pc, interactionController: ic } = this;
     ui.getCurrentHour = () => tm.hour;
     ui.getCurrentMinute = () => tm.minute;
+    ui.getExternalCityNode = (id) => this.externalConnectionManager.getCityById(id);
     ui.onSpeedChanged = (lvl) => tm.setSpeedLevel(lvl as SpeedLevel);
 
     // グラフィック画質変更イベント
@@ -237,8 +271,8 @@ export class GameApp {
       // 税額確定（内部で年間アキュムレータがリセットされる）
       const taxReport = this.economy.assessAnnualTax(tracks, stations, cars, fy);
 
-      // 年間純利益（総運賃収入[旅客+貨物] - 維持費 - 建設費 - 税金）
-      const yearlyNet = (yearFare + yearCargo) - (yearMaint + yearConstr + taxReport.totalTax);
+      // 年間純利益（総運賃収入[旅客+貨物] - 運行維持費 - 当期減価償却費 - 税金）
+      const yearlyNet = (yearFare + yearCargo) - (yearMaint + taxReport.depreciationCost + taxReport.totalTax);
 
       // 年次財務スナップショットを記録
       this.economy.recordYearlySnapshot({
@@ -248,6 +282,8 @@ export class GameApp {
         cargoIncome: yearCargo,
         maintenanceCost: yearMaint,
         constructionCost: yearConstr,
+        depreciationCost: taxReport.depreciationCost,
+        bookValue: taxReport.totalBookValue,
         netProfit: yearlyNet,
         taxAmount: taxReport.totalTax,
         population: this.economy.population,
@@ -298,6 +334,11 @@ export class GameApp {
     tm.events.onDayPassed = (y, m, d) => { this.economy.syncDate(y, m, d); this.worldMap.resetDailyStationPassengers(); this.demandEngine.clearCache(); };
     tm.events.onFiveMinutesPassed = (h) => this.trainManager.updateFiveMinuteStationPassengers(h, (x, z, hr) => this.demandEngine.getDemandMultiplier(hr, x, z));
     tm.events.onHourPassed = (h) => {
+      this.externalConnectionManager.checkConnections(this.worldMap, (city) => {
+        this.uiManager.showToast('祝・幹線開通！', `${city.name}との直通線路が開通しました！広域輸送が開始されます。`, 'info');
+      });
+      this.externalConnectionManager.updateHourlySupply(this.worldMap, h);
+
       if (h === 17) for (const s of this.cargoSystem.processDailyIndustrialProduction(this.worldMap)) this.visualEffectManager.updateCargoYardVisual(s.x, s.z, s.layer);
     };
 
@@ -312,6 +353,8 @@ export class GameApp {
     ui.onResumeGame = async () => { await this.persistenceService.resumeGame(); };
     ui.onRotateCameraCCW = () => this.cameraManager.rotateStepCCW();
     ui.onRotateCameraCW = () => this.cameraManager.rotateStepCW();
+    ui.onResetCameraNorth = () => this.cameraManager.resetRotationToNorth();
+    this.cameraManager.onThetaUpdated = (_rad, deg) => { ui.updateCompassRotation(deg); };
     ui.onToggleXRay = () => { const a = this.cameraManager.toggleXRayMode(); this.terrainRenderer.setTransparentMode(a); ui.setXRayActive(a); };
     ui.onCameraModeToggled = () => {
       const trs = this.trainManager.getTrains();
@@ -320,10 +363,14 @@ export class GameApp {
         return;
       }
       const targetId = this.cabTargetTrainId ?? this.selectedTrainId ?? trs[0].id;
+      const train = this.trainManager.getTrainById(targetId) ?? trs[0];
+      if (train) {
+        this.switchActiveLayer(train.currentTile.layer, false);
+      }
       if (this.cameraManager.viewMode === 'quarter_view') {
-        this.enterChaseView(targetId);
+        this.enterChaseView(train.id);
       } else if (this.cameraManager.viewMode === 'chase_view') {
-        this.enterCabView(targetId);
+        this.enterCabView(train.id);
       } else {
         this.exitCabView();
       }
@@ -425,7 +472,13 @@ export class GameApp {
       }
     };
     this.trainManager.onDeadlockDetected = (e) => ui.showDeadlockToast(e, () => this.cameraManager.jumpToPosition(e.position));
-    ui.onInspectorClosed = () => { this.selectedTilePos = null; this.selectedTrainId = null; this.cameraManager.stopTracking(); };
+    ui.onInspectorClosed = () => {
+      this.selectedTilePos = null;
+      if (this.cameraManager.viewMode === 'quarter_view') {
+        this.selectedTrainId = null;
+        this.cameraManager.stopTracking();
+      }
+    };
     ui.onLayerChanged = (layer) => this.switchActiveLayer(layer);
     ui.onMobileAction = (action) => ic.handleMobileAction(action);
     ui.setTimeLightingMode(this.renderer.getLightingMode(), this.renderer.getTimeOfDay());
@@ -450,9 +503,12 @@ export class GameApp {
     if (!train || !target) return;
     if (this.hiddenCabCar) { this.hiddenCabCar.visible = true; this.hiddenCabCar = null; }
     this.cabTargetTrainId = trainId;
-    this.cameraManager.setChaseViewMode(target);
+    this.selectedTrainId = trainId;
+    this.switchActiveLayer(train.currentTile.layer, false);
     this.uiManager.setCameraModeUI('chase');
-    this.uiManager.setCabTrainName(`${train.name} (${train.model.name})`);
+    this.cameraManager.setChaseViewMode(target);
+    const displayName = train.name.includes(train.model.name) ? train.name : `${train.name} — ${train.model.name}`;
+    this.uiManager.setCabTrainName(displayName);
     this.audioManager.startCabMotorSound(target.speed ?? 0);
     this.renderer.setCabViewFog(true);
     this.renderer.disableCabHeadlight();
@@ -465,15 +521,19 @@ export class GameApp {
     if (this.hiddenCabCar) { this.hiddenCabCar.visible = true; this.hiddenCabCar = null; }
     if (train.cars && train.cars[0]) { train.cars[0].visible = false; this.hiddenCabCar = train.cars[0]; }
     this.cabTargetTrainId = trainId;
-    this.cameraManager.setCabViewMode(target);
+    this.selectedTrainId = trainId;
+    this.switchActiveLayer(train.currentTile.layer, false);
     this.uiManager.setCameraModeUI('cab');
-    this.uiManager.setCabTrainName(`${train.name} (${train.model.name})`);
+    this.cameraManager.setCabViewMode(target);
+    const displayName = train.name.includes(train.model.name) ? train.name : `${train.name} — ${train.model.name}`;
+    this.uiManager.setCabTrainName(displayName);
     this.audioManager.startCabMotorSound(target.speed ?? 0);
     this.renderer.setCabViewFog(true);
     this.renderer.enableCabHeadlight();
   }
 
   public exitCabView(): void {
+    const followId = this.cabTargetTrainId ?? this.selectedTrainId;
     if (this.hiddenCabCar) { this.hiddenCabCar.visible = true; this.hiddenCabCar = null; }
     this.cabTargetTrainId = null;
     this.cameraManager.setQuarterViewMode();
@@ -482,6 +542,18 @@ export class GameApp {
     this.renderer.setCabViewFog(false);
     this.renderer.disableCabHeadlight();
     this.updateBuildingLod();
+
+    // クォータービュー復帰時に対象列車を追従
+    if (followId !== null && followId !== undefined) {
+      this.selectedTrainId = followId;
+      this.cabTargetTrainId = followId;
+      const target = this.trainManager.getFollowTargetByTrainId(followId);
+      const train = this.trainManager.getTrainById(followId);
+      if (target && train) {
+        this.switchActiveLayer(train.currentTile.layer, false);
+        this.cameraManager.startTracking(target, false);
+      }
+    }
   }
 
   /**
@@ -641,7 +713,69 @@ export class GameApp {
       this.demandEngine.clearCache();
     });
 
-    // 3. カメラ・チャンク・ミニマップ
+    // 3. カメラ注視点・追従ターゲット同期＆更新
+    const activeFollowTrainId = (this.cameraManager.viewMode !== 'quarter_view')
+      ? (this.cabTargetTrainId ?? this.selectedTrainId)
+      : (this.selectedTrainId ?? this.cabTargetTrainId);
+
+    if (this.cameraManager.viewMode === 'cab_view') {
+      const train = activeFollowTrainId !== null && activeFollowTrainId !== undefined
+        ? this.trainManager.getTrainById(activeFollowTrainId)
+        : this.trainManager.getTrains()[0];
+      const target = train ? this.trainManager.getFollowTargetByTrainId(train.id) : null;
+      if (train && target) {
+        this.cabTargetTrainId = train.id;
+        this.selectedTrainId = train.id;
+
+        // 先頭車両の非表示を毎フレーム確実に保証（反転や編成更新による新インスタンス生成に対応）
+        const currentLeadCar = train.cars && train.cars[0] ? train.cars[0] : null;
+        if (this.hiddenCabCar !== currentLeadCar) {
+          if (this.hiddenCabCar) {
+            this.hiddenCabCar.visible = true;
+          }
+          this.hiddenCabCar = currentLeadCar;
+        }
+        if (this.hiddenCabCar && this.hiddenCabCar.visible) {
+          this.hiddenCabCar.visible = false;
+        }
+
+        this.cameraManager.setCabViewMode(target);
+        this.uiManager.updateCabSpeed(target.speed ?? 0);
+        this.audioManager.updateCabSpeed(target.speed ?? 0);
+        this.renderer.updateCabHeadlight(this.cameraManager.perspectiveCamera.position, this.cameraManager.getCabForward());
+        this.trainManager.setListenerPosition(this.cameraManager.perspectiveCamera.position);
+      } else {
+        this.exitCabView();
+      }
+    } else if (this.cameraManager.viewMode === 'chase_view') {
+      const train = activeFollowTrainId !== null && activeFollowTrainId !== undefined
+        ? this.trainManager.getTrainById(activeFollowTrainId)
+        : this.trainManager.getTrains()[0];
+      const target = train ? this.trainManager.getFollowTargetByTrainId(train.id) : null;
+      if (train && target) {
+        this.cabTargetTrainId = train.id;
+        this.selectedTrainId = train.id;
+        this.cameraManager.setChaseTarget(target);
+        this.uiManager.updateCabSpeed(target.speed ?? 0);
+        this.audioManager.updateCabSpeed(target.speed ?? 0);
+        this.trainManager.setListenerPosition(this.cameraManager.target);
+      } else {
+        this.exitCabView();
+      }
+    } else if (this.cameraManager.isTracking && activeFollowTrainId !== null && activeFollowTrainId !== undefined) {
+      // クォータービューでの列車追従同期
+      const train = this.trainManager.getTrainById(activeFollowTrainId);
+      const target = train ? this.trainManager.getFollowTargetByTrainId(train.id) : null;
+      if (train && target) {
+        this.cameraManager.startTracking(target, false);
+        if (train.currentTile.layer !== this.worldMap.activeLayer) {
+          this.switchActiveLayer(train.currentTile.layer, false);
+        }
+      } else {
+        this.cameraManager.stopTracking();
+      }
+    }
+
     this.cameraManager.update(deltaTime);
     this.chunkManager.update(this.cameraManager, this.renderer.scene);
     this.miniMap.update();
@@ -663,44 +797,13 @@ export class GameApp {
       this.economy.getFormattedFunds(), this.economy.getFormattedPopulation(), !this.economy.canInvest
     );
 
-    if (this.cameraManager.viewMode === 'cab_view') {
-      const train = this.cabTargetTrainId !== null ? this.trainManager.getTrainById(this.cabTargetTrainId) : this.trainManager.getTrains()[0];
-      const target = this.cabTargetTrainId !== null ? this.trainManager.getFollowTargetByTrainId(this.cabTargetTrainId) : this.trainManager.getFollowTarget(0);
-      if (train && target) {
-        // 先頭車両の非表示を毎フレーム確実に保証（反転や編成更新による新インスタンス生成に対応）
-        const currentLeadCar = train.cars && train.cars[0] ? train.cars[0] : null;
-        if (this.hiddenCabCar !== currentLeadCar) {
-          if (this.hiddenCabCar) {
-            this.hiddenCabCar.visible = true;
-          }
-          this.hiddenCabCar = currentLeadCar;
-        }
-        if (this.hiddenCabCar && this.hiddenCabCar.visible) {
-          this.hiddenCabCar.visible = false;
-        }
-
-        this.cameraManager.setCabViewMode(target);
-        this.uiManager.updateCabSpeed(target.speed ?? 0);
-        this.audioManager.updateCabSpeed(target.speed ?? 0);
-        this.renderer.updateCabHeadlight(this.cameraManager.perspectiveCamera.position, this.cameraManager.getCabForward());
-        this.trainManager.setListenerPosition(this.cameraManager.perspectiveCamera.position);
-      } else this.exitCabView();
-    } else if (this.cameraManager.viewMode === 'chase_view') {
-      const target = this.cabTargetTrainId !== null ? this.trainManager.getFollowTargetByTrainId(this.cabTargetTrainId) : this.trainManager.getFollowTarget(0);
-      if (target) {
-        this.cameraManager.setChaseTarget(target);
-        this.uiManager.updateCabSpeed(target.speed ?? 0);
-        this.audioManager.updateCabSpeed(target.speed ?? 0);
-        this.trainManager.setListenerPosition(this.cameraManager.target);
-      } else this.exitCabView();
-    }
-
     if (this.selectedTrainId !== null) {
       const train = this.trainManager.getTrains().find(t => t.id === this.selectedTrainId);
       if (train) {
         this.uiManager.updateTrainInspectorDynamicValues(train);
-        if (this.cameraManager.isTracking && train.currentTile.layer !== this.worldMap.activeLayer) this.switchActiveLayer(train.currentTile.layer, false);
-      } else this.selectedTrainId = null;
+      } else {
+        this.selectedTrainId = null;
+      }
     } else if (this.selectedTilePos !== null) {
       const tile = this.worldMap.getTile(this.selectedTilePos.x, this.selectedTilePos.z, this.selectedTilePos.layer);
       if (tile && (tile.type.startsWith('station') || tile.type === 'signal_yard' || tile.type.startsWith('cargo_station'))) {
@@ -735,7 +838,11 @@ export class GameApp {
     this.worldMap.renderBuckets.update(activeCam);
     this.renderer.setShadowFocus(this.cameraManager.target, this.cameraManager.getShortSideTiles() * WorldMap.TILE_SIZE * 0.9);
     this.renderer.render(activeCam);
-    this.worldLabelManager.update(activeCam, this.cameraManager.viewMode, displayLayer, this.worldMap, this.trainManager);
+    if (this.cameraManager.viewMode === 'cab_view' || this.cameraManager.viewMode === 'chase_view') {
+      this.worldLabelManager.clear();
+    } else {
+      this.worldLabelManager.update(activeCam, this.cameraManager.viewMode, displayLayer, this.worldMap, this.trainManager);
+    }
   }
 
   /**
@@ -761,6 +868,7 @@ export class GameApp {
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+  (window as any).THREE = THREE;
   const app = new GameApp();
   (window as any).gameApp = app;
   (window as any).game = app;

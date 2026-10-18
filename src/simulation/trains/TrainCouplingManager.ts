@@ -20,6 +20,46 @@ export class TrainCouplingManager {
   }
 
   /**
+   * 停止中の先行列車(leader)の最後尾に後続列車(follower)が接触したかを高精度に判定する
+   * 先行列車の最後尾車両の後端に後続列車の前端が接触した時点で true を返す
+   */
+  public checkCouplingContact(
+    follower: TrainInstance,
+    leader: TrainInstance,
+    _worldMap?: WorldMap
+  ): boolean {
+    if (!leader.isStopped) return false;
+    if (leader.carCount <= 0 || follower.carCount <= 0) return false;
+
+    // 先行列車の最後尾車両を取得
+    const rearIndex = leader.carCount - 1;
+    const rearCar = leader.cars[rearIndex];
+    if (!rearCar) return false;
+
+    // 鉛直方向（高低差）チェック
+    if (Math.abs(rearCar.position.y - follower.frontPosition.y) > 1.5) {
+      return false;
+    }
+
+    // 先行車最後尾車両の中心から、後続車前端への相対ベクトル
+    const dx = rearCar.position.x - follower.frontPosition.x;
+    const dz = rearCar.position.z - follower.frontPosition.z;
+    const horizontalDist = Math.hypot(dx, dz);
+
+    // 後続列車の進行方向との内積（follower が最後尾に向かって進んでいるか）
+    const dot = dx * follower.direction.x + dz * follower.direction.z;
+
+    // 車両中心間隔は ModelFactory.CAR_SPACING (1.95)。
+    // 最後尾車両中心と後続車先頭前端の接触距離は半車長（約 0.95〜1.25）。
+    // 後続列車が最後尾車両に接近し、接触距離（<= 1.35）に達したか判定
+    if (horizontalDist <= 1.35 && dot >= -0.3) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Phase3 ①: 併合（連結）処理
    * 後続編成(follower)を先行編成(leader)の最後尾に合体させ、「1本の統合編成（親編成の名称・ダイヤを継承）」とする。
    */
@@ -35,9 +75,14 @@ export class TrainCouplingManager {
     const combinedCars = leader.carCount + follower.carCount;
     disposeTrainMesh(follower);
 
-    // 両編成の走行履歴（pathHistory）を結合
+    // 両編成の走行履歴（pathHistory）を隙間なく連続した1本の履歴として結合
     if (leader.pathHistory.length > 0 && follower.pathHistory.length > 0) {
-      const distOffset = leader.pathHistory[0].dist - follower.pathHistory[follower.pathHistory.length - 1].dist;
+      const leaderHeadDist = leader.pathHistory[leader.pathHistory.length - 1].dist;
+      const followerHeadDist = follower.pathHistory[follower.pathHistory.length - 1].dist;
+      // follower の先頭車が結合されるべき位置（leader 先頭から leader.carCount * CAR_SPACING 後方）
+      const targetFollowerHeadDist = leaderHeadDist - leader.carCount * ModelFactory.CAR_SPACING;
+      const distOffset = targetFollowerHeadDist - followerHeadDist;
+
       const adjustedFollowerHist = follower.pathHistory.map(s => ({
         pos: s.pos.clone(),
         yaw: s.yaw,
@@ -46,10 +91,14 @@ export class TrainCouplingManager {
         dist: s.dist + distOffset,
         layer: s.layer
       }));
-      leader.pathHistory = [...adjustedFollowerHist, ...leader.pathHistory];
+
+      // leader の履歴のうち、結合点より前の部分を保持し、後ろに follower の履歴を結合
+      const validLeaderHist = leader.pathHistory.filter(s => s.dist > targetFollowerHeadDist);
+      leader.pathHistory = [...adjustedFollowerHist, ...validLeaderHist];
     }
 
     updateTrainCarCount(leader.id, combinedCars);
+    this.kinematics.applyCarTransforms(leader);
 
     // アクションSE: 車両連結音
     const distFactor = getDistanceFactor({ x: leader.frontPosition.x, z: leader.frontPosition.z });
@@ -296,7 +345,7 @@ export class TrainCouplingManager {
       monthlyProfit: 0,
       fleetId: train.fleetId ? `${train.fleetId}-split` : undefined,
       lastStationGroupId: tile.stationGroupId ?? null,
-      isReversingAtStation: config.rearReverses,
+      isReversingAtStation: false, // 既に performSplit 内で rearDir と rearHistory を反転構築しているため、発車時の再反転フラグは false にする
       cargoLoad: rearCargoLoad,
       cargoCapacity: train.model.category === 'freight' ? Math.max(0, (config.rearCars - 1) * 3) : 0,
       cargoPickup: train.cargoPickup ? { ...train.cargoPickup } : null,

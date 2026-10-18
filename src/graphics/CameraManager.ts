@@ -50,12 +50,27 @@ export class CameraManager {
 
   // 操作状態
   private isPanning: boolean = false;
+  private panButton: number = 0;
+  private panStartX: number = 0;
+  private panStartY: number = 0;
+  private hasPanDragged: boolean = false;
+  private lastRightPanTime: number = 0;
   private lastMouseX: number = 0;
   private lastMouseY: number = 0;
   private keysPressed: Record<string, boolean> = {};
 
+  // カメラ方位角更新通知（コンパスUI連動用）
+  public onThetaUpdated?: (thetaRad: number, thetaDeg: number) => void;
+
   // カメラパン（1本指ドラッグ / マウス左ドラッグ）の可否判定述語
   public canPanPredicate: (() => boolean) | null = null;
+
+  /**
+   * 直近（250ms以内）に右ドラッグによるマップパン移動が行われたかを判定（単発右クリック回転との競合防止用）
+   */
+  public wasRightPanDragged(): boolean {
+    return (performance.now() - this.lastRightPanTime) < 250;
+  }
 
   // 前面展望（Cab View）姿勢補間用
   private currentCabForward: THREE.Vector3 = new THREE.Vector3(0, 0, 1);
@@ -162,6 +177,22 @@ export class CameraManager {
       this.target.z + offsetZ
     );
     this.orthoCamera.lookAt(this.target);
+
+    if (this.onThetaUpdated) {
+      // 初期状態(directionIndex=0, theta=π/4)で北が上(0度)になるようオフセット調整
+      const relativeAngle = this.currentTheta - Math.PI / 4;
+      const deg = THREE.MathUtils.radToDeg(relativeAngle);
+      this.onThetaUpdated(this.currentTheta, deg);
+    }
+  }
+
+  /**
+   * 方位角を北向き（初期角度 directionIndex=0, π/4）へリセット
+   */
+  public resetRotationToNorth(): void {
+    if (this.viewMode !== 'quarter_view') return;
+    this.directionIndex = 0;
+    this.targetTheta = Math.PI / 4;
   }
 
   /**
@@ -298,6 +329,7 @@ export class CameraManager {
    */
   public setChaseTarget(target: FollowTarget): void {
     this.trackingTarget = target;
+    this.isTracking = true;
   }
 
   /**
@@ -472,11 +504,16 @@ export class CameraManager {
     // マウス押下
     this.domElement.addEventListener('mousedown', (e) => {
       if (this.viewMode === 'quarter_view') {
-        // 中ドラッグ (button=1) は常にパン移動、左ドラッグ (button=0) は canPan() が真の場合のみパン移動
-        if (e.button === 1 || (e.button === 0 && this.canPan())) {
+        const isSpacePressed = !!(this.keysPressed[' '] || this.keysPressed['space']);
+        // 中ドラッグ (1)、右ドラッグ (2)、スペース+左ドラッグ (0)、または canPan() が許可する左ドラッグ (0) でパン移動開始
+        if (e.button === 1 || e.button === 2 || (e.button === 0 && (isSpacePressed || this.canPan()))) {
           this.isPanning = true;
+          this.panButton = e.button;
+          this.panStartX = e.clientX;
+          this.panStartY = e.clientY;
           this.lastMouseX = e.clientX;
           this.lastMouseY = e.clientY;
+          this.hasPanDragged = false;
         }
       } else if (this.viewMode === 'chase_view') {
         if (e.button === 0 || e.button === 1 || e.button === 2) {
@@ -490,6 +527,16 @@ export class CameraManager {
     // マウス移動
     window.addEventListener('mousemove', (e) => {
       if (this.viewMode === 'quarter_view' && this.isPanning) {
+        const totalDist = Math.hypot(e.clientX - this.panStartX, e.clientY - this.panStartY);
+        if (totalDist >= 5) {
+          this.hasPanDragged = true;
+        }
+
+        // 右ボタン操作時: 5px未満の微小移動中はパン処理を保留（単発右クリックによる回転・キャンセルを妨げない）
+        if (this.panButton === 2 && !this.hasPanDragged) {
+          return;
+        }
+
         const dx = e.clientX - this.lastMouseX;
         const dy = e.clientY - this.lastMouseY;
         this.lastMouseX = e.clientX;
@@ -525,7 +572,11 @@ export class CameraManager {
 
     // マウス離脱
     window.addEventListener('mouseup', () => {
+      if (this.isPanning && this.panButton === 2 && this.hasPanDragged) {
+        this.lastRightPanTime = performance.now();
+      }
       this.isPanning = false;
+      this.hasPanDragged = false;
       this.isChaseDragging = false;
     });
 

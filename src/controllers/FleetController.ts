@@ -140,7 +140,7 @@ export class FleetController {
 
     const clampedCars = Math.max(1, Math.min(10, cars));
     const totalPrice = model.basePrice * clampedCars;
-    if (!this.economy.spendFunds(totalPrice, true)) {
+    if (!this.economy.spendFunds(totalPrice, true, 'vehicle', `${model.name} (${clampedCars}両)`)) {
       this.uiManager.showToast('資金不足', `車両購入資金が不足しています。(必要: ¥${totalPrice.toLocaleString('ja-JP')})`, 'danger');
       return false;
     }
@@ -176,7 +176,7 @@ export class FleetController {
         return;
       }
       const cost = item.model?.basePrice ?? 12000000;
-      if (!this.economy.spendFunds(cost, true)) {
+      if (!this.economy.spendFunds(cost, true, 'vehicle', `${item.name} 増車`)) {
         this.uiManager.showToast('資金不足', `増車（1両追加購入）には ¥${cost.toLocaleString()} が必要です。`, 'danger');
         return;
       }

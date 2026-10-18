@@ -25,6 +25,7 @@ import { isTrackLikeType } from '../controllers/PlacementController';
 import { BuildingBakery } from '../graphics/structures/BuildingBakery';
 import { UndoManager } from '../core/UndoManager';
 import { db, SavedTileRecord, SavedTrainRecord, SavedEconomyRecord, SavedSystemRecord } from './Database';
+import { ExternalConnectionManager } from '../simulation/ExternalConnectionManager';
 
 export interface PersistenceServiceDependencies {
   gameState: GameState;
@@ -35,6 +36,7 @@ export interface PersistenceServiceDependencies {
   fleetController: FleetController;
   economy: Economy;
   undoManager?: UndoManager;
+  externalConnectionManager?: ExternalConnectionManager;
   timeManager: TimeManager;
   zoneManager: ZoneManager;
   demandEngine: DemandEngine;
@@ -180,6 +182,8 @@ export class PersistenceService {
             stationSchedule: t.stationSchedule,
             stationPassengers: t.stationPassengers,
             isCargoYard: t.isCargoYard,
+            externalCityId: t.externalCityId,
+            isExternalConnection: t.isExternalConnection,
             // 互換キー
             rot: t.rotation,
             lvl: t.level,
@@ -224,7 +228,8 @@ export class PersistenceService {
         { key: 'zones', value: zoneManager.serialize() },
         { key: 'route_templates', value: scheduleUI.serializeTemplates() },
         { key: 'stations', value: worldMap.stationManager.serialize() },
-        { key: 'world_meta', value: { gridSize: worldMap.gridSize } }
+        { key: 'world_meta', value: { gridSize: worldMap.gridSize } },
+        { key: 'external_connections', value: this.deps.externalConnectionManager?.toSnapshot() }
       ];
 
       // メインスレッドのフレームドロップを回避するため非同期タスク譲渡
@@ -394,6 +399,13 @@ export class PersistenceService {
           }
         }
       }
+
+      // 8. 外部接続都市データ復元・同期
+      const extConnData = systemMap.get('external_connections');
+      if (extConnData && this.deps.externalConnectionManager) {
+        this.deps.externalConnectionManager.loadFromSnapshot(extConnData);
+      }
+      this.deps.externalConnectionManager?.checkConnections(worldMap);
 
       terrainRenderer.build(getGridManager(), renderer.scene);
       return true;
@@ -599,6 +611,9 @@ export class PersistenceService {
 
     terrainRenderer.build(this.deps.getGridManager(), renderer.scene);
 
+    // 外部接続都市への延伸線路をスキャン
+    this.deps.externalConnectionManager?.checkConnections(worldMap);
+
     trainManager.updateHourlyStationPassengers(
       timeManager.hour,
       (x, z, h) => demandEngine.getDemandMultiplier(h, x, z)
@@ -662,6 +677,7 @@ export class PersistenceService {
     chunkManager.setGridManager(newGrid);
     miniMap.setGridManager(newGrid);
 
+    this.deps.externalConnectionManager?.initDefaultCities(mapSize);
     this.buildInitialCity();
     terrainRenderer.build(newGrid, renderer.scene);
 
@@ -789,6 +805,7 @@ export class PersistenceService {
     chunkManager.setGridManager(newGrid);
     miniMap.setGridManager(newGrid);
 
+    this.deps.externalConnectionManager?.initDefaultCities(64);
     this.buildInitialCity();
     terrainRenderer.build(newGrid, renderer.scene);
     cameraManager.stopTracking();

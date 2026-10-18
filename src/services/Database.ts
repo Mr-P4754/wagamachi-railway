@@ -31,6 +31,8 @@ export interface SavedTileRecord {
   stationSchedule?: any;
   stationPassengers?: number;
   isCargoYard?: boolean;
+  externalCityId?: string;
+  isExternalConnection?: boolean;
   // レガシー互換・エイリアスプロパティ
   rot?: number;
   lvl?: number;
@@ -75,6 +77,9 @@ export interface SavedEconomyRecord {
   lastSettledYear: number;
   monthlyHistory: any[];
   yearlyHistory: any[];
+  lastDepreciationCost?: number;
+  lastTotalBookValue?: number;
+  depreciationLedger?: any;
 }
 
 /**

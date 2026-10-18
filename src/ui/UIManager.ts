@@ -10,6 +10,7 @@ import { TrainInstance } from '../simulation/TrainManager';
 import { UI_ICONS } from './icons';
 import { MapSize, TerrainType, GridLayer, DeadlockEvent } from '../core/types';
 import { TimeLightingMode, TimeOfDay, GraphicsQuality } from '../engine/Renderer';
+import { ExternalCityNode, ExternalConnectionManager } from '../simulation/ExternalConnectionManager';
 
 export type ActiveTool =
   | 'select'
@@ -196,6 +197,7 @@ export class UIManager {
   private graphicsToggleBtn = document.getElementById('btn-graphics-toggle') as HTMLButtonElement | null;
   private graphicsQualityBadge = document.getElementById('graphics-quality-badge') as HTMLElement | null;
   public onGraphicsQualityChanged?: (level: GraphicsQuality) => void;
+  public getExternalCityNode?: (cityId: string) => ExternalCityNode | undefined;
 
   private undoBtn = document.getElementById('btn-undo') as HTMLButtonElement | null;
   private camViewBtn = document.getElementById('btn-cam-view')!;
@@ -313,9 +315,10 @@ export class UIManager {
   private selectedMapSize: MapSize = 256;
   private selectedTerrainType: TerrainType = 'balanced';
 
-  // カメラ・視点回転 ＆ 透過ボタン
+  // カメラ・視点回転 ＆ 透過ボタン ＆ 方位コンパス
   private btnRotateCCW = document.getElementById('btn-rotate-ccw');
   private btnRotateCW = document.getElementById('btn-rotate-cw');
+  private btnCompass = document.getElementById('btn-compass');
   private btnXRayToggle = document.getElementById('btn-xray-toggle');
 
   // Callbacks
@@ -373,6 +376,7 @@ export class UIManager {
   public onResumeGame: () => void = () => {};
   public onRotateCameraCCW: () => void = () => {};
   public onRotateCameraCW: () => void = () => {};
+  public onResetCameraNorth: () => void = () => {};
   public onToggleXRay: () => void = () => {};
   // 階層スライサー＆スマホ操作コールバック
   public onLayerChanged: (layer: GridLayer | 'all') => void = () => {};
@@ -454,6 +458,11 @@ export class UIManager {
     });
     this.btnRotateCW?.addEventListener('click', () => {
       this.onRotateCameraCW();
+    });
+
+    // 方位コンパスクリック（北向きリセット）
+    this.btnCompass?.addEventListener('click', () => {
+      this.onResetCameraNorth();
     });
 
     // 建物半透明透過（X-Ray）ボタン
@@ -880,6 +889,16 @@ export class UIManager {
   }
 
   /**
+   * カメラ方位角に連動してコンパスの針を回転表示
+   */
+  public updateCompassRotation(deg: number): void {
+    const needle = document.getElementById('compass-needle-group');
+    if (needle) {
+      needle.style.transform = `rotate(${-deg}deg)`;
+    }
+  }
+
+  /**
    * ⑤ カテゴリーサブメニュー（多層モーダル）を開く
    */
   private openSubmenu(categoryId: string) {
@@ -1010,7 +1029,7 @@ export class UIManager {
 
       const stripeHex = '#' + veh.stripeColor.toString(16).padStart(6, '0');
       const maxOcc = Math.round((veh.maxOccupancyRate ?? 1.0) * 100);
-      const capText = veh.category === 'freight' ? '貨物専用' : `1両定員: ${veh.baseCapacity}名 (最大${maxOcc}%)`;
+      const capText = veh.category === 'freight' ? '貨物専用' : `定員 ${veh.baseCapacity}名/両・最大${maxOcc}%`;
 
       card.innerHTML = `
         <div class="veh-stripe-bar" style="background: ${stripeHex}"></div>
@@ -1074,9 +1093,9 @@ export class UIManager {
     }
     if (this.graphicsToggleBtn) {
       const titleMap: Record<GraphicsQuality, string> = {
-        high: '画質切替: 高画質 (クリックで「中」に変更)',
-        medium: '画質切替: 標準 (クリックで「低」に変更)',
-        low: '画質切替: 軽量 (クリックで「高」に変更)'
+        high: '画質: 高画質 → クリックで標準へ',
+        medium: '画質: 標準 → クリックで軽量へ',
+        low: '画質: 軽量 → クリックで高画質へ'
       };
       this.graphicsToggleBtn.title = titleMap[level] || '画質切替';
     }
@@ -1095,18 +1114,18 @@ export class UIManager {
       this.timeToggleBtn.classList.add('mode-day');
       this.timeIcon.innerHTML = UI_ICONS.sun;
       if (this.timeModeBadge) this.timeModeBadge.textContent = '昼';
-      this.timeToggleBtn.setAttribute('title', '昼夜切替: ②昼間固定 (時間帯に関係なく昼間に固定)');
+      this.timeToggleBtn.setAttribute('title', '昼夜切替: 昼間固定');
       if (this.timeText) this.timeText.textContent = '昼間固定';
     } else if (mode === 'night') {
       this.timeToggleBtn.classList.add('mode-night');
       this.timeIcon.innerHTML = UI_ICONS.moon;
       if (this.timeModeBadge) this.timeModeBadge.textContent = '夜';
-      this.timeToggleBtn.setAttribute('title', '昼夜切替: ③夜間固定 (時間帯に関係なく夜間に固定)');
+      this.timeToggleBtn.setAttribute('title', '昼夜切替: 夜間固定');
       if (this.timeText) this.timeText.textContent = '夜間固定';
     } else {
       // mode === 'auto' (① 昼夜切替OFF / 時間連動)
       if (this.timeModeBadge) this.timeModeBadge.textContent = 'OFF';
-      this.timeToggleBtn.setAttribute('title', '昼夜切替: ①OFF (時間連動)');
+      this.timeToggleBtn.setAttribute('title', '昼夜切替: 時間連動');
 
       if (effectiveTime === 'day') {
         this.timeIcon.innerHTML = UI_ICONS.sun;
@@ -1470,11 +1489,11 @@ export class UIManager {
             <div class="fleet-item-stats">
               <span>形式: ${item.model.name}</span>
               <div class="fleet-car-config-row">
-                <span class="fleet-car-label">編成両数:</span>
-                <span class="fleet-car-val"><strong>${item.cars}両編成</strong> (定員: ${(item.model.baseCapacity * item.cars).toLocaleString()}名 / 最大: ${getMaxCapacity(item.model, item.cars).toLocaleString()}名)</span>
+                <span class="fleet-car-label">編成:</span>
+                <span class="fleet-car-val"><strong>${item.cars}両</strong> ／ 定員 ${(item.model.baseCapacity * item.cars).toLocaleString()}名・最大 ${getMaxCapacity(item.model, item.cars).toLocaleString()}名</span>
                 <div class="fleet-car-controls">
-                  <button class="fleet-btn-car-minus" data-id="${item.id}" ${item.cars <= 1 ? 'disabled title="これ以上減らせません"' : 'title="1両減車（売却返金）"'}>-1両</button>
-                  <button class="fleet-btn-car-plus" data-id="${item.id}" ${item.cars >= 10 ? 'disabled title="最大10両までです"' : 'title="追加車両を購入"'}>+1両 (購入: ¥${item.model.basePrice.toLocaleString()})</button>
+                  <button class="fleet-btn-car-minus" data-id="${item.id}" ${item.cars <= 1 ? 'disabled title="これ以上減らせません"' : 'title="1両減車して返金"'}>-1両</button>
+                  <button class="fleet-btn-car-plus" data-id="${item.id}" ${item.cars >= 10 ? 'disabled title="最大10両までです"' : 'title="1両増車"'}>+1両 ¥${(item.model.basePrice / 10000).toLocaleString()}万</button>
                 </div>
               </div>
               <span>最高速度: ${item.model.maxSpeed}km/h</span>
@@ -1488,7 +1507,7 @@ export class UIManager {
             ` : `
               <button class="fleet-btn-deploy" data-id="${item.id}">線路に配置</button>
             `}
-            <button class="fleet-btn-sell" data-id="${item.id}" title="列車を売却して資金を回収します">売却 (¥${Math.floor((item.model?.basePrice ?? 12000000) * item.cars * 0.5).toLocaleString()})</button>
+            <button class="fleet-btn-sell" data-id="${item.id}" title="編成を売却して資金を回収">売却 ¥${(Math.floor((item.model?.basePrice ?? 12000000) * item.cars * 0.5) / 10000).toLocaleString()}万</button>
           </div>
         `;
 
@@ -1524,7 +1543,7 @@ export class UIManager {
         const sellBtn = card.querySelector<HTMLButtonElement>('.fleet-btn-sell');
         let sellConfirmTimer: number | null = null;
         const refundAmount = Math.floor((item.model?.basePrice ?? 12000000) * item.cars * 0.5);
-        const normalSellText = `売却 (¥${refundAmount.toLocaleString()})`;
+        const normalSellText = `売却 ¥${(refundAmount / 10000).toLocaleString()}万`;
 
         sellBtn?.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1552,8 +1571,8 @@ export class UIManager {
             sellBtn.classList.add('confirming');
             sellBtn.dataset.origText = normalSellText;
             sellBtn.textContent = isDeployed
-              ? `撤去＆売却する？ (¥${refundAmount.toLocaleString()})`
-              : `本当に売却？ (¥${refundAmount.toLocaleString()})`;
+              ? `撤去＆売却？ ¥${(refundAmount / 10000).toLocaleString()}万`
+              : `本当に売却？ ¥${(refundAmount / 10000).toLocaleString()}万`;
 
             sellConfirmTimer = window.setTimeout(() => {
               if (sellBtn && sellBtn.classList.contains('confirming')) {
@@ -1629,7 +1648,7 @@ export class UIManager {
         this.camViewText.textContent = mode === 'cab' ? '前面展望' : '追従視点';
       }
       if (this.cabHudTitle) {
-        this.cabHudTitle.textContent = mode === 'cab' ? '前面展望モード（Cab）' : '列車追従カメラ（Chase）';
+        this.cabHudTitle.textContent = mode === 'cab' ? '前面展望モード' : '列車追従カメラ';
       }
       this.camViewBtn.classList.add('active');
 
@@ -1638,7 +1657,8 @@ export class UIManager {
       this.floorSlicerEl?.classList.add('hidden');
       this.sideControlsDock?.classList.add('hidden');
       this.minimapContainer?.classList.add('hidden');
-      this.closeInspector();
+      this.inspectorPanel.classList.add('hidden');
+      this.inspectorPanel.classList.remove('minimized');
       this.closeSubmenu();
       this.rotationHint.classList.add('hidden');
       this.stationLengthSelector.classList.add('hidden');
@@ -1689,32 +1709,39 @@ export class UIManager {
         item.className = 'cab-train-item';
 
         const isFreight = train.model.category === 'freight';
+        const isExternal = !!train.externalTravel;
         const badgeText = isFreight ? '貨物列車' : '旅客列車';
-        const statusText = train.isStopped ? '停車中' : `${Math.round(train.speed || 0)} km/h`;
-        const layerText = train.currentTile.layer >= 2
-          ? `地上${train.currentTile.layer}F`
-          : (train.currentTile.layer < 0 ? `地下B${Math.abs(train.currentTile.layer)}F` : '地上1F');
+        const statusText = isExternal
+          ? `${train.externalTravel.cityName}へ直通運行中`
+          : (train.isStopped ? '停車中' : `${Math.round(train.speed || 0)} km/h`);
+        const layerText = isExternal
+          ? 'マップ外'
+          : (train.currentTile.layer >= 2
+              ? `地上${train.currentTile.layer}F`
+              : (train.currentTile.layer < 0 ? `地下B${Math.abs(train.currentTile.layer)}F` : '地上1F'));
 
         item.innerHTML = `
           <div class="cab-train-info">
             <div class="cab-train-header">
               <span class="cab-train-title">${train.name}</span>
               <span class="cab-train-badge ${isFreight ? 'freight' : ''}">${badgeText}</span>
-              <span style="font-size: 11px; color: ${train.isStopped ? '#f87171' : '#34d399'}; font-weight: 600;">● ${statusText}</span>
+              <span style="font-size: 11px; color: ${isExternal ? '#38bdf8' : (train.isStopped ? '#f87171' : '#34d399')}; font-weight: 600;">● ${statusText}</span>
             </div>
             <div class="cab-train-detail">
               <span>形式: ${train.model.name}</span>
               <span>両数: ${train.carCount}両編成</span>
-              <span>位置: ${layerText} (${train.currentTile.x}, ${train.currentTile.z})</span>
+              <span>位置: ${isExternal ? statusText : `${layerText} (${train.currentTile.x},${train.currentTile.z})`}</span>
             </div>
           </div>
-          <button class="cab-train-action-btn">運転席に乗車</button>
+          <button class="cab-train-action-btn" ${isExternal ? 'disabled style="opacity:0.45; cursor:not-allowed;"' : ''}>${isExternal ? 'マップ外走行中' : '運転席に乗車'}</button>
         `;
 
-        item.addEventListener('click', () => {
-          this.hideCabTrainSelectModal();
-          onSelect(train.id);
-        });
+        if (!isExternal) {
+          item.addEventListener('click', () => {
+            this.hideCabTrainSelectModal();
+            onSelect(train.id);
+          });
+        }
 
         listEl.appendChild(item);
       });
@@ -1784,41 +1811,43 @@ export class UIManager {
     this.inspectCoords.textContent = `(${tile.x}, ${tile.z})`;
 
     const residenceNames: Record<number, string> = {
-      1: '戸建て住宅 (Lv.1)',
-      2: '低層アパート (Lv.2)',
-      3: '中層マンション (Lv.3)',
-      4: 'タワーマンション (Lv.4)'
+      1: '戸建て住宅 Lv.1',
+      2: '低層アパート Lv.2',
+      3: '中層マンション Lv.3',
+      4: 'タワーマンション Lv.4'
     };
     const commercialNames: Record<number, string> = {
-      1: '個人商店・店舗 (Lv.1)',
-      2: '中型オフィスビル (Lv.2)',
-      3: '大型ビジネスビル (Lv.3)',
-      4: '超高層ランドマークタワー (Lv.4)'
+      1: '個人商店・店舗 Lv.1',
+      2: '中型オフィスビル Lv.2',
+      3: '大型ビジネスビル Lv.3',
+      4: '超高層ランドマークタワー Lv.4'
     };
 
     const typeNames: Record<TileType, string> = {
       empty: '更地',
-      rail_ground: '線路 (地上)',
+      rail_ground: '地上線路',
       rail_elevated: '高架線路',
-      rail_curve_ground: '曲線レール (地上)',
-      rail_curve_elevated: '曲線レール (高架)',
-      point_switch_ground: '分岐器・ポイント (地上)',
-      point_switch_elevated: '分岐器・ポイント (高架)',
-      scissors_crossing_ground: 'シーサスクロッシング (地上・2×2)',
-      scissors_crossing_elevated: 'シーサスクロッシング (高架・2×2)',
+      rail_curve_ground: '地上曲線レール',
+      rail_curve_elevated: '高架曲線レール',
+      point_switch_ground: '地上分岐器',
+      point_switch_elevated: '高架分岐器',
+      scissors_crossing_ground: '地上シーサスクロッシング',
+      scissors_crossing_elevated: '高架シーサスクロッシング',
       rail_slope: '勾配線路',
       rail_slope_underground: '地下勾配線路',
-      station_ground: '駅舎 (地上)',
+      station_ground: '地上駅',
       station_elevated: '高架駅',
       signal_yard: '信号場・留置線',
-      cargo_station_ground: '貨物駅・コンテナヤード (地上)',
-      cargo_station_elevated: '貨物駅・コンテナヤード (高架)',
+      cargo_station_ground: '地上貨物駅',
+      cargo_station_elevated: '高架貨物駅',
       road: '道路',
       level_crossing: '踏切',
-      residence: residenceNames[tile.level] || `住宅区画 (Lv.${tile.level})`,
-      commercial: commercialNames[tile.level] || `商業オフィスビル (Lv.${tile.level})`,
-      industrial: `工業施設 (Lv.${tile.level})`,
-      nature: '森林・緑地'
+      residence: residenceNames[tile.level] || `住宅区画 Lv.${tile.level}`,
+      commercial: commercialNames[tile.level] || `商業オフィスビル Lv.${tile.level}`,
+      industrial: `工業施設 Lv.${tile.level}`,
+      nature: '森林・緑地',
+      farmland: '田畑・農地',
+      external_connection: '隣町直通線路'
     };
     this.inspectType.textContent = typeNames[tile.type] || tile.type;
     this.inspectActions.innerHTML = '';
@@ -1828,13 +1857,77 @@ export class UIManager {
       this.inspectRenameRow.classList.add('hidden');
     }
 
+    if (tile.isExternalConnection || tile.type === 'external_connection') {
+      const cityNode = tile.externalCityId && this.getExternalCityNode
+        ? this.getExternalCityNode(tile.externalCityId)
+        : undefined;
+
+      const cityName = cityNode?.name || tile.stationName || '隣町方面';
+      const isConnected = !!cityNode?.connected;
+      this.inspectExtraVal.textContent = isConnected
+        ? `● 広域直通開通中 [${cityName}]`
+        : '▲ 線路未開通 [OFFLINE]';
+
+      const gatewayCard = document.createElement('div');
+      gatewayCard.className = 'external-gateway-card';
+        const currentH = this.getCurrentHour ? this.getCurrentHour() : 12;
+        const demandInfo = cityNode
+          ? ExternalConnectionManager.getDemandPhaseInfo(cityNode, currentH)
+          : { label: '通常需要', multiplier: 1.0, percentage: 100 };
+        const effectivePassengerSupply = cityNode
+          ? Math.max(5, Math.round(cityNode.passengerSupplyRate * demandInfo.multiplier))
+          : 40;
+
+        gatewayCard.style.cssText = 'background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 13px; color: #cbd5e1;';
+        gatewayCard.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <strong style="color: #38bdf8; font-size: 15px;">${cityName}</strong>
+          <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: bold; background: ${isConnected ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}; color: ${isConnected ? '#34d399' : '#fbbf24'}; border: 1px solid ${isConnected ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.4)'};">
+            ${isConnected ? '● 直通運行中' : '▲ 未開通'}
+          </span>
+        </div>
+        <div style="font-size: 11px; color: #94a3b8; margin-bottom: 10px;">${cityNode?.subtitle || '広域隣接都市・巨大市場'}</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px;">
+          <div style="background: rgba(30, 41, 59, 0.7); padding: 6px; border-radius: 4px;">
+            <div style="font-size: 10px; color: #94a3b8;">都市人口</div>
+            <div style="font-weight: bold; color: #f8fafc;">${(cityNode?.population ?? 50000).toLocaleString()}人</div>
+          </div>
+          <div style="background: rgba(30, 41, 59, 0.7); padding: 6px; border-radius: 4px;">
+            <div style="font-size: 10px; color: #94a3b8;">待機乗客</div>
+            <div style="font-weight: bold; color: #38bdf8;">${(tile.stationPassengers ?? 0).toLocaleString()}人</div>
+          </div>
+          <div style="background: rgba(30, 41, 59, 0.7); padding: 6px; border-radius: 4px;">
+            <div style="font-size: 10px; color: #94a3b8;">特産貨物</div>
+            <div style="font-weight: bold; color: #fbbf24;">${(tile.cargoContainers ?? 0)}個</div>
+          </div>
+          <div style="background: rgba(30, 41, 59, 0.7); padding: 6px; border-radius: 4px;">
+            <div style="font-size: 10px; color: #94a3b8;">現在補充レート (${demandInfo.label} ${demandInfo.percentage}%)</div>
+            <div style="font-weight: bold; color: #34d399;">+${effectivePassengerSupply}人 / +${cityNode?.cargoSupplyRate ?? 2}個</div>
+          </div>
+        </div>
+        <div style="background: rgba(30, 41, 59, 0.5); padding: 8px; border-radius: 4px; border: 1px solid rgba(51, 65, 85, 0.5);">
+          <div style="font-size: 11px; font-weight: bold; color: #94a3b8; margin-bottom: 4px;">広域直通輸送実績</div>
+          <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+            <span>累計輸送旅客:</span>
+            <strong style="color: #34d399;">${(cityNode?.totalPassengersTransported ?? 0).toLocaleString()}人</strong>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span>累計輸出貨物:</span>
+            <strong style="color: #fbbf24;">${(cityNode?.totalCargoExported ?? 0).toLocaleString()}個</strong>
+          </div>
+        </div>
+      `;
+      this.inspectActions.appendChild(gatewayCard);
+      if (tile.type === 'external_connection') {
+        return;
+      }
+    }
+
     if (switchHub) {
       const isStraight = (switchHub.switchState !== 'diverge');
       const switchSched = switchHub.switchSchedule || { mode: 'timeline' };
-      this.inspectExtraVal.textContent = `開通: ${isStraight ? '【直進】' : '【分岐】'} (動作: ${
-        switchSched.mode === 'timeline' ? 'タイムライン指定' :
-        switchSched.mode === 'alternate' ? '交互切替' : '手動'
-      })`;
+      const modeLabel = switchSched.mode === 'timeline' ? 'タイムライン' : switchSched.mode === 'alternate' ? '交互切替' : '手動';
+      this.inspectExtraVal.textContent = `進路: ${isStraight ? '直進' : '分岐'} ／ モード: ${modeLabel}`;
 
       const switchBtn = document.createElement('button');
       switchBtn.className = 'switch-toggle-btn';
@@ -1862,15 +1955,25 @@ export class UIManager {
       this.renderSwitchScheduleUI(this.inspectActions, switchHub);
 
     } else if (tile.type.startsWith('scissors_crossing')) {
+      const switchSched = tile.switchSchedule || (tile.groupOrigin ? createDefaultSwitchSchedule() : null);
+      const modeText = switchSched ? (
+        switchSched.mode === 'timeline' ? 'タイムライン指定' :
+        switchSched.mode === 'alternate' ? '交互切替' : '手動'
+      ) : '手動';
       const stateLabel: Record<string, string> = {
-        straight: '【複線・直進】', 'cross-a': '【交差A（片方向）】', 'cross-b': '【交差B（もう片方向）】'
+        straight: '直進・複線通過',
+        'cross-a': '渡り線A開通',
+        'cross-b': '渡り線B開通'
       };
-      this.inspectExtraVal.textContent = `開通状態: ${stateLabel[tile.crossingState ?? 'straight']}`;
+      this.inspectExtraVal.textContent = `進路: ${stateLabel[tile.crossingState ?? 'straight']} ／ モード: ${modeText}`;
 
       const crossBtn = document.createElement('button');
       crossBtn.className = 'switch-toggle-btn';
-      crossBtn.textContent = '手動開通切替（直進 / 交差A / 交差B）';
+      crossBtn.textContent = '手動切替: 直進 ／ 渡り線A ／ 渡り線B';
       crossBtn.addEventListener('click', () => {
+        if (tile.switchSchedule) {
+          tile.switchSchedule.mode = 'manual';
+        }
         this.onCycleCrossing(tile.x, tile.z, (tile.layer ?? 1) as GridLayer);
       });
       this.inspectActions.appendChild(crossBtn);
@@ -1891,17 +1994,17 @@ export class UIManager {
       const runLen = stationRunLength ?? (stationData ? stationData.length : 1);
       const defaultName = isYard ? '第1信号場' : (isCargo ? '貨物駅' : '駅');
       const stName = stationData?.name || tile.stationName || defaultName;
-      const platformText = stationData?.platformNumber ? ` (${stationData.platformNumber}番線)` : '';
+      const platformText = stationData?.platformNumber ? ` ${stationData.platformNumber}番線` : '';
       this.inspectType.textContent = isYard
-        ? `信号場・留置線 - ${stName}${platformText}`
+        ? `${stName}${platformText}`
         : (isCargo
-          ? `貨物駅・コンテナヤード - ${stName}${platformText}`
-          : `${typeNames[tile.type]} - ${stName}${platformText}`);
+          ? `${stName}${platformText}`
+          : `${stName}${platformText}`);
       this.inspectExtraVal.textContent = isYard
-        ? `待避・留置専用（乗降客なし） / 有効長: ${runLen}両`
+        ? `待避・留置専用 ／ 有効長 ${runLen}両`
         : (isCargo
-          ? `貨物取扱専用 / 有効長: ${runLen}両`
-          : `待機乗客: ${tile.stationPassengers}人 / 有効長: ${runLen}両`);
+          ? `貨物取扱ヤード ／ 有効長 ${runLen}両`
+          : `待機乗客 ${tile.stationPassengers}人 ／ 有効長 ${runLen}両`);
 
       // 駅名リネーム欄を表示
       if (this.inspectRenameRow && this.inspectRenameInput) {
@@ -1973,23 +2076,25 @@ export class UIManager {
       this.inspectActions.appendChild(openSchedBtn);
 
     } else if (tile.type === 'level_crossing') {
-      this.inspectExtraVal.textContent = '道路と線路が交差する踏切です。';
+      this.inspectExtraVal.textContent = '道路・線路の平面交差';
     } else if (tile.type === 'residence') {
       const popEstimate = tile.level === 1 ? '15〜30人' : tile.level === 2 ? '40〜80人' : tile.level === 3 ? '90〜180人' : '200〜400人';
-      this.inspectExtraVal.textContent = `地価: ¥${(tile.landValue * 10000).toLocaleString()} / 推定居住人口: 約${popEstimate}`;
+      this.inspectExtraVal.textContent = `地価 ¥${(tile.landValue * 10000).toLocaleString()} ／ 居住 約${popEstimate}`;
     } else if (tile.type === 'commercial') {
-      const commCap = tile.level === 1 ? '近隣型小型店舗' : tile.level === 2 ? '中規模オフィス・商業ビル' : tile.level === 3 ? '大型ビジネスオフィス' : '超高層ランドマーク複合施設';
-      this.inspectExtraVal.textContent = `地価: ¥${(tile.landValue * 10000).toLocaleString()} / 施設規模: ${commCap}`;
+      const commCap = tile.level === 1 ? '小型店舗' : tile.level === 2 ? '中規模商業ビル' : tile.level === 3 ? '大型オフィス' : 'ランドマーク複合施設';
+      this.inspectExtraVal.textContent = `地価 ¥${(tile.landValue * 10000).toLocaleString()} ／ ${commCap}`;
     } else if (tile.type === 'industrial') {
-      this.inspectExtraVal.textContent = `地価: ¥${(tile.landValue * 10000).toLocaleString()} / 工業生産・貨物需要拠点 (Lv.${tile.level})`;
+      this.inspectExtraVal.textContent = `地価 ¥${(tile.landValue * 10000).toLocaleString()} ／ 工業生産拠点 Lv.${tile.level}`;
     } else if (tile.type === 'nature') {
-      this.inspectExtraVal.textContent = '自然の森林・緑地（景観向上・環境保全）';
+      this.inspectExtraVal.textContent = '景観向上・環境保全エリア';
+    } else if (tile.type === 'farmland') {
+      this.inspectExtraVal.textContent = '郊外農地 ／ 周辺の都市化で住宅地へ転換';
     } else if (tile.type === 'road') {
-      this.inspectExtraVal.textContent = '市民や物資が往来する舗装道路';
+      this.inspectExtraVal.textContent = '舗装道路';
     } else if (tile.type.includes('rail')) {
-      this.inspectExtraVal.textContent = '列車が走行可能な鉄道路線（開通中）';
+      this.inspectExtraVal.textContent = '鉄道路線 開通中';
     } else if (tile.type === 'empty') {
-      this.inspectExtraVal.textContent = '未開発の空き地（開発・建設可能）';
+      this.inspectExtraVal.textContent = '開発・建設可能';
     } else {
       this.inspectExtraVal.textContent = '良好';
     }
@@ -2010,17 +2115,27 @@ export class UIManager {
     this.inspectorPanel.classList.remove('hidden');
     this.inspectedTrainId = train.id;
     this.inspectedTileCoords = null;
-    this.inspectCoords.textContent = `編成 #${train.id}`;
+    if (train.externalTravel) {
+      const travel = train.externalTravel;
+      const statusText = travel.phase === 'outward'
+        ? `[直通運行中] ${travel.cityName}へ向けて走行中 [残り${Math.ceil(travel.remainingTiles)}マス]`
+        : (travel.phase === 'at_neighbor'
+          ? `[隣町滞在] ${travel.cityName}に停車中 [折り返し待機中]`
+          : `[直通運行中] ${travel.cityName}より帰還中 [残り${Math.ceil(travel.remainingTiles)}マス]`);
+      this.inspectCoords.textContent = `編成 #${train.id} - ${statusText}`;
+    } else {
+      this.inspectCoords.textContent = `編成 #${train.id}`;
+    }
     this.inspectType.textContent = train.name;
     const isFreight = train.model.category === 'freight';
     if (isFreight) {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
-      this.inspectExtraVal.textContent = `${train.carCount}両編成 / 積載コンテナ ${cargoLoad}個 (積載率 ${cargoRate}%)`;
+      this.inspectExtraVal.textContent = `${train.carCount}両編成 ／ 積載 ${cargoLoad}/${cargoCap}個・${cargoRate}%`;
     } else {
       const occupancy = Math.round((train.passengers / Math.max(1, train.capacity)) * 100);
-      this.inspectExtraVal.textContent = `${train.carCount}両編成 / 乗客 ${train.passengers}人 (乗車率 ${occupancy}%)`;
+      this.inspectExtraVal.textContent = `${train.carCount}両編成 ／ 乗客 ${train.passengers}人・乗車率 ${occupancy}%`;
     }
 
     // 列車名リネーム欄を表示
@@ -2037,12 +2152,12 @@ export class UIManager {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
-      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載（回送中）';
+      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載 [回送中]';
       const runTiles = train.cargoTraveledTiles ?? 0;
       const estRevenue = cargoLoad > 0 ? Math.round(Math.max(1, runTiles) * cargoLoad * 4200) : 0;
       this.inspectFinancialBox.innerHTML = `
         <div class="fin-title">貨物列車 運行・財務状況</div>
-        <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 (${cargoRate}%)</span></div>
+        <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 [${cargoRate}%]</span></div>
         <div class="fin-row"><span class="fin-label">積込拠点:</span><span class="fin-val">${pickupLoc}</span></div>
         <div class="fin-row"><span class="fin-label">輸送走行マス数:</span><span class="fin-val">${runTiles}マス</span></div>
         <div class="fin-row"><span class="fin-label">全量納品見込売上:</span><span class="fin-val positive">約 ¥${estRevenue.toLocaleString()}</span></div>
@@ -2053,10 +2168,9 @@ export class UIManager {
       `;
     } else {
       const occupancy = Math.round((train.passengers / Math.max(1, train.capacity)) * 100);
-      const maxOcc = Math.round((train.model.maxOccupancyRate ?? 1.0) * 100);
       this.inspectFinancialBox.innerHTML = `
         <div class="fin-title">列車 財務・運行状況</div>
-        <div class="fin-row"><span class="fin-label">現在乗客 / 定員:</span><span class="fin-val">${train.passengers} / ${train.capacity}人 (${occupancy}% / 最大${maxOcc}%)</span></div>
+        <div class="fin-row"><span class="fin-label">現在乗客 / 定員:</span><span class="fin-val">${train.passengers} / ${train.capacity}人 ・ ${occupancy}%</span></div>
         <div class="fin-row"><span class="fin-label">累計乗客数:</span><span class="fin-val">${train.totalPassengers.toLocaleString()}人</span></div>
         <div class="fin-row"><span class="fin-label">累計運賃収入:</span><span class="fin-val positive">+¥${train.totalRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計運行維持費:</span><span class="fin-val negative">-¥${train.totalCost.toLocaleString()}</span></div>
@@ -2131,10 +2245,10 @@ export class UIManager {
     const isYard = tile.type === 'signal_yard';
     const isCargo = tile.type.startsWith('cargo_station');
     this.inspectExtraVal.textContent = isYard
-      ? `待避・留置専用（乗降客なし） / 有効長: ${runLen}両`
+      ? `待避・留置専用 ／ 有効長 ${runLen}両`
       : (isCargo
-        ? `貨物取扱専用 / 有効長: ${runLen}両`
-        : `待機乗客: ${tile.stationPassengers}人 / 有効長: ${runLen}両`);
+        ? `貨物取扱ヤード ／ 有効長 ${runLen}両`
+        : `待機乗客 ${tile.stationPassengers}人 ／ 有効長 ${runLen}両`);
 
     if (stationData) {
       this.inspectFinancialBox.classList.remove('hidden');
@@ -2142,7 +2256,7 @@ export class UIManager {
       const profitClass = stationData.netProfit >= 0 ? 'positive' : 'negative';
       this.inspectFinancialBox.innerHTML = isYard ? `
         <div class="fin-title">信号場・留置線 管理状況</div>
-        <div class="fin-row"><span class="fin-label">施設区分:</span><span class="fin-val">運行専用（低コスト）</span></div>
+        <div class="fin-row"><span class="fin-label">施設区分:</span><span class="fin-val">運行専用・低コスト</span></div>
         <div class="fin-row"><span class="fin-label">ホーム数:</span><span class="fin-val">${stationData.platformCount ?? 1}番線</span></div>
         <div class="fin-row"><span class="fin-label">月額維持費:</span><span class="fin-val negative">-¥${stationData.maintenance.toLocaleString()}</span></div>
       ` : (isCargo ? `
@@ -2156,7 +2270,7 @@ export class UIManager {
         <div class="fin-row"><span class="fin-label">月額維持費:</span><span class="fin-val negative">-¥${stationData.maintenance.toLocaleString()}</span></div>
       ` : `
         <div class="fin-title">駅 財務・利用状況</div>
-        <div class="fin-row"><span class="fin-label">ホーム番線:</span><span class="fin-val">${stationData.platformNumber ?? 1}番線 (全${stationData.platformCount ?? 1}ホーム)</span></div>
+        <div class="fin-row"><span class="fin-label">ホーム番線:</span><span class="fin-val">${stationData.platformNumber ?? 1}番線 ／ 全${stationData.platformCount ?? 1}ホーム</span></div>
         <div class="fin-row"><span class="fin-label">本日乗降客:</span><span class="fin-val">${stationData.dailyPassengers.toLocaleString()}人</span></div>
         <div class="fin-row"><span class="fin-label">前日乗降客:</span><span class="fin-val">${(stationData.previousDayPassengers ?? 0).toLocaleString()}人</span></div>
         <div class="fin-row"><span class="fin-label">累計運賃収入:</span><span class="fin-val positive">+¥${stationData.totalRevenue.toLocaleString()}</span></div>
@@ -2194,10 +2308,10 @@ export class UIManager {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
-      this.inspectExtraVal.textContent = `${train.carCount}両編成 / 積載コンテナ ${cargoLoad}個 (積載率 ${cargoRate}%)`;
+      this.inspectExtraVal.textContent = `${train.carCount}両編成 ／ 積載 ${cargoLoad}/${cargoCap}個・${cargoRate}%`;
     } else {
       const occupancy = Math.round((train.passengers / Math.max(1, train.capacity)) * 100);
-      this.inspectExtraVal.textContent = `${train.carCount}両編成 / 乗客 ${train.passengers}人 (乗車率 ${occupancy}%)`;
+      this.inspectExtraVal.textContent = `${train.carCount}両編成 ／ 乗客 ${train.passengers}人・乗車率 ${occupancy}%`;
     }
 
     this.inspectFinancialBox.classList.remove('hidden');
@@ -2207,12 +2321,12 @@ export class UIManager {
       const cargoLoad = train.cargoLoad ?? 0;
       const cargoCap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       const cargoRate = Math.round((cargoLoad / Math.max(1, cargoCap)) * 100);
-      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載（回送中）';
+      const pickupLoc = train.cargoPickup ? `(${train.cargoPickup.x}, ${train.cargoPickup.z})` : '未積載 ／ 回送中';
       const runTiles = train.cargoTraveledTiles ?? 0;
       const estRevenue = cargoLoad > 0 ? Math.round(Math.max(1, runTiles) * cargoLoad * 4200) : 0;
       this.inspectFinancialBox.innerHTML = `
         <div class="fin-title">貨物列車 運行・財務状況</div>
-        <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 (${cargoRate}%)</span></div>
+        <div class="fin-row"><span class="fin-label">現在積載 / 定員:</span><span class="fin-val">${cargoLoad} / ${cargoCap}個 [${cargoRate}%]</span></div>
         <div class="fin-row"><span class="fin-label">積込拠点:</span><span class="fin-val">${pickupLoc}</span></div>
         <div class="fin-row"><span class="fin-label">輸送走行マス数:</span><span class="fin-val">${runTiles}マス</span></div>
         <div class="fin-row"><span class="fin-label">全量納品見込売上:</span><span class="fin-val positive">約 ¥${estRevenue.toLocaleString()}</span></div>
@@ -2223,10 +2337,9 @@ export class UIManager {
       `;
     } else {
       const occupancy = Math.round((train.passengers / Math.max(1, train.capacity)) * 100);
-      const maxOcc = Math.round((train.model.maxOccupancyRate ?? 1.0) * 100);
       this.inspectFinancialBox.innerHTML = `
         <div class="fin-title">列車 財務・運行状況</div>
-        <div class="fin-row"><span class="fin-label">現在乗客 / 定員:</span><span class="fin-val">${train.passengers} / ${train.capacity}人 (${occupancy}% / 最大${maxOcc}%)</span></div>
+        <div class="fin-row"><span class="fin-label">現在乗客 / 定員:</span><span class="fin-val">${train.passengers} / ${train.capacity}人 ・ ${occupancy}%</span></div>
         <div class="fin-row"><span class="fin-label">累計乗客数:</span><span class="fin-val">${train.totalPassengers.toLocaleString()}人</span></div>
         <div class="fin-row"><span class="fin-label">累計運賃収入:</span><span class="fin-val positive">+¥${train.totalRevenue.toLocaleString()}</span></div>
         <div class="fin-row"><span class="fin-label">累計運行維持費:</span><span class="fin-val negative">-¥${train.totalCost.toLocaleString()}</span></div>
@@ -2246,6 +2359,10 @@ export class UIManager {
     if (constElem) constElem.textContent = '-¥' + rep.constructionCost.toLocaleString();
     const maintElem = document.getElementById('rep-maintenance-cost');
     if (maintElem) maintElem.textContent = '-¥' + rep.maintenanceCost.toLocaleString();
+    const depElem = document.getElementById('rep-depreciation-cost');
+    if (depElem) depElem.textContent = '-¥' + (rep.depreciationCost ?? 0).toLocaleString();
+    const bookElem = document.getElementById('rep-book-value');
+    if (bookElem) bookElem.textContent = '¥' + (rep.bookValue ?? 0).toLocaleString();
 
     const netElem = document.getElementById('rep-net-profit');
     if (netElem) {

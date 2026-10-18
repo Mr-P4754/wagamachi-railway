@@ -44,9 +44,11 @@ export interface TrainInstance {
   speed: number; // tiles per second
   isStopped: boolean;
   isAtsBraked: boolean; // ATSによる先行列車接近停止
+  isApproachingCouple?: boolean; // 併合（連結）接近時の徐行フラグ（speedプロパティ直接破壊の防止）
   isSignalStopped?: boolean; // 閉塞信号による停止
   isTrapped?: boolean; // 孤立（前後とも進行不能）による立ち往生停止
   occupiedTiles: Array<{ x: number; z: number; layer: GridLayer }>; // 最大10両全マスの占有タイル
+  needsOccupancyUpdate?: boolean; // 在線タイル再計算フラグ（タイル境界通過時のみtrueにしてサブステップ計算を削減）
   stopTimer: number;
   passengers: number;
   capacity: number;
@@ -82,6 +84,23 @@ export interface TrainInstance {
   overrideDepartureRule?: DepartureRule | null;
   // 同一分内での多重発車防止用タイムスタンプ（0-1439）
   lastDepartureMinute?: number;
+  // 到着後まだ一度も現在分のダイヤ判定を行っていない場合の判定用（分境界・高速送り取りこぼし防止）
+  lastEvaluatedMinute?: number;
+
+  // 外部都市直通走行状態（マップ外の仮想走行・隣町往来）
+  externalTravel?: ExternalTravelState;
+}
+
+/** 外部都市直通走行状態 */
+export interface ExternalTravelState {
+  cityId: string;
+  cityName: string;
+  entryTile: { x: number; z: number; layer: GridLayer };
+  entryDirection: { x: number; y: number; z: number };
+  phase: 'outward' | 'at_neighbor' | 'homeward';
+  distanceTiles: number; // 接続部から隣町までの距離（50マス）
+  remainingTiles: number; // 現在フェーズでの残り走行マス数
+  stopMinutesRemaining: number; // 隣町での停車待機分数
 }
 
 /** 貨物駅での積み降ろし・運賃計算をTrainManagerへ橋渡しするフック群 */

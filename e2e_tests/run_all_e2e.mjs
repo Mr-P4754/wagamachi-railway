@@ -126,7 +126,8 @@ async function main() {
     { name: 'シナリオ 5: グラフィック品質設定（軽量化トグル）', file: 'scenario5_graphics_settings.mjs' },
     { name: 'シナリオ 6: 列車追従（Chase）カメラ', file: 'scenario6_chase_camera.mjs' },
     { name: 'シナリオ 7: 不具合改善検証（踏切横断および車両結合・追従間隔維持）', file: 'scenario7_crossing_and_coupling.mjs' },
-    { name: 'シナリオ 8: 踏切設置機能（道路×線路交差・専用ツール・ドラッグ横断）', file: 'test_crossing_placement.mjs' }
+    { name: 'シナリオ 8: 踏切設置機能（道路×線路交差・専用ツール・ドラッグ横断）', file: 'test_crossing_placement.mjs' },
+    { name: 'シナリオ 9: 隣町ゲートウェイ広域往来＆減価償却会計（耐用年数・税制適正化）', file: 'test_neighbor_city_and_depreciation.mjs' }
   ];
 
   const results = [];

@@ -6,8 +6,9 @@ export type DeviceMode = 'desktop' | 'mobile';
 export class SwitchScheduleUI {
   private container: HTMLDivElement;
   private currentTile: TileData | null = null;
+  /** 編集開始時のバックアップ（キャンセル時のロールバック用） */
+  private backupSchedule: SwitchSchedule | null = null;
   public onScheduleChanged: (tile: TileData) => void = () => {};
-
 
   constructor(private worldMap: WorldMap) {
     this.container = document.createElement('div');
@@ -17,10 +18,12 @@ export class SwitchScheduleUI {
 
     this.injectStyle();
 
-    // ESCキーで閉じる
+    // ESCキーでキャンセルして閉じる
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.isOpen()) {
-        this.close();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        this.cancel();
       }
     });
   }
@@ -183,6 +186,46 @@ export class SwitchScheduleUI {
       }
       .sw-legend-item { display: flex; align-items: center; gap: 6px; }
       .sw-legend-box { width: 14px; height: 14px; border-radius: 3px; }
+
+      .sw-footer {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 12px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--border-panel, rgba(255,255,255,0.1));
+        background: rgba(15, 23, 42, 0.98);
+        flex-shrink: 0;
+      }
+      .sw-footer-btn {
+        padding: 8px 18px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+      .sw-footer-btn.btn-cancel {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: #cbd5e1;
+      }
+      .sw-footer-btn.btn-cancel:hover {
+        background: rgba(239, 68, 68, 0.2);
+        border-color: #ef4444;
+        color: #fca5a5;
+      }
+      .sw-footer-btn.btn-save {
+        background: rgba(245, 158, 11, 0.25);
+        border: 1px solid #f59e0b;
+        color: #fef3c7;
+        box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+      }
+      .sw-footer-btn.btn-save:hover {
+        background: rgba(245, 158, 11, 0.45);
+        color: #fff;
+        box-shadow: 0 0 14px rgba(245, 158, 11, 0.4);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -194,6 +237,26 @@ export class SwitchScheduleUI {
   public close(): void {
     this.container.classList.add('hidden');
     this.currentTile = null;
+    this.backupSchedule = null;
+  }
+
+  /**
+   * 編集前のダイヤ設定に完全ロールバックして閉じる（キャンセル）
+   */
+  public cancel(): void {
+    if (this.currentTile && this.backupSchedule) {
+      this.currentTile.switchSchedule = JSON.parse(JSON.stringify(this.backupSchedule));
+      this.onScheduleChanged(this.currentTile);
+    }
+    this.close();
+  }
+
+  /**
+   * 変更内容を確定して閉じる
+   */
+  public saveAndClose(): void {
+    this.backupSchedule = null;
+    this.close();
   }
 
   public open(tile: TileData): void {
@@ -205,6 +268,7 @@ export class SwitchScheduleUI {
     if (!sched.mode) sched.mode = 'timeline';
     if (!sched.defaultState) sched.defaultState = 'straight';
 
+    this.backupSchedule = JSON.parse(JSON.stringify(tile.switchSchedule));
     this.currentTile = tile;
     this.container.classList.remove('hidden');
     this.render();
@@ -294,11 +358,11 @@ export class SwitchScheduleUI {
           ${isScissors ? `
             <div class="sw-legend-item">
               <div class="sw-legend-box" style="background: rgba(56, 189, 248, 0.7); border: 1px solid #38bdf8;"></div>
-              <span>交差A開通</span>
+              <span>渡り線A開通</span>
             </div>
             <div class="sw-legend-item">
               <div class="sw-legend-box" style="background: rgba(236, 72, 153, 0.7); border: 1px solid #ec4899;"></div>
-              <span>交差B開通</span>
+              <span>渡り線B開通</span>
             </div>
           ` : `
             <div class="sw-legend-item">
@@ -314,7 +378,7 @@ export class SwitchScheduleUI {
             ${this.generateTimeHeader()}
           </div>
           <div class="sw-timeline-ruler" id="sw-tl-ruler">
-            <div class="sw-default-label">DEFAULT: 直進 (STRAIGHT)</div>
+            <div class="sw-default-label">デフォルト: 直進</div>
             ${this.generateGridLines()}
             ${sched.mode === 'timeline' ? this.generateRuleZones(sched.rules, isScissors) : ''}
           </div>
@@ -331,9 +395,15 @@ export class SwitchScheduleUI {
         
         <div class="btn-add-sw-card" id="btn-add-sw-rule">＋ 新しい分岐設定を追加</div>
       </div>
+      <div class="sw-footer">
+        <button type="button" class="sw-footer-btn btn-cancel" id="sw-btn-cancel" title="変更を破棄して開く前の状態に戻します (ESCキー)">✕ 破棄してキャンセル</button>
+        <button type="button" class="sw-footer-btn btn-save" id="sw-btn-save" title="変更を保存して確定します">✓ 変更を保存して閉じる</button>
+      </div>
     `;
 
-    this.container.querySelector('.sw-close-btn')!.addEventListener('click', () => this.close());
+    this.container.querySelector('.sw-close-btn')!.addEventListener('click', () => this.cancel());
+    this.container.querySelector('#sw-btn-cancel')?.addEventListener('click', () => this.cancel());
+    this.container.querySelector('#sw-btn-save')?.addEventListener('click', () => this.saveAndClose());
     this.attachEvents(sched, isScissors);
   }
 
@@ -374,10 +444,10 @@ export class SwitchScheduleUI {
       if (isScissors) {
         if (rule.targetState === 'cross-b') {
           zoneClass = 'sw-tl-zone-cross-b';
-          label = '交差B';
+          label = '渡り線B';
         } else {
           zoneClass = 'sw-tl-zone-cross-a';
-          label = '交差A';
+          label = '渡り線A';
         }
       }
 
@@ -459,8 +529,8 @@ export class SwitchScheduleUI {
 
               ${isScissors ? `
                 <select class="sw-target-sel" data-idx="${idx}">
-                  <option value="cross-a" ${targetState === 'cross-a' ? 'selected' : ''}>開通: 交差A (左上↔右下)</option>
-                  <option value="cross-b" ${targetState === 'cross-b' ? 'selected' : ''}>開通: 交差B (右上↔左下)</option>
+                  <option value="cross-a" ${targetState === 'cross-a' ? 'selected' : ''}>開通: 渡り線A</option>
+                  <option value="cross-b" ${targetState === 'cross-b' ? 'selected' : ''}>開通: 渡り線B</option>
                 </select>
               ` : ''}
             </div>
@@ -514,8 +584,8 @@ export class SwitchScheduleUI {
         const newRule: SwitchTimeZoneRule = {
           id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           type: 'time_range',
-          startMin: 8 * 60, // 08:00
-          endMin: 10 * 60,  // 10:00
+          startMin: 0, // 00:00 (終日指定をデフォルトにし、追加後即座に開通効果を実感可能にする)
+          endMin: 1440, // 24:00
           targetState: isScissors ? 'cross-a' : 'diverge'
         };
         sched.rules.push(newRule);

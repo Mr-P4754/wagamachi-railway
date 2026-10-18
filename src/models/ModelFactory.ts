@@ -48,6 +48,10 @@ export class ModelFactory {
     return TrackMeshBuilder.createSwitchHub(forward, isDiverged, isElevated, branchSide, pierHeight, isTunnel);
   }
 
+  public static updateSwitchHubState(group: THREE.Object3D, isDiverged: boolean): boolean {
+    return TrackMeshBuilder.updateSwitchHubState(group, isDiverged);
+  }
+
   public static createScissorsCrossingTile(
     along: number,
     role: 0 | 1 | 2 | 3,
@@ -57,6 +61,14 @@ export class ModelFactory {
     isTunnel: boolean = false
   ): THREE.Group {
     return TrackMeshBuilder.createScissorsCrossingTile(along, role, isElevated, crossingState, pierHeight, isTunnel);
+  }
+
+  public static updateScissorsCrossingTileState(
+    group: THREE.Object3D,
+    role: 0 | 1 | 2 | 3,
+    crossingState: 'straight' | 'cross-a' | 'cross-b'
+  ): boolean {
+    return TrackMeshBuilder.updateScissorsCrossingTileState(group, role, crossingState);
   }
 
   public static createLevelCrossing(railAxis: number = 0): THREE.Group {
@@ -133,10 +145,26 @@ export class ModelFactory {
     return StructureMeshBuilder.createTree();
   }
 
+  public static createFarmland(variation: number = 0): THREE.Group {
+    return StructureMeshBuilder.createFarmland(variation);
+  }
+
   public static createTrainFormation(
     modelInfo: VehicleModelInfo,
     carCount: number = 3
   ): { group: THREE.Group; cars: THREE.Group[] } {
     return VehicleMeshBuilder.createTrainFormation(modelInfo, carCount);
+  }
+
+  public static createExternalConnection(
+    rotation: number = 0,
+    cityName: string = '新東都方面',
+    isConnected: boolean = false
+  ): THREE.Group {
+    return TrackMeshBuilder.createExternalConnectionTile(rotation, cityName, isConnected);
+  }
+
+  public static updateGatewaySign(mesh: THREE.Object3D, cityName: string, isConnected: boolean): void {
+    TrackMeshBuilder.updateGatewayMesh(mesh, cityName, isConnected);
   }
 }

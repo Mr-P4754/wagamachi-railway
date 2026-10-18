@@ -96,6 +96,26 @@ export class UndoManager {
   }
 
   /**
+   * タイル種別・レベルに応じた基礎人口を取得
+   */
+  public static getTilePopulation(type: string | undefined, level: number = 1): number {
+    if (!type) return 0;
+    if (type === 'residence') {
+      const popMap = [0, 30, 60, 120, 220];
+      return popMap[Math.min(4, Math.max(1, level))] ?? 30;
+    }
+    if (type === 'commercial') {
+      const popMap = [0, 40, 80, 150, 270];
+      return popMap[Math.min(4, Math.max(1, level))] ?? 100;
+    }
+    if (type === 'industrial') {
+      const popMap = [0, 50, 70, 90];
+      return popMap[Math.min(3, Math.max(1, level))] ?? 50;
+    }
+    return 0;
+  }
+
+  /**
    * 直前の操作を1手元に戻す（安全ガード付き・原子的実行）
    */
   public undo(): boolean {
@@ -123,29 +143,55 @@ export class UndoManager {
 
     // 2. 巻き戻し処理の実行
     if (action.type === 'placement') {
-      // 【設置の取り消し】
-      // 設置された駅・信号場・貨物駅を StationManager から解除
+      // 設置された駅・信号場・貨物駅、およびスロープの跨がり参照を解除
       for (const t of action.tiles) {
         const curTile = worldMap.getTile(t.x, t.z, t.layer);
-        if (curTile && (curTile.type.includes('station') || curTile.type === 'signal_yard')) {
-          worldMap.stationManager.removeTileFromPlatform(t.x, t.z, t.layer);
-          if (this.deps.removeCargoYardVisual) {
-            this.deps.removeCargoYardVisual(t.x, t.z, t.layer);
+        if (curTile) {
+          if (curTile.type.includes('station') || curTile.type === 'signal_yard') {
+            worldMap.stationManager.removeTileFromPlatform(t.x, t.z, t.layer);
+            if (this.deps.removeCargoYardVisual) {
+              this.deps.removeCargoYardVisual(t.x, t.z, t.layer);
+            }
+          } else if (curTile.type === 'rail_slope') {
+            const baseLayer = (curTile.layer ?? 1) as GridLayer;
+            const upperLayer = (baseLayer + 1) as GridLayer;
+            const upperTile = worldMap.getTile(curTile.x, curTile.z, upperLayer);
+            if (upperTile === curTile) {
+              worldMap.setTile(curTile.x, curTile.z, 'empty', 0, 1, 'right', upperLayer);
+            }
+          } else if (curTile.type === 'rail_slope_underground') {
+            const lowerTile = worldMap.getTile(curTile.x, curTile.z, -1 as GridLayer);
+            if (lowerTile === curTile) {
+              worldMap.setTile(curTile.x, curTile.z, 'empty', 0, 1, 'right', -1 as GridLayer);
+            }
+            worldMap.groundHoleHandler?.remove(curTile.x, curTile.z);
           }
         }
       }
 
-      // 設置前の状態 (before) に復元
+      // 設置前の状態 (before) に復元し、人口差分を巻き戻す
+      let popDelta = 0;
       for (const t of action.tiles) {
+        popDelta += UndoManager.getTilePopulation(t.before?.type, t.before?.level) - UndoManager.getTilePopulation(t.after?.type, t.after?.level);
         worldMap.restoreTileFromSnapshot(t.before, t.x, t.z, t.layer);
       }
+      if (popDelta !== 0) {
+        economy.addPopulation(popDelta);
+      }
 
-      // 消費した建設費用を全額返金
+      // 消費した建設費用を全額返金し、固定資産台帳からも資産を取り消し
       if (action.cost > 0) {
-        economy.refundFunds(action.cost);
+        economy.refundFunds(action.cost, true);
       }
     } else if (action.type === 'demolition') {
       // 【撤去の取り消し】
+      let popDelta = 0;
+      for (const t of action.tiles) {
+        popDelta += UndoManager.getTilePopulation(t.before?.type, t.before?.level) - UndoManager.getTilePopulation(t.after?.type, t.after?.level);
+      }
+      if (popDelta !== 0) {
+        economy.addPopulation(popDelta);
+      }
       // シーサスクロッシング起点があれば先に構築
       const scissorsOrigins = action.tiles.filter(t => t.before?.type.startsWith('scissors_crossing') && t.before.crossingRole === 0);
       for (const st of scissorsOrigins) {

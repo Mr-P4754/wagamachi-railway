@@ -188,14 +188,15 @@ export class GridManager {
    */
   public getCell(x: number, y: GridLayer, z: number): Cell3D | null {
     const halfSize = this.mapSize / 2;
-    const cx = Math.floor((x + halfSize) / CHUNK_SIZE);
-    const cz = Math.floor((z + halfSize) / CHUNK_SIZE);
+    if (x < -halfSize || x > halfSize || z < -halfSize || z > halfSize) return null;
+    const clampedX = Math.min(x, halfSize - 1);
+    const clampedZ = Math.min(z, halfSize - 1);
+    const cx = Math.floor((clampedX + halfSize) / CHUNK_SIZE);
+    const cz = Math.floor((clampedZ + halfSize) / CHUNK_SIZE);
     if (cx < 0 || cz < 0 || cx >= this.chunkCount || cz >= this.chunkCount) return null;
 
-    // 遅延生成: プレイヤーが線路敷設・地形判定でアクセスしたチャンクはその場で生成する
     const chunk = this.chunks.get(GridManager.getChunkKey(cx, cz)) || this.ensureChunk(cx, cz);
-
-    return chunk.cells.get(GridManager.getCellKey(x, y, z)) || null;
+    return chunk.cells.get(GridManager.getCellKey(clampedX, y, clampedZ)) || null;
   }
 
   /**

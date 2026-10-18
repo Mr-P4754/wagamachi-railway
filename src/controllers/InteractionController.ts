@@ -20,16 +20,18 @@ import { PlacementController, PLACEMENT_TOOLS, ROTATABLE_TOOLS } from './Placeme
 import { FleetController } from './FleetController';
 import { VisualEffectManager } from '../graphics/VisualEffectManager';
 import { UndoManager, TileSnapshot } from '../core/UndoManager';
+import { ExternalConnectionManager } from '../simulation/ExternalConnectionManager';
 
 const DEMOLISH_SCOPE: Partial<Record<ActiveTool, string[]>> = {
   'demolish-track': [
     'rail_ground', 'rail_elevated', 'rail_curve_ground', 'rail_curve_elevated',
     'point_switch_ground', 'point_switch_elevated',
     'scissors_crossing_ground', 'scissors_crossing_elevated',
-    'rail_slope', 'rail_slope_underground', 'level_crossing'
+    'rail_slope', 'rail_slope_underground', 'level_crossing',
+    'external_connection'
   ],
   'demolish-station': ['station_ground', 'station_elevated', 'signal_yard', 'cargo_station_ground', 'cargo_station_elevated'],
-  'demolish-city': ['road', 'residence', 'commercial', 'industrial', 'nature', 'level_crossing']
+  'demolish-city': ['road', 'residence', 'commercial', 'industrial', 'nature', 'farmland', 'level_crossing']
 };
 
 export interface InteractionControllerDependencies {
@@ -54,6 +56,7 @@ export interface InteractionControllerDependencies {
   fleetController: FleetController;
   visualEffectManager: VisualEffectManager;
   undoManager?: UndoManager;
+  externalConnectionManager?: ExternalConnectionManager;
   onLayerSwitchRequested: (layer: GridLayer, playSound?: boolean) => void;
   onToggleInfiniteFunds: () => void;
   onExitCabView: () => void;
@@ -355,7 +358,17 @@ export class InteractionController {
         }
 
         if (econ.spendFunds(config.cost, true)) {
-          wm.demolishTile(x, z, curLayer);
+          let removedPop = 0;
+          for (const ts of tileSnapshots) {
+            if (ts.before) {
+              removedPop += UndoManager.getTilePopulation(ts.before.type, ts.before.level);
+            }
+          }
+          const demolishMode = tool === 'demolish-track' ? 'track' : (tool === 'demolish-city' ? 'city' : 'all');
+          wm.demolishTile(x, z, curLayer, demolishMode);
+          if (removedPop > 0) {
+            econ.addPopulation(-Math.min(econ.population, removedPop));
+          }
           for (const t of tilesToClean) {
             vm.removeCargoYardVisual(t.x, t.z, t.layer);
           }
@@ -384,6 +397,7 @@ export class InteractionController {
           tr.rebuildAll(gm, this.deps.scene);
           tm.updateOccupancyNow();
           pc.clearHoverStationGhost();
+          this.deps.externalConnectionManager?.checkConnections(wm);
         } else {
           ui.showToast('資金不足', '撤去に必要な資金が不足しています。', 'danger');
         }
@@ -533,11 +547,12 @@ export class InteractionController {
 
       if (cm.viewMode !== 'cab_view' && (e.button === 0 || e.pointerType === 'touch')) {
         ic.updateMousePosition(e.clientX, e.clientY);
+        const tool = ui.getActiveTool();
+        const isTunnelTool = tool === 'rail-tunnel';
         const intersect = ic.getGridIntersection(
           wm.gridSize,
-          (x, z) => wm.getElevationOffset(x, z)
+          isTunnelTool ? undefined : (x, z) => wm.getElevationOffset(x, z)
         );
-        const tool = ui.getActiveTool();
         const isTrackTool = tool.startsWith('rail') || tool === 'road';
         if (intersect && intersect.isValidTile && isTrackTool) {
           pc.dragStartTile = { x: intersect.tileX, z: intersect.tileZ };
@@ -643,10 +658,10 @@ export class InteractionController {
       hasDragged = false;
     });
 
-    // 右クリックで回転
+    // 右クリックで回転（右ドラッグによるパン移動後は回転しない）
     dom.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if (hasDragged || pc.isDraggingTrack || isMultiTouchActive) return;
+      if (hasDragged || pc.isDraggingTrack || isMultiTouchActive || cm.wasRightPanDragged()) return;
       if (cm.viewMode === 'cab_view') return;
 
       const tool = ui.getActiveTool();
@@ -686,6 +701,7 @@ export class InteractionController {
           pc.rotateCurrentPlacement();
         }
       } else if (e.key === 'Escape') {
+        if (this.deps.scheduleUI.isOpen() || this.deps.switchScheduleUI.isOpen()) return;
         if (cm.viewMode === 'cab_view' || cm.viewMode === 'chase_view') {
           this.deps.onExitCabView();
           return;
@@ -779,7 +795,7 @@ export class InteractionController {
     const cLayer = (clicked.layer ?? targetLayer) as GridLayer;
     const origin = wm.getTile(clicked.groupOrigin.x, clicked.groupOrigin.z, cLayer) || wm.getTile(clicked.groupOrigin.x, clicked.groupOrigin.z);
     if (!origin) return;
-    const along = origin.rotation === 1 ? 1 : 2;
+    const along = (origin.rotation % 2 === 1) ? 1 : 2;
     const alongVec = WorldMap.DIRS[along];
     const acrossVec = WorldMap.DIRS[WorldMap.rotateCW(along)];
     const positions = [
@@ -791,6 +807,9 @@ export class InteractionController {
         this.deps.uiManager.showToast('切替不可', '列車が交差点上を通過・在線中のため、開通方向を切り替えできません。', 'warning');
         return;
       }
+    }
+    if (origin.switchSchedule) {
+      origin.switchSchedule.mode = 'manual';
     }
     wm.cycleCrossingState(x, z, cLayer);
     const updated = wm.getTile(x, z, cLayer) || wm.getTile(x, z);

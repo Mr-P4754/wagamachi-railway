@@ -3,6 +3,26 @@ import { GridManager } from '../core/GridManager';
 import { ZoneManager } from '../core/ZoneManager';
 import { GridLayer } from '../core/types';
 
+// 周囲8近傍オフセット
+const NEIGHBORS_8 = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1,  0],          [1,  0],
+  [-1,  1], [0,  1], [1,  1]
+];
+
+// 郊外農地の探索範囲（駅から 5〜14 マス）
+const FARMLAND_MIN_DIST = 5;
+const FARMLAND_MAX_DIST = 14;
+const FARMLAND_OFFSETS: { dx: number; dz: number }[] = [];
+for (let dx = -FARMLAND_MAX_DIST; dx <= FARMLAND_MAX_DIST; dx++) {
+  for (let dz = -FARMLAND_MAX_DIST; dz <= FARMLAND_MAX_DIST; dz++) {
+    const dist = Math.hypot(dx, dz);
+    if (dist >= FARMLAND_MIN_DIST && dist <= FARMLAND_MAX_DIST) {
+      FARMLAND_OFFSETS.push({ dx, dz });
+    }
+  }
+}
+
 export class CityGrowth {
   private worldMap: WorldMap;
   private gridManager: GridManager | null = null;
@@ -256,7 +276,25 @@ export class CityGrowth {
             }
           }
         }
+        // 5. 既存農地タイルの都市化（セルラーオートマトン遷移ルール）
+        // 周囲8マスの建物（residence / commercial）が3つ以上になると、farmland が residence (Lv.1) に自動転換
+        else if (tile.type === 'farmland') {
+          if (developedCount < maxDailyGrowthCount) {
+            const surroundingBuildings = this.countSurroundingBuildings(tx, tz, targetLayer);
+            if (surroundingBuildings >= 3) {
+              this.worldMap.setTile(tx, tz, 'residence', 0, 1, 'right', targetLayer);
+              developedCount++;
+              totalNewPop += Math.floor(Math.random() * 15 + 10);
+            }
+          }
+        }
       }
+    }
+
+    // 郊外農地の自律的クラスタ増殖（セルラーオートマトン誕生ルール）
+    // 駅から 5〜14マス離れた平地で道路・河川・既存農地に隣接する場所に増殖
+    for (const st of stationGroups.values()) {
+      this.evaluateFarmlandGrowth(st);
     }
 
     if (totalNewPop > 0) {
@@ -272,5 +310,129 @@ export class CityGrowth {
       this.worldMap.getTile(x + 1, z, layer)
     ];
     return neighbors.some(n => n && n.type.startsWith(typePrefix));
+  }
+
+  /**
+   * 周囲8マスの建物（residence / commercial）の数をカウント（遷移ルール用）
+   */
+  private countSurroundingBuildings(x: number, z: number, layer: GridLayer = 1): number {
+    let count = 0;
+    for (const [dx, dz] of NEIGHBORS_8) {
+      const nx = x + dx;
+      const nz = z + dz;
+      if (!this.worldMap.isInBounds(nx, nz)) continue;
+      const t = this.worldMap.getTile(nx, nz, layer);
+      if (t && (t.type === 'residence' || t.type === 'commercial')) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * 周囲8マスに道路・河川・既存農地が存在するかを調査（誕生ルール用）
+   */
+  public checkFarmlandNeighbors(x: number, z: number, layer: GridLayer = 1): {
+    hasRoadOrWater: boolean;
+    farmlandCount: number;
+  } {
+    let hasRoadOrWater = false;
+    let farmlandCount = 0;
+
+    for (const [dx, dz] of NEIGHBORS_8) {
+      const nx = x + dx;
+      const nz = z + dz;
+      if (!this.worldMap.isInBounds(nx, nz)) continue;
+
+      if (this.gridManager && this.gridManager.isWaterAtGroundLevel(nx, nz)) {
+        hasRoadOrWater = true;
+      }
+
+      const t = this.worldMap.getTile(nx, nz, layer);
+      if (t) {
+        if (t.type === 'road' || t.type === 'level_crossing') {
+          hasRoadOrWater = true;
+        }
+        if (t.type === 'farmland') {
+          farmlandCount++;
+        }
+      }
+    }
+
+    return { hasRoadOrWater, farmlandCount };
+  }
+
+  /**
+   * セルラーオートマトン誕生ルール（郊外農地の自律的クラスタ増殖）
+   * 駅から 5〜14マス 離れた平地（empty）で、隣接8マスに道路・河川・または既存 farmland がある場合、一定確率で増殖
+   * ※ 平地が消失して一面農地になるのを防ぐため、密度制限と駅あたり上限キャップを適用
+   */
+  public evaluateFarmlandGrowth(st: TileData, _force: boolean = false): void {
+    // 1. 探索範囲（駅から5〜14マス）内の既存農地数をカウント
+    let existingFarmlandCount = 0;
+    for (const { dx, dz } of FARMLAND_OFFSETS) {
+      const tx = st.x + dx;
+      const tz = st.z + dz;
+      const tile = this.worldMap.getTile(tx, tz, 1);
+      if (tile && tile.type === 'farmland') {
+        existingFarmlandCount++;
+      }
+    }
+
+    // 1駅あたりの農地総数上限（程よい田園風景を保ち、平地を残す）
+    const MAX_FARMLAND_PER_STATION = 8;
+    if (existingFarmlandCount >= MAX_FARMLAND_PER_STATION) {
+      return;
+    }
+
+    // 候補オフセット配列のシャッフルコピー
+    const offsets = [...FARMLAND_OFFSETS];
+    for (let i = offsets.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [offsets[i], offsets[j]] = [offsets[j], offsets[i]];
+    }
+
+    let spawnedCount = 0;
+    const maxDailyFarmland = 1; // 1日あたりの生成数は最大1マスに制限
+
+    for (const { dx, dz } of offsets) {
+      if (spawnedCount >= maxDailyFarmland) break;
+
+      const tx = st.x + dx;
+      const tz = st.z + dz;
+
+      if (!this.worldMap.isInBounds(tx, tz)) continue;
+      if (this.gridManager && this.gridManager.isWaterAtGroundLevel(tx, tz)) continue;
+
+      const cell = this.gridManager ? this.gridManager.getCell(tx, 1, tz) : null;
+      const surfaceElevation = cell ? cell.elevation : 1;
+      const targetLayer = surfaceElevation as GridLayer;
+
+      const tile = this.worldMap.getTile(tx, tz, targetLayer);
+      // 平地（empty または未建築）のみが対象
+      if (tile && tile.type !== 'empty') continue;
+
+      // ゾーンマネージャーによる明示的な商工業指定がある場合は農地化しない
+      const zoneHere = this.zoneManager ? this.zoneManager.getZone(tx, tz) : undefined;
+      if (zoneHere && (zoneHere.type === 'commercial' || zoneHere.type === 'industrial')) continue;
+
+      const { hasRoadOrWater, farmlandCount } = this.checkFarmlandNeighbors(tx, tz, targetLayer);
+      if (!hasRoadOrWater && farmlandCount === 0) continue;
+
+      // ★過密防止: 周囲8マスにすでに農地が2マス以上ある場合はスキップ（密集を防ぎ平地を残す）
+      if (farmlandCount >= 2) continue;
+
+      // 確率判定（穏やかなペースに調整）
+      // 道路・河川沿いは基本確率 0.18
+      // 既存農地隣接時はクラスタ確率 0.25
+      const baseChance = hasRoadOrWater ? 0.18 : 0.0;
+      const clusterChance = (farmlandCount === 1) ? 0.25 : 0.0;
+      const spawnChance = Math.min(0.35, Math.max(baseChance, clusterChance));
+
+      if (Math.random() < spawnChance) {
+        this.worldMap.setTile(tx, tz, 'farmland', Math.floor(Math.random() * 4), 1, 'right', targetLayer);
+        spawnedCount++;
+      }
+    }
   }
 }

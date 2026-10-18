@@ -34,6 +34,19 @@ export class GameMaterials {
     new THREE.MeshStandardMaterial({ color: 0x1b5e20, roughness: 0.7 }),
   ];
 
+  // 農地・田畑マテリアル
+  public static readonly farmlandSoilMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.95 }); // 畑の土・あぜ道
+  public static readonly farmlandPaddyMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.8 }); // 黄金色の稲穂
+  public static readonly farmlandCropMat = new THREE.MeshStandardMaterial({ color: 0x4d7c0f, roughness: 0.8 });  // 緑の畝・野菜
+  public static readonly greenhouseSheetMat = new THREE.MeshStandardMaterial({
+    color: 0xf8fafc,
+    roughness: 0.25,
+    metalness: 0.1,
+    transparent: true,
+    opacity: 0.82,
+    depthWrite: false // 半透明シート越しに内部や背後の畝が欠けないようにする
+  }); // ビニールハウスの半透明シート
+
   // 建物マテリアル
   public static readonly wallMats = [
     new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.6 }),
@@ -103,6 +116,14 @@ export class GameMaterials {
     this.windowDayMat.transparent = transparent;
     this.windowDayMat.opacity = opacity;
     this.windowDayMat.needsUpdate = true;
+    this.farmlandPaddyMat.transparent = transparent;
+    this.farmlandPaddyMat.opacity = opacity;
+    this.farmlandPaddyMat.needsUpdate = true;
+    this.farmlandCropMat.transparent = transparent;
+    this.farmlandCropMat.opacity = opacity;
+    this.farmlandCropMat.needsUpdate = true;
+    this.greenhouseSheetMat.opacity = enabled ? 0.2 : 0.82;
+    this.greenhouseSheetMat.needsUpdate = true;
   }
 
   public static isTransparentMode(): boolean {
@@ -133,6 +154,10 @@ export class GameMaterials {
         this.sidewalkMat,
         this.woodTrunkMat,
         ...this.foliageMats,
+        this.farmlandSoilMat,
+        this.farmlandPaddyMat,
+        this.farmlandCropMat,
+        this.greenhouseSheetMat,
         ...this.wallMats,
         ...this.roofMats,
         this.windowDayMat,

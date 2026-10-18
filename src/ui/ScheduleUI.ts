@@ -21,6 +21,8 @@ export class ScheduleUI {
 
   /** クリップボード用キャッシュ（静的保持により駅間モーダル遷移時も保持） */
   private static clipboardSchedule: StationSchedule | null = null;
+  /** 編集開始時のバックアップ（キャンセル時のロールバック用） */
+  private backupSchedule: StationSchedule | null = null;
   /** 運行系統テンプレート一覧 */
   private templates: RouteScheduleTemplate[] = [];
   /** 現在選択中のテンプレートID */
@@ -38,6 +40,15 @@ export class ScheduleUI {
 
     this.injectStyle();
     this.loadTemplatesFromStorage();
+
+    // ESCキーでキャンセルして閉じる
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.isOpen()) {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        this.cancel();
+      }
+    });
   }
 
   /**
@@ -561,6 +572,46 @@ export class ScheduleUI {
         opacity: 0.4;
         cursor: not-allowed;
       }
+
+      .sc-footer {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 12px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--border-panel, rgba(255,255,255,0.1));
+        background: rgba(15, 23, 42, 0.98);
+        flex-shrink: 0;
+      }
+      .sc-footer-btn {
+        padding: 8px 18px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+      .sc-footer-btn.btn-cancel {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: #cbd5e1;
+      }
+      .sc-footer-btn.btn-cancel:hover {
+        background: rgba(239, 68, 68, 0.2);
+        border-color: #ef4444;
+        color: #fca5a5;
+      }
+      .sc-footer-btn.btn-save {
+        background: rgba(56, 189, 248, 0.25);
+        border: 1px solid #38bdf8;
+        color: #e0f2fe;
+        box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+      }
+      .sc-footer-btn.btn-save:hover {
+        background: rgba(56, 189, 248, 0.45);
+        color: #fff;
+        box-shadow: 0 0 14px rgba(56, 189, 248, 0.4);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -570,10 +621,32 @@ export class ScheduleUI {
   public close(): void {
     this.container.classList.add('hidden');
     this.currentTile = null;
+    this.backupSchedule = null;
+  }
+
+  /**
+   * 編集前のダイヤ設定に完全ロールバックして閉じる（キャンセル）
+   */
+  public cancel(): void {
+    if (this.currentTile && this.backupSchedule) {
+      this.applyScheduleToPlatform(this.currentTile, this.backupSchedule);
+      this.onScheduleChanged(this.currentTile);
+    }
+    this.close();
+  }
+
+  /**
+   * 変更内容を保存して閉じる
+   */
+  public saveAndClose(): void {
+    this.backupSchedule = null;
+    this.showToast('ダイヤ保存', '駅ホームのダイヤ設定を正常に保存しました。', 'success');
+    this.close();
   }
 
   public open(tile: TileData): void {
     if (!tile.stationSchedule) tile.stationSchedule = createDefaultStationSchedule();
+    this.backupSchedule = cloneStationSchedule(tile.stationSchedule);
     this.currentTile = tile;
     this.container.classList.remove('hidden');
     this.render();
@@ -908,10 +981,16 @@ export class ScheduleUI {
         
         <div class="btn-add-card" id="btn-add-sched-card">＋ 新しいダイヤ設定を追加</div>
       </div>
+      <div class="sc-footer">
+        <button type="button" class="sc-footer-btn btn-cancel" id="sc-btn-cancel" title="変更を破棄して開く前の状態に戻します (ESCキー)">✕ 破棄してキャンセル</button>
+        <button type="button" class="sc-footer-btn btn-save" id="sc-btn-save" title="変更を保存して確定します">✓ 変更を保存して閉じる</button>
+      </div>
       ${this.renderBatchModalHtml()}
     `;
 
-    this.container.querySelector('.sc-close-btn')!.addEventListener('click', () => this.close());
+    this.container.querySelector('.sc-close-btn')!.addEventListener('click', () => this.cancel());
+    this.container.querySelector('#sc-btn-cancel')?.addEventListener('click', () => this.cancel());
+    this.container.querySelector('#sc-btn-save')?.addEventListener('click', () => this.saveAndClose());
     this.attachHeaderAndTemplateEvents();
     this.attachEvents(schedule);
     this.attachBatchModalEvents();
@@ -1098,10 +1177,10 @@ export class ScheduleUI {
       <div class="sc-detail-card" ${dataAttr}>
         <div class="sc-card-header">
           <select class="sc-type-sel">
-            <option value="dep" ${mode === 'dep' ? 'selected' : ''}>${order}. 📍発車時刻指定 (ピン)</option>
-            <option value="pattern" ${mode === 'pattern' ? 'selected' : ''}>${order}. 🔁パターンダイヤ (発車間隔指定)</option>
-            <option value="stop" ${mode === 'stop' ? 'selected' : ''}>${order}. ⏹停車時間指定 (時間帯)</option>
-            <option value="pass" ${mode === 'pass' ? 'selected' : ''}>${order}. ⏩本線通過 (時間帯)</option>
+            <option value="dep" ${mode === 'dep' ? 'selected' : ''}>${order}. 📍 発車時刻指定</option>
+            <option value="pattern" ${mode === 'pattern' ? 'selected' : ''}>${order}. 🔁 パターンダイヤ</option>
+            <option value="stop" ${mode === 'stop' ? 'selected' : ''}>${order}. ⏹ 停車時間指定</option>
+            <option value="pass" ${mode === 'pass' ? 'selected' : ''}>${order}. ⏩ 本線通過</option>
           </select>
           <div class="sc-card-actions">
             <button class="sc-btn-reverse ${isReverse ? 'active' : ''}" title="この発車時刻・時間帯で発車時に進行方向を折り返します">

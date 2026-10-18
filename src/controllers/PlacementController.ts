@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WorldMap, CurveDirection, TileType, createDefaultStationSchedule, TileDataSnapshot, cloneTileSnapshot } from '../simulation/WorldMap';
+import { WorldMap, CurveDirection, TileType, TileData, createDefaultStationSchedule, TileDataSnapshot, cloneTileSnapshot } from '../simulation/WorldMap';
 import { TrainManager } from '../simulation/TrainManager';
 import { Economy } from '../simulation/Economy';
 import { AudioManager } from '../engine/AudioManager';
@@ -45,7 +45,8 @@ export function isTrackLikeType(type: TileType): boolean {
     type === 'signal_yard' ||
     type.includes('switch') ||
     type.includes('scissors_crossing') ||
-    type === 'level_crossing'
+    type === 'level_crossing' ||
+    type === 'external_connection'
   );
 }
 
@@ -55,23 +56,34 @@ export function isTrackLikeType(type: TileType): boolean {
 export function isLevelCrossingCombination(
   tool: ActiveTool,
   rotation: number,
-  existingTile: { type: TileType; rotation: number } | undefined | null,
+  existingTile: { type: TileType; rotation: number; crossingRoadAxis?: number } | undefined | null,
   layer: GridLayer
 ): boolean {
   if (layer !== 1 || !existingTile || existingTile.type === 'empty') return false;
 
   const newAxis = ((rotation % 2) + 2) % 2;
   const existingAxis = (((existingTile.rotation ?? 0) % 2) + 2) % 2;
-  if (newAxis === existingAxis) return false; // 平行（直交していない場合は上書き）
 
   // ケースA: 既存の道路の上に直進レールを直交配置
-  if (tool === 'rail-straight' && existingTile.type === 'road') {
+  if (tool === 'rail-straight' && existingTile.type === 'road' && newAxis !== existingAxis) {
     return true;
   }
 
   // ケースB: 既存の地上レールの上に道路を直交配置
-  if (tool === 'road' && existingTile.type === 'rail_ground') {
+  if (tool === 'road' && existingTile.type === 'rail_ground' && newAxis !== existingAxis) {
     return true;
+  }
+
+  // ケースC: 既存の踏切の上に、同じ軸の直進レールまたは直交軸の道路を再配置/通過
+  if (existingTile.type === 'level_crossing') {
+    const crossingRailAxis = existingAxis;
+    const crossingRoadAxis = existingTile.crossingRoadAxis ?? (1 - crossingRailAxis);
+    if (tool === 'rail-straight' && newAxis === crossingRailAxis) {
+      return true; // 線路ドラッグで既存踏切を同一軸で通過
+    }
+    if (tool === 'road' && newAxis === crossingRoadAxis) {
+      return true; // 道路ドラッグで既存踏切を同一軸で通過
+    }
   }
 
   return false;
@@ -311,9 +323,11 @@ export class PlacementController {
    * ホバー位置の更新
    */
   public updateHover(): void {
+    const tool = this.uiManager.getActiveTool();
+    const isTunnelTool = tool === 'rail-tunnel';
     const intersect = this.inputController.getGridIntersection(
       this.worldMap.gridSize,
-      (x, z) => this.worldMap.getElevationOffset(x, z)
+      isTunnelTool ? undefined : (x, z) => this.worldMap.getElevationOffset(x, z)
     );
 
     const fleetCtrl = this.getFleetController ? this.getFleetController() : null;
@@ -322,7 +336,6 @@ export class PlacementController {
       const tx = intersect.tileX;
       const tz = intersect.tileZ;
       this.hoveredTile = { x: tx, z: tz };
-      const tool = this.uiManager.getActiveTool();
 
       const groundElevY = this.worldMap.getElevationOffset(tx, tz);
       const activeLayer = this.worldMap.activeLayer;
@@ -517,14 +530,31 @@ export class PlacementController {
       this.dragGhostGroup = null;
     }
 
+    const startExisting = this.worldMap.getTile(start.x, start.z, curLayer);
+    let preferHorizontalFirst = true;
+    if (startExisting && (startExisting.type === 'rail_ground' || startExisting.type === 'rail_elevated')) {
+      // 始点が南北線路(axis=0)なら南北(垂直)先行、東西線路(axis=1)なら東西(水平)先行にすると始点または本線上で綺麗に分岐する
+      preferHorizontalFirst = ((startExisting.rotation ?? 0) % 2) === 1;
+    }
+
     const segments = TrackBuilder.calculatePath(
       start.x,
       start.z,
       current.x,
       current.z,
-      curLayer
+      curLayer,
+      preferHorizontalFirst
     );
     for (const seg of segments) {
+      if (tool === 'road') {
+        seg.tool = 'road';
+        if (seg.curveDir) {
+          seg.rotation = (start.x !== current.x && seg.x === current.x) ? 0 : 1;
+          seg.curveDir = undefined; // 道路は直線セグメントとして補間
+          seg.isCorner = true; // L字コーナーの屈曲点フラグ
+        }
+        continue;
+      }
       const cell = this.gridManager.getCell(seg.x, 1, seg.z);
       const surfaceElevation = cell ? cell.elevation : 1;
       if ((seg.tool === 'rail-straight' || seg.tool === 'rail-elevated') && this.worldMap.isTunnelSection(seg.x, seg.z, seg.layer)) {
@@ -533,6 +563,42 @@ export class PlacementController {
         // 山岳地表面（layer === surfaceElevation）では高架ではなく地表線路・地表カーブとして敷設
         if (seg.tool === 'rail-elevated') seg.tool = 'rail-straight';
         if (seg.tool === 'rail-curve-elevated') seg.tool = 'rail-curve';
+      }
+
+      // ★修正: 既存の直線レールの上にドラッグのL字コーナー(curveDir)が重なった場合、
+      // または始点マスから既存レールと直交する方向へドラッグを開始した場合、自動で分岐器プレビューに変換
+      const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
+      if (existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
+        const straightAxis = (existing.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
+        const straightDirs = straightAxis === 0 ? [0, 2] : [1, 3];
+
+        if (seg.curveDir) {
+          const [cA, cB] = WorldMap.curveDirToIndices(seg.curveDir);
+          const sharedDir = [cA, cB].find(d => straightDirs.includes(d));
+          const branchDir = [cA, cB].find(d => !straightDirs.includes(d));
+
+          if (sharedDir !== undefined && branchDir !== undefined) {
+            const forward = WorldMap.opposite(sharedDir);
+            const branchSide = (WorldMap.rotateCW(forward) === branchDir) ? 'right' : 'left';
+            const switchTool: ActiveTool = existing.type === 'rail_elevated' ? 'point-switch-elevated' : 'point-switch';
+            seg.tool = switchTool;
+            seg.rotation = forward;
+            seg.switchBranchSide = branchSide;
+            seg.curveDir = undefined;
+            seg.isAutoSwitch = true;
+          }
+        } else if (seg.x === start.x && seg.z === start.z && segments.length >= 2 && (seg.rotation % 2) !== straightAxis) {
+          // 始点マスから既存レールと直交する方向へ直線ドラッグした場合
+          const nextSeg = segments[1];
+          const branchDir = nextSeg.x > seg.x ? 1 : nextSeg.x < seg.x ? 3 : nextSeg.z > seg.z ? 2 : 0;
+          const forward = straightDirs[0]; // 北(0) または 東(1)
+          const branchSide = (WorldMap.rotateCW(forward) === branchDir) ? 'right' : 'left';
+          const switchTool: ActiveTool = existing.type === 'rail_elevated' ? 'point-switch-elevated' : 'point-switch';
+          seg.tool = switchTool;
+          seg.rotation = forward;
+          seg.switchBranchSide = branchSide;
+          seg.isAutoSwitch = true;
+        }
       }
     }
     this.dragCurrentSegments = segments;
@@ -559,23 +625,59 @@ export class PlacementController {
       if (!waterCheck.allowed) continue;
       if (this.pendingItems.some(p => p.x === seg.x && p.z === seg.z && (p.layer ?? 1) === seg.layer)) continue;
       const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
-      const isCrossing = isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
-      if (this.worldMap.isPermanentTrackOrStation(seg.x, seg.z, seg.layer) && !isCrossing) continue;
+      const isCrossing = !seg.isCorner && isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
+      if (this.worldMap.isPermanentTrackOrStation(seg.x, seg.z, seg.layer) && !isCrossing && !seg.isAutoSwitch) continue;
+      // 農地(farmland)と自然(nature)のみ、線路・道路の敷設時に自動で切り拓いて上書き可能とする（建物は誤破壊と人口バグ防止のため保護）
+      const isClearableTerrain = existing && (existing.type === 'farmland' || existing.type === 'nature');
+      if (existing && existing.type !== 'empty' && !isCrossing && !isClearableTerrain) continue;
 
       let segTool = seg.tool;
       totalCost += TOOL_CONFIG[segTool]?.cost || 100000;
       placeableCount++;
     }
 
+    const previewPrefix = tool === 'road' ? '🚗 道路敷設' : '🛤️ 線路敷設';
     this.uiManager.setRotationHint(
       true,
-      `🛤️ 線路一括敷設プレビュー: ${placeableCount}マス (費用: ¥${totalCost.toLocaleString('ja-JP')})`
+      `${previewPrefix}: ${placeableCount}マス  ¥${totalCost.toLocaleString('ja-JP')}`
     );
   }
 
   /**
    * ドラッグ延伸線路の仮置き登録を完了
    */
+  /**
+   * 既存レール上に分岐器（point-switch）を上書き配置する際の設定を解決
+   */
+  public resolveSwitchOverwrite(
+    tool: ActiveTool,
+    rotation: number,
+    existingTile: TileData | undefined,
+    branchSide: 'left' | 'right' = this.currentSwitchSide
+  ): { isSwitch: boolean; switchRot: number; branchSide: 'left' | 'right'; isElevated: boolean } | null {
+    if (!existingTile || !tool.startsWith('point-switch')) return null;
+    const isGroundRail = existingTile.type === 'rail_ground';
+    const isElevRail = existingTile.type === 'rail_elevated';
+    const isElevatedTool = tool === 'point-switch-elevated' || isElevRail;
+
+    // 既存の直線レールの上から分岐器を置く場合
+    if (isGroundRail || isElevRail) {
+      const straightAxis = (existingTile.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
+      let switchRot = rotation;
+      if (switchRot % 2 !== straightAxis) {
+        switchRot = straightAxis === 0 ? 0 : 1;
+      }
+      return { isSwitch: true, switchRot, branchSide, isElevated: isElevatedTool };
+    }
+
+    // 既存の他の上書き可能線路（曲線や旧分岐器など）の上から分岐器を置く場合
+    if (this.worldMap.isOverwritableTrack(existingTile.x, existingTile.z, existingTile.layer)) {
+      return { isSwitch: true, switchRot: rotation, branchSide, isElevated: isElevatedTool };
+    }
+
+    return null;
+  }
+
   public finishDragPlacement(): void {
     this.prevDragStartTile = null;
     this.prevDragEndTile = null;
@@ -592,27 +694,83 @@ export class PlacementController {
       const waterCheck = this.worldMap.canPlaceAtWater(seg.x, seg.z, seg.layer);
       if (!waterCheck.allowed) continue;
 
-      if (this.pendingItems.some(p => p.x === seg.x && p.z === seg.z && (p.layer ?? 1) === seg.layer)) continue;
+      if (this.pendingItems.some(p => p.x === seg.x && p.z === seg.z && (p.layer ?? 1) === seg.layer)) {
+        continue;
+      }
       const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
-      const isCrossing = isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
+      const isCrossing = !seg.isCorner && isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
+
+      // ★修正: 既存の直線レールの上にドラッグのL字コーナー(curveDir または isAutoSwitch)が重なった場合、
+      // または始点マスから直交方向へドラッグした直線の場合、自動で分岐器に変換
+      if (existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
+        const straightAxis = (existing.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
+        const straightDirs = straightAxis === 0 ? [0, 2] : [1, 3];
+        let forward = seg.rotation;
+        let branchSide: 'left' | 'right' = seg.switchBranchSide ?? 'right';
+        let shouldConvertToSwitch = false;
+
+        if (seg.curveDir) {
+          const [cA, cB] = WorldMap.curveDirToIndices(seg.curveDir);
+          const sharedDir = [cA, cB].find(d => straightDirs.includes(d));
+          const branchDir = [cA, cB].find(d => !straightDirs.includes(d));
+
+          if (sharedDir !== undefined && branchDir !== undefined) {
+            forward = WorldMap.opposite(sharedDir);
+            branchSide = (WorldMap.rotateCW(forward) === branchDir) ? 'right' : 'left';
+            shouldConvertToSwitch = true;
+          }
+        } else if (seg.isAutoSwitch) {
+          shouldConvertToSwitch = true;
+        } else if (this.dragCurrentSegments.length >= 2 && seg === this.dragCurrentSegments[0] && (seg.rotation % 2) !== straightAxis) {
+          const nextSeg = this.dragCurrentSegments[1];
+          const branchDir = nextSeg.x > seg.x ? 1 : nextSeg.x < seg.x ? 3 : nextSeg.z > seg.z ? 2 : 0;
+          forward = straightDirs[0];
+          branchSide = (WorldMap.rotateCW(forward) === branchDir) ? 'right' : 'left';
+          shouldConvertToSwitch = true;
+        }
+
+        if (shouldConvertToSwitch) {
+          const switchTool: ActiveTool = existing.type === 'rail_elevated' ? 'point-switch-elevated' : 'point-switch';
+          const item: PendingItem = {
+            tool: switchTool,
+            x: seg.x,
+            z: seg.z,
+            layer: seg.layer,
+            rotation: forward,
+            ghost: null,
+            switchBranchSide: branchSide
+          };
+          this.pendingItems.push(item);
+          this.refreshGhostFor(item);
+          addedCount++;
+          continue;
+        }
+      }
+
       if (this.worldMap.isPermanentTrackOrStation(seg.x, seg.z, seg.layer) && !isCrossing) continue;
-      if (existing && existing.type !== 'empty' && !isCrossing) continue;
+      // 農地(farmland)と自然(nature)のみ、線路・道路の敷設時に自動で切り拓いて上書き可能とする（建物は誤破壊と人口バグ防止のため保護）
+      const isClearableTerrain = existing && (existing.type === 'farmland' || existing.type === 'nature');
+      if (existing && existing.type !== 'empty' && !isCrossing && !isClearableTerrain) continue;
 
       let segTool = seg.tool;
       let segRotation = seg.rotation;
+      let segBranchSide: 'left' | 'right' | undefined = undefined;
+
       if (seg.curveDir) {
         const curveIdx = CURVE_DIR_ORDER.indexOf(seg.curveDir);
         if (curveIdx !== -1) {
           segRotation = curveIdx;
         }
       }
+
       const item: PendingItem = {
         tool: segTool,
         x: seg.x,
         z: seg.z,
         layer: seg.layer,
         rotation: segRotation,
-        ghost: null
+        ghost: null,
+        switchBranchSide: segBranchSide
       };
       this.pendingItems.push(item);
       this.refreshGhostFor(item);
@@ -1158,16 +1316,110 @@ export class PlacementController {
       }
     }
 
+    const isScissorsTool = effectiveTool.startsWith('scissors-crossing');
+    // シーサスクロッシング（2x2）の既存線路上書き判定
+    let isScissorsCandidate = false;
+    if (isScissorsTool) {
+      const along = targetRotation === 1 ? 1 : 2;
+      const across = WorldMap.rotateCW(along);
+      const alongVec = WorldMap.DIRS[along];
+      const acrossVec = WorldMap.DIRS[across];
+      const scissorsPositions = [
+        { x, z },
+        { x: x + alongVec.x, z: z + alongVec.z },
+        { x: x + acrossVec.x, z: z + acrossVec.z },
+        { x: x + alongVec.x + acrossVec.x, z: z + alongVec.z + acrossVec.z }
+      ];
+
+      for (const sp of scissorsPositions) {
+        if (!this.worldMap.isInBounds(sp.x, sp.z)) {
+          this.uiManager.showToast('設置不可', 'マップ外には設置できません。', 'warning');
+          return;
+        }
+        if (!this.worldMap.isOverwritableTrack(sp.x, sp.z, curLayer)) {
+          this.uiManager.showToast('設置不可', '駅や建物、道路が存在する位置にはシーサスクロッシングを設置できません。', 'warning');
+          return;
+        }
+        if (this.trainManager.isTileOccupiedByTrain(sp.x, sp.z, curLayer)) {
+          this.uiManager.showToast('設置不可', '列車が走行・停車中の位置には設置できません。', 'warning');
+          return;
+        }
+        const waterCheck = this.worldMap.canPlaceAtWater(sp.x, sp.z, curLayer);
+        if (!waterCheck.allowed) {
+          this.uiManager.showToast('設置不可', waterCheck.reason || '水上には設置できません。', 'warning');
+          return;
+        }
+      }
+      isScissorsCandidate = true;
+    }
+
+    // ★追加: 単発カーブレールツールで既存の直線レールをクリックした場合の自動分岐化
+    let switchBranchSide = this.currentSwitchSide;
+    let isSwitchCandidate = false;
+
+    if ((effectiveTool === 'rail-curve' || effectiveTool === 'rail-curve-elevated') && existingTile && (existingTile.type === 'rail_ground' || existingTile.type === 'rail_elevated')) {
+      const straightAxis = (existingTile.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
+      const straightDirs = straightAxis === 0 ? [0, 2] : [1, 3];
+      const curveDir = CURVE_DIR_ORDER[targetRotation];
+      if (curveDir) {
+        const [cA, cB] = WorldMap.curveDirToIndices(curveDir);
+        const sharedDir = [cA, cB].find(d => straightDirs.includes(d));
+        const branchDir = [cA, cB].find(d => !straightDirs.includes(d));
+        if (sharedDir !== undefined && branchDir !== undefined) {
+          const forward = WorldMap.opposite(sharedDir);
+          const branchSide = (WorldMap.rotateCW(forward) === branchDir) ? 'right' : 'left';
+          const switchTool: ActiveTool = existingTile.type === 'rail_elevated' ? 'point-switch-elevated' : 'point-switch';
+          effectiveTool = switchTool;
+          targetRotation = forward;
+          switchBranchSide = branchSide;
+          isSwitchCandidate = true;
+        }
+      }
+    }
+
+    const isPointSwitchTool = effectiveTool.startsWith('point-switch');
+    if (isPointSwitchTool) {
+      if (this.trainManager.isTileOccupiedByTrain(x, z, curLayer)) {
+        this.uiManager.showToast('設置不可', '列車が走行・停車中の位置には設置できません。', 'warning');
+        return;
+      }
+      if (existingTile && !this.worldMap.isOverwritableTrack(x, z, curLayer)) {
+        this.uiManager.showToast('設置不可', '駅や建物、道路が存在する位置には分岐器を設置できません。', 'warning');
+        return;
+      }
+      if (existingTile && (existingTile.type === 'rail_ground' || existingTile.type === 'rail_elevated')) {
+        // 既存の直線レールがある場合、その軸に合わせて通過方向を整合
+        const straightAxis = (existingTile.rotation ?? 0) % 2;
+        if (targetRotation % 2 !== straightAxis) {
+          targetRotation = straightAxis === 0 ? 0 : 1;
+        }
+        if (existingTile.type === 'rail_elevated') {
+          effectiveTool = 'point-switch-elevated';
+        }
+      }
+      isSwitchCandidate = true;
+    }
+
     const isCrossingCandidate = isLevelCrossingTool || isLevelCrossingCombination(effectiveTool, this.currentRotation, existingTile, curLayer);
 
-    if (this.worldMap.isPermanentTrackOrStation(x, z, curLayer) && !isCrossingCandidate) {
+    if (this.worldMap.isPermanentTrackOrStation(x, z, curLayer) && !isCrossingCandidate && !isSwitchCandidate && !isScissorsCandidate) {
       this.uiManager.showToast('設置不可', '線路や駅が存在する位置には設置できません。', 'warning');
       return;
     }
 
-    if (existingTile && existingTile.type !== 'empty' && !isInfrastructureTool(effectiveTool) && !isCrossingCandidate) {
-      this.uiManager.showToast('設置不可', '既存の施設や道路が存在する位置には設置できません。', 'warning');
+    // 既存が道路または踏切で直交踏切にならない場合は敷設不可
+    if (existingTile && (existingTile.type === 'road' || existingTile.type === 'level_crossing') && !isCrossingCandidate) {
+      this.uiManager.showToast('設置不可', '道路と線路が直交しない位置には敷設できません（踏切になりません）。', 'warning');
       return;
+    }
+
+    // 農地(farmland)と自然(nature)のみ、線路・道路の敷設時に自動で切り拓いて上書き可能とする（建物は誤破壊と人口バグ防止のため保護）
+    const isClearableTerrain = existingTile && (existingTile.type === 'farmland' || existingTile.type === 'nature');
+    if (existingTile && existingTile.type !== 'empty' && !isCrossingCandidate && !isSwitchCandidate && !isScissorsCandidate) {
+      if (!isInfrastructureTool(effectiveTool) || !isClearableTerrain) {
+        this.uiManager.showToast('設置不可', '既存の建物や施設が存在する位置には敷設できません（撤去ツールをご利用ください）。', 'warning');
+        return;
+      }
     }
 
     const item: PendingItem = {
@@ -1177,7 +1429,7 @@ export class PlacementController {
       layer: curLayer,
       rotation: targetRotation,
       ghost: null,
-      switchBranchSide: effectiveTool.startsWith('point-switch') ? this.currentSwitchSide : undefined
+      switchBranchSide
     };
     this.pendingItems.push(item);
     this.refreshGhostFor(item);
@@ -1194,9 +1446,11 @@ export class PlacementController {
     const positions: Array<{ x: number; z: number; layer: GridLayer }> = [];
 
     if (tool === 'rail-slope' || tool === 'rail-slope-underground') {
-      const rot = item.rotation;
-      const axis: [number, number] = rot === 1 ? [1, 3] : [0, 2];
-      const stepDir = WorldMap.DIRS[axis[1]];
+      const axisVal = item.rotation % 2;
+      const reversed = item.rotation >= 2;
+      const axisDirs: [number, number] = axisVal === 1 ? [1, 3] : [0, 2];
+      const [, stepIdx] = reversed ? [axisDirs[1], axisDirs[0]] : [axisDirs[0], axisDirs[1]];
+      const stepDir = WorldMap.DIRS[stepIdx];
       for (let i = 0; i < 4; i++) {
         const tx = item.x + stepDir.x * i;
         const tz = item.z + stepDir.z * i;
@@ -1257,7 +1511,8 @@ export class PlacementController {
       }
     }
 
-    if (!this.economy.spendFunds(total, true)) {
+    // 資金残高・投資制限の事前確認（引き落としは設置完了後の実質コストに対して行う）
+    if (!this.economy.canSpend(total, true)) {
       this.uiManager.showToast('資金不足', `資金が不足しています（必要: ¥${total.toLocaleString('ja-JP')}）。`, 'danger');
       return;
     }
@@ -1345,17 +1600,20 @@ export class PlacementController {
     }
 
     if (invalidStationGroupIds.size > 0) {
-      this.uiManager.showToast('駅設置不可', '線路や他の駅・障害物と重なっているため、駅の設置を中止しました（全額返金）。', 'danger');
+      this.uiManager.showToast('駅設置不可', '線路や他の駅・障害物と重なっているため、駅の設置を中止しました。', 'danger');
     }
 
-    if (refund > 0) {
-      this.economy.spendFunds(-refund, true);
+    // 実際に設置に成功した正味の実質コスト（netCost）のみを引き落とし・固定資産台帳登録
+    const netCost = total - refund;
+    if (netCost > 0) {
+      this.economy.spendFunds(netCost, true, 'infrastructure', `${successfullyPlacedItems.length}件のインフラ設備`);
     }
+
     if (placedCount > 0) {
       this.audioManager.playBuildSound();
     }
     if (placedCount < items.length && invalidStationGroupIds.size === 0) {
-      this.uiManager.showToast('一部設置不可', `${items.length - placedCount}件はスペース不足等のため設置できませんでした（その分は返金されます）。`, 'warning');
+      this.uiManager.showToast('一部設置不可', `${items.length - placedCount}件はスペース不足等のため設置できませんでした。`, 'warning');
     }
 
     // 設置成功した駅・信号場グループを StationManager にホーム（番線）として登録
@@ -1562,12 +1820,23 @@ export class PlacementController {
       const isCrossingCandidate = isLevelCrossingCombination(tool, rotation, existingTile, pos.layer) ||
         (tool === 'level-crossing' && pos.layer === 1 && (!existingTile || existingTile.type === 'empty' || existingTile.type === 'road' || existingTile.type === 'rail_ground'));
 
-      if (!isCompatibleTrack && !isCrossingCandidate) {
+      const isSwitchCandidate = tool.startsWith('point-switch') && this.worldMap.isOverwritableTrack(pos.x, pos.z, pos.layer);
+      const isScissorsCandidate = tool.startsWith('scissors-crossing') && this.worldMap.isOverwritableTrack(pos.x, pos.z, pos.layer);
+
+      if (!isCompatibleTrack && !isCrossingCandidate && !isSwitchCandidate && !isScissorsCandidate) {
         if (this.worldMap.isPermanentTrackOrStation(pos.x, pos.z, pos.layer)) {
           return false;
         }
-        if (existingTile && existingTile.type !== 'empty') {
+        // 既存が道路または踏切で直交踏切にならない場合は敷設不可
+        if (existingTile && (existingTile.type === 'road' || existingTile.type === 'level_crossing')) {
           return false;
+        }
+        // 農地(farmland)と自然(nature)のみ、線路・道路の敷設時に自動で切り拓いて上書き可能とする（建物は誤破壊と人口バグ防止のため保護）
+        const isClearableTerrain = existingTile && (existingTile.type === 'farmland' || existingTile.type === 'nature');
+        if (existingTile && existingTile.type !== 'empty') {
+          if (!isInfrastructureTool || isStationTool || !isClearableTerrain) {
+            return false;
+          }
         }
       }
       if (this.trainManager.isTileOccupiedByTrain(pos.x, pos.z, pos.layer)) {
@@ -1620,6 +1889,18 @@ export class PlacementController {
       return this.worldMap.placeLevelCrossing(x, z, railAxis, layer);
     }
 
+    // 道路と線路の直交交差による踏切自動生成（または既存踏切への同一軸通過）
+    if (layer === 1 && (tool === 'road' || tool === 'rail-straight')) {
+      const existing = this.worldMap.getTile(x, z, 1);
+      if (existing && isLevelCrossingCombination(tool, rotation, existing, 1)) {
+        if (existing.type === 'level_crossing') {
+          return true; // 既存踏切への同一軸通過
+        }
+        const railAxis = tool === 'rail-straight' ? (rotation % 2) : (1 - (rotation % 2));
+        return this.worldMap.placeLevelCrossing(x, z, railAxis, 1);
+      }
+    }
+
     const config = TOOL_CONFIG[tool];
     if (config && config.tileType) {
       const tileRotation = ROTATABLE_TOOLS.includes(tool) ? rotation % 2 : 0;
@@ -1627,6 +1908,9 @@ export class PlacementController {
       if (tool === 'cargo-station' && layer >= 2) {
         targetTileType = 'cargo_station_elevated';
       }
+      const existingTile = this.worldMap.getTile(x, z, layer);
+      const prevPop = UndoManager.getTilePopulation(existingTile?.type, existingTile?.level);
+
       const ok = this.worldMap.setTile(x, z, targetTileType, tileRotation, 1, stationPlatformSide, layer);
       if (ok) {
         const isStationOrYard = tool === 'station-small' || tool === 'station-elevated' || tool === 'signal-yard' || tool === 'cargo-station';
@@ -1658,12 +1942,10 @@ export class PlacementController {
             }
           }
         }
-        if (config.tileType === 'residence') {
-          this.economy.addPopulation(30);
-        } else if (config.tileType === 'commercial') {
-          this.economy.addPopulation(100);
-        } else if (config.tileType === 'industrial') {
-          this.economy.addPopulation(50);
+        const newPop = UndoManager.getTilePopulation(config.tileType, 1);
+        const popDelta = newPop - prevPop;
+        if (popDelta !== 0) {
+          this.economy.addPopulation(popDelta);
         }
       }
       return ok;
@@ -1718,9 +2000,24 @@ export class PlacementController {
       } else {
         const lastItem = this.pendingItems[this.pendingItems.length - 1];
         if (ROTATABLE_TOOLS.includes(lastItem.tool)) {
-          lastItem.rotation = this.currentRotation;
-          if (lastItem.tool.startsWith('point-switch')) {
-            lastItem.switchBranchSide = this.currentSwitchSide;
+          const existingAtLast = this.worldMap.getTile(lastItem.x, lastItem.z, lastItem.layer ?? this.worldMap.activeLayer);
+          if (lastItem.tool.startsWith('point-switch') && existingAtLast && (existingAtLast.type === 'rail_ground' || existingAtLast.type === 'rail_elevated')) {
+            // 既存の直線レール上の分岐器は、レールの軸に沿った2方向 × 左右2方向 の4通りで循環
+            const straightAxis = (existingAtLast.rotation ?? 0) % 2;
+            const dirs = straightAxis === 0 ? [0, 2] : [1, 3];
+            if (lastItem.switchBranchSide === 'right') {
+              lastItem.switchBranchSide = 'left';
+            } else {
+              lastItem.switchBranchSide = 'right';
+              lastItem.rotation = (lastItem.rotation === dirs[0]) ? dirs[1] : dirs[0];
+            }
+            this.currentRotation = lastItem.rotation;
+            this.currentSwitchSide = lastItem.switchBranchSide;
+          } else {
+            lastItem.rotation = this.currentRotation;
+            if (lastItem.tool.startsWith('point-switch')) {
+              lastItem.switchBranchSide = this.currentSwitchSide;
+            }
           }
           this.refreshGhostFor(lastItem);
         }
@@ -1795,12 +2092,12 @@ export class PlacementController {
         const pending = fleetCtrl.getPendingDeploy()!;
         this.uiManager.setRotationHint(
           true,
-          `🚆 【${item?.name}】仮配置中: 🔄回転(Rキー)で向き切替（進行方向: ${DIR_LABEL[pending.directionIdx]}）/「設置を決定」で運行開始`
+          `🚆 ${item?.name} 仮配置中 — 進行方向: ${DIR_LABEL[pending.directionIdx]} ｜ Rキーで向き変更・「設置を決定」で運行開始`
         );
       } else {
         this.uiManager.setRotationHint(
           true,
-          `🚆 【${item?.name}】配置先を選択: 線路をクリック（進行方向: ${DIR_LABEL[fleetCtrl.deployDirectionIdx]}）`
+          `🚆 ${item?.name} — 配置する線路をクリック  進行方向: ${DIR_LABEL[fleetCtrl.deployDirectionIdx]}`
         );
       }
       return;
@@ -1829,28 +2126,28 @@ export class PlacementController {
       if (tool === 'rail-curve' || tool === 'rail-curve-elevated') {
         label = `向き: ${CURVE_DIR_LABEL[CURVE_DIR_ORDER[this.currentRotation]]}`;
       } else if (isSwitch) {
-        label = `通過方向: ${DIR_LABEL[this.currentRotation]}（分岐: ${this.currentSwitchSide === 'left' ? '左' : '右'}）`;
+        label = `通過: ${DIR_LABEL[this.currentRotation]} ／ 分岐: ${this.currentSwitchSide === 'left' ? '左' : '右'}`;
       } else if (tool === 'scissors-crossing' || tool === 'scissors-crossing-elevated') {
-        label = `並走方向: ${AXIS_LABEL[this.currentRotation % 2]}`;
+        label = `並走: ${AXIS_LABEL[this.currentRotation % 2]}`;
       } else if (tool === 'rail-slope') {
         const axis = this.currentRotation % 2;
         const reversed = this.currentRotation >= 2;
         const axisDirs = axis === 1 ? ['西', '東'] : ['北', '南'];
         const [low, high] = reversed ? [axisDirs[1], axisDirs[0]] : axisDirs;
         const curL = this.worldMap.activeLayer;
-        const lowL = curL <= 1 ? '地上1F' : `${curL}F`;
+        const lowL = curL <= 1 ? '1F' : `${curL}F`;
         const highL = `${curL + 1}F`;
-        label = `上り方向: ${low} → ${high} (${lowL} → ${highL}へ上り)`;
+        label = `上り: ${low} → ${high} [${lowL} → ${highL}]`;
       } else if (tool === 'rail-slope-underground') {
         const axis = this.currentRotation % 2;
         const reversed = this.currentRotation >= 2;
         const axisDirs = axis === 1 ? ['西', '東'] : ['北', '南'];
         const [entry, exit] = reversed ? [axisDirs[1], axisDirs[0]] : axisDirs;
-        label = `潜入方向: ${entry} → ${exit} (地上→地下)`;
+        label = `地下スロープ: ${entry} → ${exit} [1F → B1]`;
       } else if (isStation) {
         const sideText = this.currentStationSide === 'left' ? '左' : '右';
         const axisText = AXIS_LABEL[this.currentRotation % 2];
-        label = `向き: ${axisText}（${this.currentStationLength}両・ホーム${sideText}側）`;
+        label = `向き: ${axisText} ／ ${this.currentStationLength}両・ホーム${sideText}側`;
         this.uiManager.setStationRotationText(axisText);
 
         if (!hasPending) {
@@ -1859,7 +2156,7 @@ export class PlacementController {
         }
       } else if (tool === 'level-crossing') {
         const railAxis = this.currentRotation % 2;
-        label = `踏切（線路: ${AXIS_LABEL[railAxis]} / 道路: ${AXIS_LABEL[1 - railAxis]}）`;
+        label = `踏切 — 線路: ${AXIS_LABEL[railAxis]} ／ 道路: ${AXIS_LABEL[1 - railAxis]}`;
       } else {
         label = `向き: ${AXIS_LABEL[this.currentRotation % 2]}`;
       }
@@ -1870,7 +2167,7 @@ export class PlacementController {
 
     if (hasPending) {
       const total = this.pendingItems.reduce((sum, it) => sum + (TOOL_CONFIG[it.tool]?.cost || 0), 0);
-      label = `🔶 仮置き ${this.pendingItems.length}件 (¥${total.toLocaleString()}) | ${label}`;
+      label = `🔶 仮置き ${this.pendingItems.length}件 ¥${total.toLocaleString()} ｜ ${label}`;
     }
 
     this.uiManager.setRotationHint(true, label);

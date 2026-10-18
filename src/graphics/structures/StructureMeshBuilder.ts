@@ -446,4 +446,143 @@ export class StructureMeshBuilder {
 
     return group;
   }
+
+  /**
+   * 田畑・農地（黄金色の稲穂、緑の畝、ビニールハウス）
+   * BuildingBakery でベイクしてドローコール負荷を最小化
+   */
+  public static createFarmland(variation: number = 0): THREE.Group {
+    const safeVar = Math.abs(variation) % 3;
+    const key = `farmland_${safeVar}`;
+    return BuildingBakery.build(key, () => this.buildFarmlandSource(safeVar));
+  }
+
+  /**
+   * 田畑・農地の原型メッシュ構築
+   * @param variation 0: 黄金色の水田・稲穂（案山子付き）, 1: 緑の畝・野菜畑（木箱付き）, 2: ビニールハウス農園（緑の畝併設）
+   */
+  private static buildFarmlandSource(variation: number): THREE.Group {
+    const group = new THREE.Group();
+
+    // 1. 畑の土台（あぜ道・土） 1.92 × 1.92 × 0.03
+    const soil = new THREE.Mesh(new THREE.BoxGeometry(1.92, 0.03, 1.92), GameMaterials.farmlandSoilMat);
+    soil.position.y = 0.015;
+    soil.receiveShadow = true;
+    group.add(soil);
+
+    if (variation === 0) {
+      // === バリエーション0: 黄金色の水田・稲穂 ===
+      // 4列の黄金色の稲穂の畝
+      const paddyWidth = 0.34;
+      const paddyLength = 1.76;
+      const paddyHeight = 0.07;
+      const paddyGeo = new THREE.BoxGeometry(paddyWidth, paddyHeight, paddyLength);
+      const xs = [-0.55, -0.18, 0.18, 0.55];
+      for (const x of xs) {
+        const paddy = new THREE.Mesh(paddyGeo, GameMaterials.farmlandPaddyMat);
+        paddy.position.set(x, 0.03 + paddyHeight / 2, 0);
+        paddy.castShadow = true;
+        paddy.receiveShadow = true;
+        group.add(paddy);
+      }
+
+      // 小さな木製案山子（かかし）
+      const poleGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.35, 6);
+      const pole = new THREE.Mesh(poleGeo, GameMaterials.woodTrunkMat);
+      pole.position.set(0.78, 0.2, 0.75);
+      pole.castShadow = true;
+      group.add(pole);
+
+      const crossGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.22, 6);
+      const cross = new THREE.Mesh(crossGeo, GameMaterials.woodTrunkMat);
+      cross.rotation.z = Math.PI / 2;
+      cross.position.set(0.78, 0.26, 0.75);
+      cross.castShadow = true;
+      group.add(cross);
+
+      const headGeo = new THREE.SphereGeometry(0.035, 6, 6);
+      const head = new THREE.Mesh(headGeo, GameMaterials.wallMats[0]);
+      head.position.set(0.78, 0.38, 0.75);
+      group.add(head);
+
+    } else if (variation === 1) {
+      // === バリエーション1: 緑の畝・野菜畑 ===
+      // 4列の緑の畝
+      const ridgeWidth = 0.32;
+      const ridgeLength = 1.76;
+      const ridgeHeight = 0.065;
+      const ridgeGeo = new THREE.BoxGeometry(ridgeWidth, ridgeHeight, ridgeLength);
+      const xs = [-0.55, -0.18, 0.18, 0.55];
+      for (const x of xs) {
+        const ridge = new THREE.Mesh(ridgeGeo, GameMaterials.farmlandCropMat);
+        ridge.position.set(x, 0.03 + ridgeHeight / 2, 0);
+        ridge.castShadow = true;
+        ridge.receiveShadow = true;
+        group.add(ridge);
+      }
+
+      // 端に置かれた農作業用の収穫木箱
+      const crateGeo = new THREE.BoxGeometry(0.18, 0.14, 0.18);
+      const crate1 = new THREE.Mesh(crateGeo, GameMaterials.woodTrunkMat);
+      crate1.position.set(-0.78, 0.03 + 0.07, 0.7);
+      crate1.castShadow = true;
+      group.add(crate1);
+
+      const crate2 = new THREE.Mesh(crateGeo, GameMaterials.woodTrunkMat);
+      crate2.position.set(-0.78, 0.03 + 0.07, 0.48);
+      crate2.rotation.y = 0.2;
+      crate2.castShadow = true;
+      group.add(crate2);
+
+    } else {
+      // === バリエーション2: 小さなビニールハウス農園 ＋ 緑の畝 ===
+      // 西側半分（x = -0.42）にビニールハウス（幅 0.72, 長さ 1.6, 高さ 0.42）
+      const houseW = 0.72;
+      const houseL = 1.6;
+      const houseH = 0.32;
+
+      // ビニールハウス本体（半透明のため濃い影を落とさないよう castShadow は false）
+      const baseBox = new THREE.Mesh(
+        new THREE.BoxGeometry(houseW, houseH, houseL),
+        GameMaterials.greenhouseSheetMat
+      );
+      baseBox.position.set(-0.45, 0.03 + houseH / 2, 0);
+      baseBox.castShadow = false;
+      baseBox.receiveShadow = true;
+      group.add(baseBox);
+
+      // 屋根（アーチ型シリンダー：半透明のため castShadow は false）
+      const roofGeo = new THREE.CylinderGeometry(houseW / 2, houseW / 2, houseL, 8, 1, false, 0, Math.PI);
+      const roof = new THREE.Mesh(roofGeo, GameMaterials.greenhouseSheetMat);
+      roof.rotation.x = Math.PI / 2;
+      roof.rotation.z = Math.PI;
+      roof.position.set(-0.45, 0.03 + houseH, 0);
+      roof.castShadow = false;
+      roof.receiveShadow = true;
+      group.add(roof);
+
+      // 前後のフレーム支柱（フレーム自体は影を落とす）
+      for (const z of [-houseL / 2 + 0.02, houseL / 2 - 0.02]) {
+        const frame = new THREE.Mesh(
+          new THREE.BoxGeometry(houseW + 0.02, 0.03, 0.03),
+          GameMaterials.poleMat
+        );
+        frame.position.set(-0.45, 0.03 + houseH, z);
+        frame.castShadow = true;
+        group.add(frame);
+      }
+
+      // 東側半分（x = 0.22, 0.60）に緑の畝 2列
+      const ridgeGeo = new THREE.BoxGeometry(0.3, 0.065, 1.76);
+      for (const x of [0.22, 0.60]) {
+        const ridge = new THREE.Mesh(ridgeGeo, GameMaterials.farmlandCropMat);
+        ridge.position.set(x, 0.03 + 0.0325, 0);
+        ridge.castShadow = true;
+        ridge.receiveShadow = true;
+        group.add(ridge);
+      }
+    }
+
+    return group;
+  }
 }

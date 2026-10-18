@@ -75,7 +75,17 @@ export class TrainCollisionSystem {
     if (!leaderTile.type.startsWith('station')) return false;
 
     const targetTileData = worldMap.getTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer);
-    const followerStationGroupId = followerTile.stationGroupId ?? targetTileData?.stationGroupId;
+    let followerStationGroupId = followerTile.stationGroupId ?? targetTileData?.stationGroupId;
+
+    // 手前の線路から駅へ進入中（targetTileの次が駅）の場合も検出
+    if (!followerStationGroupId) {
+      const next1 = this.kinematics.findNextTrackTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer, follower.direction, false, worldMap);
+      if (next1) {
+        const next1Tile = worldMap.getTile(next1.x, next1.z, (next1.layer ?? follower.targetTile.layer) as GridLayer);
+        followerStationGroupId = next1Tile?.stationGroupId;
+      }
+    }
+
     if (!followerStationGroupId || followerStationGroupId !== leaderTile.stationGroupId) return false;
 
     const effectiveLength = worldMap.getStationRunLength(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer) || 1;
@@ -108,8 +118,11 @@ export class TrainCollisionSystem {
 
       if (trainA.isStopped) {
         trainA.isAtsBraked = false;
+        trainA.isApproachingCouple = false;
         continue;
       }
+
+      trainA.isApproachingCouple = false;
 
       const candidateTrains = new Set<TrainInstance>();
 
@@ -153,6 +166,7 @@ export class TrainCollisionSystem {
 
       if (candidateTrains.size === 0) {
         trainA.isAtsBraked = false;
+        trainA.isApproachingCouple = false;
         continue;
       }
 
@@ -162,6 +176,7 @@ export class TrainCollisionSystem {
       if (speedMultiplier >= 60) {
         for (const trainB of candidateTrains) {
           if (this.canBypassAtsForCoupling(trainA, trainB, worldMap)) {
+            trainA.isApproachingCouple = true;
             continue;
           }
           mustStop = true;
@@ -203,6 +218,8 @@ export class TrainCollisionSystem {
 
         if (isAhead && closestDist < 4.2) {
           if (this.canBypassAtsForCoupling(trainA, trainB, worldMap)) {
+            // 併合進入時は安全のため徐行速度に減速して最後尾へアプローチ
+            trainA.isApproachingCouple = true;
             continue;
           }
           mustStop = true;
@@ -211,6 +228,7 @@ export class TrainCollisionSystem {
 
         if (closestDist < 2.0) {
           if (this.canBypassAtsForCoupling(trainA, trainB, worldMap)) {
+            trainA.isApproachingCouple = true;
             continue;
           }
           mustStop = true;

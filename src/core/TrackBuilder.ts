@@ -13,6 +13,9 @@ export interface DragTrackSegment {
   rotation: number;
   curveDir?: CurveDirection;
   isSlope?: boolean;
+  isCorner?: boolean;
+  switchBranchSide?: 'left' | 'right';
+  isAutoSwitch?: boolean;
 }
 
 /**
@@ -194,7 +197,11 @@ export class TrackBuilder {
       const isTunnel = seg.layer < 0 || seg.tool === 'rail-tunnel';
       const baseH = layerToHeight(seg.layer);
       let mesh: THREE.Group;
-      if (seg.curveDir) {
+      if (seg.tool === 'road') {
+        mesh = ModelFactory.createRoad(seg.rotation);
+      } else if (seg.tool.startsWith('point-switch')) {
+        mesh = ModelFactory.createSwitchHub(seg.rotation, false, isElevated, seg.switchBranchSide ?? 'right', baseH, isTunnel);
+      } else if (seg.curveDir) {
         mesh = ModelFactory.createCurveTrackSegment(seg.curveDir, isElevated, baseH, isTunnel);
       } else if (isTunnel) {
         mesh = ModelFactory.createTunnelTrack(seg.rotation);

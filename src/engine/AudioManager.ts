@@ -505,7 +505,7 @@ export class AudioManager {
   /**
    * 前面展望（Cab View）開始時の車内モーター/走行音
    */
-  public startCabMotorSound(initialSpeed: number = 0) {
+  public startCabMotorSound(_initialSpeed: number = 0) {
     if (this.isMuted) return;
     this.initContext();
     if (!this.ctx || !this.masterGain || this.isCabActive) return;
@@ -513,7 +513,8 @@ export class AudioManager {
     this.isCabActive = true;
     const t = this.ctx.currentTime;
 
-    // 1. 車内VVVFインバータ音オシレーター
+    // 1. 車内VVVFインバータ音オシレーター（鋸歯状波モーター音は不要なため無効化し、台車走行音のみ再生）
+    /*
     this.cabMotorOsc = this.ctx.createOscillator();
     this.cabMotorGain = this.ctx.createGain();
     this.cabMotorOsc.type = 'sawtooth';
@@ -531,6 +532,7 @@ export class AudioManager {
     filter.connect(this.cabMotorGain);
     this.cabMotorGain.connect(this.masterGain);
     this.cabMotorOsc.start(t);
+    */
 
     // 2. 台車フロアノイズ（車内ランブル音）
     if (this.noiseBuffer) {

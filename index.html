@@ -177,31 +177,31 @@
       <aside id="side-controls-dock" class="side-controls-dock" aria-label="ゲーム操作コントロール">
         <!-- 時間進行速度コントロール -->
         <div id="side-speed-controls" class="side-control-group">
-          <button id="btn-speed-pause" class="speed-btn" title="一時停止 (⏸)">
+          <button id="btn-speed-pause" class="speed-btn" title="一時停止">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <rect x="6" y="4" width="4" height="16"></rect>
               <rect x="14" y="4" width="4" height="16"></rect>
             </svg>
           </button>
-          <button id="btn-speed-1" class="speed-btn active" title="等速 (▶ 1分/秒)">
+          <button id="btn-speed-1" class="speed-btn active" title="等速: 1分/秒">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
           </button>
-          <button id="btn-speed-2" class="speed-btn" title="3倍速 (▶▶ 3分/秒)">
+          <button id="btn-speed-2" class="speed-btn" title="3倍速: 3分/秒">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <polygon points="3 4 12 12 3 20 3 4"></polygon>
               <polygon points="12 4 21 12 12 20 12 4"></polygon>
             </svg>
           </button>
-          <button id="btn-speed-3" class="speed-btn" title="10倍速 (⏩ 10分/秒)">
+          <button id="btn-speed-3" class="speed-btn" title="10倍速: 10分/秒">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <polygon points="2 4 10 12 2 20 2 4"></polygon>
               <polygon points="9 4 17 12 9 20 9 4"></polygon>
               <polygon points="16 4 22 12 16 20 16 4"></polygon>
             </svg>
           </button>
-          <button id="btn-speed-4" class="speed-btn" title="超高速 (▷▷▷▷ 1時間/秒)">
+          <button id="btn-speed-4" class="speed-btn" title="60倍速: 1時間/秒">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <polygon points="1 4 6.5 12 1 20 1 4"></polygon>
               <polygon points="6.5 4 12 12 6.5 20 6.5 4"></polygon>
@@ -209,7 +209,7 @@
               <polygon points="17.5 4 23 12 17.5 20 17.5 4"></polygon>
             </svg>
           </button>
-          <button id="btn-speed-5" class="speed-btn" title="極超高速 (▷▷▷▷▷ 12時間/秒)">
+          <button id="btn-speed-5" class="speed-btn" title="720倍速: 12時間/秒">
             <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <polygon points="1 4 4.8 12 1 20 1 4"></polygon>
               <polygon points="5.3 4 9.1 12 5.3 20 5.3 4"></polygon>
@@ -222,15 +222,31 @@
 
         <div class="side-dock-divider"></div>
 
-        <!-- クォータービュー4方向回転コントロール -->
+        <!-- クォータービュー4方向回転コントロール & コンパス -->
         <div id="view-rotation-controls" class="side-control-group">
-          <button id="btn-rotate-ccw" class="rotation-step-btn" title="反時計回りに90度回転 (Qキー)">
+          <button id="btn-rotate-ccw" class="rotation-step-btn" title="反時計回りに90度回転 [Q]">
             <svg class="action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <polyline points="1 4 1 10 7 10"></polyline>
               <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
             </svg>
           </button>
-          <button id="btn-rotate-cw" class="rotation-step-btn" title="時計回りに90度回転 (Eキー)">
+          <button id="btn-compass" class="compass-btn" title="方位コンパス [クリックで北向きにリセット]">
+            <svg class="compass-svg" viewBox="0 0 40 40">
+              <circle cx="20" cy="20" r="18" fill="rgba(15, 23, 42, 0.75)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="1.5" />
+              <g id="compass-needle-group">
+                <!-- 北の赤い針 -->
+                <polygon points="20,6 23.5,18.5 16.5,18.5" fill="#ef4444" />
+                <!-- 南の白い針 -->
+                <polygon points="20,34 23.5,21.5 16.5,21.5" fill="#94a3b8" />
+                <text x="20" y="11" text-anchor="middle" font-size="6.5" font-weight="900" fill="#f87171" font-family="'Outfit', sans-serif">N</text>
+                <text x="20" y="32" text-anchor="middle" font-size="5.5" font-weight="700" fill="#64748b" font-family="'Outfit', sans-serif">S</text>
+                <text x="32" y="22" text-anchor="middle" font-size="5.5" font-weight="700" fill="#64748b" font-family="'Outfit', sans-serif">E</text>
+                <text x="8" y="22" text-anchor="middle" font-size="5.5" font-weight="700" fill="#64748b" font-family="'Outfit', sans-serif">W</text>
+                <circle cx="20" cy="20" r="2.5" fill="#f8fafc" />
+              </g>
+            </svg>
+          </button>
+          <button id="btn-rotate-cw" class="rotation-step-btn" title="時計回りに90度回転 [E]">
             <svg class="action-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
               <polyline points="23 4 23 10 17 10"></polyline>
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
@@ -243,15 +259,15 @@
       <aside id="floor-slicer" class="floor-slicer">
         <div class="floor-slicer-title">階層</div>
         <div class="floor-slicer-buttons">
-          <button class="floor-btn" data-layer="all" title="全階層表示 (地上)">All</button>
-          <button class="floor-btn" data-layer="5" title="地上5F (展望高架)">5F</button>
-          <button class="floor-btn" data-layer="4" title="地上4F (4段目高架)">4F</button>
-          <button class="floor-btn" data-layer="3" title="地上3F (3段目高架)">3F</button>
-          <button class="floor-btn" data-layer="2" title="地上2F (標準高架・鉄橋)">2F</button>
-          <button class="floor-btn active" data-layer="1" title="地上1F (標準地表)">1F</button>
+          <button class="floor-btn" data-layer="all" title="全階層表示">All</button>
+          <button class="floor-btn" data-layer="5" title="地上5F: 展望高架">5F</button>
+          <button class="floor-btn" data-layer="4" title="地上4F: 高架">4F</button>
+          <button class="floor-btn" data-layer="3" title="地上3F: 高架">3F</button>
+          <button class="floor-btn" data-layer="2" title="地上2F: 標準高架・鉄橋">2F</button>
+          <button class="floor-btn active" data-layer="1" title="地上1F: 地表">1F</button>
           <div class="floor-divider"></div>
-          <button class="floor-btn underground" data-layer="-1" title="地下B1F (地下鉄・トンネル)">B1</button>
-          <button class="floor-btn underground" data-layer="-2" title="地下B2F (深層地下鉄)">B2</button>
+          <button class="floor-btn underground" data-layer="-1" title="地下B1F: 地下鉄・トンネル">B1</button>
+          <button class="floor-btn underground" data-layer="-2" title="地下B2F: 深層地下鉄">B2</button>
         </div>
       </aside>
 
@@ -498,46 +514,42 @@
           </div>
           <div class="modal-body help-body">
             <div class="help-section">
-              <h4>マウス・カメラ操作</h4>
+              <h4>基本操作・カメラ移動</h4>
               <ul>
-                <li><b>設置・選択・決定</b>: <b>左クリック</b>（線路や駅の仮置き、タイルや列車の選択、撤去）</li>
-                <li><b>向きの回転</b>: <b>右クリック</b> または <b>Rキー</b>（駅設置時は上部バーの「🔄 向き」ボタン、仮配置中は画面下の「回転」ボタン）で方角をその場で変更</li>
-                <li><b>カメラ視点移動</b>: マウス<b>左ドラッグ</b> / スマホ1本指ドラッグ / キーボード WASD または 矢印キー</li>
-                <li><b>カメラ視点回転</b>: マウス<b>右ドラッグ</b>（または中ドラッグ）/ 2本指ドラッグ</li>
-                <li><b>ズーム</b>: マウスホイール / ピンチイン・アウト</li>
-                <li><b>視点切替</b>: 右上視点アイコンで自由視点・前面展望に切替</li>
-                <li><b>資金無限モード</b>: ヘッダーの資金表示をクリック または <b>Mキー</b> で切替</li>
+                <li><b>選択・建設</b>: 左クリックで施設選択や単発配置。線路・道路は<b>左ドラッグ</b>で長距離の一括敷設とL字カーブ補間が可能</li>
+                <li><b>向きの回転</b>: <b>右クリック</b> または <b>Rキー</b> で設置向きを回転。仮置き確定は <b>Enter</b>、取消は <b>Esc</b>、元に戻すは <b>Ctrl+Z</b></li>
+                <li><b>視点移動・ズーム</b>: 右ドラッグ / 中ドラッグ / WASD・矢印キー（選択ツール時は左ドラッグも可）。ホイールまたはピンチでズーム</li>
+                <li><b>カメラ回転</b>: <b>Q / Eキー</b> または画面右の回転ボタンで90度ずつ回転。コンパスクリックで北向きにリセット</li>
+                <li><b>時間速度・資金無限</b>: 数字キー <b>0〜5</b> で時間速度切替。ヘッダーの資金クリック または <b>Mキー</b> で資金無限モード切替</li>
               </ul>
             </div>
 
             <div class="help-section">
-              <h4>建設・仮置き・ダイヤ設定</h4>
+              <h4>立体建設・分岐・信号システム</h4>
               <ul>
-                <li><b>仮置きシステム</b>: 線路や駅を左クリックすると半透明ゴーストで仮置きされます。「設置決定」でまとめて本設置されます。</li>
-                <li><b>駅のホーム左右選択</b>: 駅設置時に「ホーム: 右側 / 左側」ボタンでホームを線路のどちら側に置くか自由に選べます。</li>
-                <li><b>駅のダイヤ設定</b>: 駅をクリックしてインスペクターから「通常停車」「長時間待避」「通過」「折り返し」、および「毎時XX分発車」をダイヤ設定できます。折り返し時は反対側の先頭車が先頭となりその場から逆向きに走ります。</li>
-                <li><b>分岐器のダイヤ設定</b>: 分岐器をクリックして「手動」「直進固定」「分岐固定」「交互切替」「時間帯切替（昼間直進/夜間分岐）」を設定できます。</li>
-                <li><b>シーサスクロッシング</b>: 複線用の2×2マスX字型特別分岐。クリックで「直進」「渡り線A」「渡り線B」を開通切替できます。</li>
-                <li><b>駅の有効長・一括撤去</b>: 駅の有効長（1〜10両）を設定でき、列車は有効長内の駅で1回だけ停車します。撤去ツールで駅をクリックすると、その駅全体を一括撤去できます。</li>
+                <li><b>全7階層スライサー</b>: 画面左の <b>B2〜5F</b> ボタンで建設・表示階層を切替。水辺は2F以上の鉄橋か地下トンネルで通過可能</li>
+                <li><b>勾配・トンネル</b>: 勾配線路は4マスで1階層分昇降。山岳に向かって1Fで線路を引くと自動的に山岳トンネルが開通</li>
+                <li><b>自動分岐・シーサス</b>: 既存の直線レールから別方向へドラッグすると<b>自動で分岐器に変換</b>。複線には2×2マスのシーサスクロッシングも設置可能</li>
+                <li><b>閉塞信号・待避施設</b>: 線路は閉塞区間で保護され、先行列車がいる区間へは手前で自動停止。コストを抑えた待避には「信号場・留置線」が有効</li>
               </ul>
             </div>
 
             <div class="help-section">
-              <h4>車両購入と運行管理</h4>
+              <h4>ダイヤ編成・車両運行</h4>
               <ul>
-                <li><b>車両購入</b>: 下部メニュー「列車」→「車両購入」から6車種（貨物列車・通勤型・近郊型・快速型・急行型・特急型）と両数（1〜10両）を指定して購入すると、車両基地に配属されます。</li>
-                <li><b>車両基地・保有管理</b>: 右上クイックアクションバーの電車アイコン、または車両購入画面の「保有車両・基地管理」ボタンから呼び出せます。</li>
-                <li><b>指定位置・方向への配置</b>: 車両管理から「線路に配置」を押し、配置したい線路を左クリック。進行方向も自由に選択できます。</li>
-                <li><b>車庫への回送</b>: 運行中の列車はいつでも車両管理から「車庫へ回送」して回収できます。</li>
-                <li><b>前面展望</b>: 運行中の列車をクリックすると「前面展望モード」で運転士視点の車窓を楽しめます。</li>
+                <li><b>24時間タイムラインダイヤ</b>: 駅や分岐器を選び <b>Dキー</b> または「ダイヤ設定」から、発車時刻ピン・等間隔パターンダイヤ・通過時間帯・折り返しを設定</li>
+                <li><b>分割・併合</b>: 駅ダイヤで「分割」を有効にすると到着編成を前後に切り離し可能。停車中の編成があるホームに後続が進入すると自動で連結</li>
+                <li><b>系統テンプレート</b>: 作成したダイヤは「系統として保存」し、路線内の複数駅・ホームへ一括適用可能</li>
+                <li><b>車両基地と車窓</b>: 「列車」メニューから車両を購入し線路へ配置。列車クリックで<b>追従カメラ</b>や運転席からの<b>前面展望</b>に切替可能</li>
               </ul>
             </div>
 
             <div class="help-section">
-              <h4>都市の発展と収支</h4>
+              <h4>都市発展・貨物物流・隣町直通</h4>
               <ul>
-                <li><b>乗降客数連動</b>: 駅に列車を停車させて乗客を運ぶほど、駅前の発展スピードが加速し、商業ビルが建ち並びます。乗降客のいない駅周辺はほとんど発展しません。</li>
-                <li><b>駅・列車収支</b>: 駅をクリックすると利用料収入や維持費、列車をクリックすると運賃収入や運行費、乗車率をリアルタイムに確認できます。</li>
+                <li><b>乗降客と街の成長</b>: 駅の1日あたり乗降客数（100人 / 1,000人 / 5,000人 / 10,000人）に応じて、駅周辺の建物数とビル高層化の上限が段階的に解放</li>
+                <li><b>貨物サプライチェーン</b>: 工業施設で毎日17時に生産されるコンテナを、工業エリアの貨物駅から<b>商業エリアの貨物駅</b>へ貨物列車で運ぶと、高収入とともに商業魅力度と旅客需要が大幅に上昇</li>
+                <li><b>隣町との広域直通</b>: マップ東西南北の<b>境界端まで線路を伸ばす</b>と、隣町（新東都・北ノ森・南港・西条重工）と直通開通し、マップ外との長距離旅客・貨物往来が開始</li>
               </ul>
             </div>
           </div>
@@ -555,8 +567,8 @@
           <!-- 財務タブセレクター -->
           <div class="report-tab-bar" id="report-tabs">
             <button class="report-tab-btn active" data-tab="current">今期決算</button>
-            <button class="report-tab-btn" data-tab="monthly">月次推移 (1年)</button>
-            <button class="report-tab-btn" data-tab="yearly">年次推移 (長期)</button>
+            <button class="report-tab-btn" data-tab="monthly">月次推移</button>
+            <button class="report-tab-btn" data-tab="yearly">年次推移</button>
           </div>
 
           <div class="modal-body report-modal-body">
@@ -569,6 +581,8 @@
                 <div class="report-row"><span>不動産・地価価値:</span><span id="rep-land-value">¥0</span></div>
                 <div class="report-row"><span>建設・拡張費用:</span><span id="rep-construction-cost" class="negative">¥0</span></div>
                 <div class="report-row"><span>運行・維持管理費:</span><span id="rep-maintenance-cost" class="negative">¥0</span></div>
+                <div class="report-row"><span>当期減価償却費:</span><span id="rep-depreciation-cost" class="negative">¥0</span></div>
+                <div class="report-row"><span>固定資産簿価:</span><span id="rep-book-value">¥0</span></div>
                 <div class="report-divider"></div>
                 <div class="report-row total"><span>純利益:</span><span id="rep-net-profit">¥0</span></div>
               </div>
@@ -591,9 +605,9 @@
                     <span>画質設定:</span>
                   </label>
                   <select id="select-graphics-quality" class="graphics-select">
-                    <option value="high">高画質 (PC標準・シャドウON・高精細)</option>
-                    <option value="medium">標準 (バランス・軽量影・標準解像度)</option>
-                    <option value="low">軽量 (モバイル推奨・シャドウOFF・低負荷)</option>
+                    <option value="high">高画質 — PC標準・影ON</option>
+                    <option value="medium">標準 — バランス・軽量影</option>
+                    <option value="low">軽量 — モバイル推奨・影OFF</option>
                   </select>
                 </div>
                 <div class="save-load-buttons">

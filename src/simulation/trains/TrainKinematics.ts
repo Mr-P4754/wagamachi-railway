@@ -4,8 +4,6 @@ import { ModelFactory } from '../../models/ModelFactory';
 import { GridLayer } from '../../core/types';
 import { layerToHeight } from '../../core/Grid3D';
 import { GRID_LAYERS } from '../../core/constants';
-import { disposeHierarchy } from '../../graphics/materials';
-import { VehicleMeshBuilder } from '../../graphics/vehicles/VehicleMeshBuilder';
 import { TrainInstance, PathSample } from './types';
 
 /**
@@ -56,7 +54,8 @@ export class TrainKinematics {
            WorldMap.isStationTileType(t.type) ||
            t.type.startsWith('point_switch') ||
            t.type.startsWith('scissors_crossing') ||
-           t.type === 'level_crossing';
+           t.type === 'level_crossing' ||
+           t.type === 'external_connection';
   }
 
   /**
@@ -443,21 +442,10 @@ export class TrainKinematics {
       });
     }
     train.pathHistory = newHistory;
-
-    for (const car of train.cars) {
-      train.mesh.remove(car);
-      disposeHierarchy(car);
-    }
-    const formation = ModelFactory.createTrainFormation(train.model, train.carCount);
-    train.cars = formation.cars;
-    for (const car of train.cars) {
-      train.mesh.add(car);
-    }
     train.isReversed = !train.isReversed;
-    if (train.model.category === 'freight' && train.cargoLoad !== undefined) {
-      VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad);
-    }
 
+    // 車両メッシュ（train.cars）は先頭車から順に lagDist = i * CAR_SPACING で配置されるため、
+    // 破棄・再生成せず既存メッシュをそのまま再利用して高倍速時のGC・GPUスパイクを防止
     // 反転直後に各車両メッシュの位置と回転を即座に同期（車両分離表示の完全防止）
     this.applyCarTransforms(train);
   }

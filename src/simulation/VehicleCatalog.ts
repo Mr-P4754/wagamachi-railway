@@ -23,7 +23,7 @@ export interface VehicleModelInfo {
 export const VEHICLE_CATALOG: VehicleModelInfo[] = [
   {
     id: 'freight-train',
-    name: '貨物列車 (EF級)',
+    name: 'EF級貨物列車',
     category: 'freight',
     description: 'コンテナ・物資輸送を担う電気機関車牽引編成。低速ながら着実な運賃収入と低運行費が特徴。',
     speedTilesPerMinute: 1.0, // 基準速度: 1.0 マス/分（現実1秒で1マス）

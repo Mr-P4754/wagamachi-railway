@@ -29,7 +29,9 @@ export type TileType =
   | 'residence'
   | 'commercial'
   | 'industrial'
-  | 'nature';
+  | 'nature'
+  | 'farmland'
+  | 'external_connection';
 
 export type CurveDirection = 'N_E' | 'E_S' | 'S_W' | 'W_N';
 export type SwitchState = 'straight' | 'diverge';
@@ -78,7 +80,6 @@ export interface TileData {
 
   passengerAccumulator?: number;
 
-
   // ① 分岐器ダイヤ設定（24時間タイムラインバー方式: 直進、分岐、交互切替）
   switchSchedule?: SwitchSchedule;
 
@@ -86,6 +87,10 @@ export interface TileData {
   isCargoYard?: boolean;
   // 貨物駅に蓄積されているコンテナ数（工業施設から毎日17:00に追加、列車積載で減少）
   cargoContainers?: number;
+
+  // ② 隣町外部接続ゲートウェイノード
+  externalCityId?: string;
+  isExternalConnection?: boolean;
 }
 
 export type StationActionMode = 'stop' | 'wait' | 'pass' | 'reverse' | 'hold' | 'pattern';
@@ -558,6 +563,32 @@ export class WorldMap {
   }
 
   /**
+   * 道路ネットワーク接続判定用: 道路および踏切（crossingRoadAxis）の接続方向・高さを返す
+   */
+  public static getRoadExits(tile: TileData): TileExit[] {
+    const isElevated = tile.type.includes('elevated');
+    const level: number = isElevated ? LEVEL_ELEVATED : LEVEL_GROUND;
+    const elevOffset = tile.elevationOffset ?? 0;
+    const tileLayer: GridLayer = tile.layer ?? (isElevated ? 2 : 1);
+    const defaultWorldHeight = layerToHeight(tileLayer, elevOffset);
+
+    if (tile.type === 'road') {
+      return tile.rotation === 1
+        ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
+        : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
+    }
+
+    if (tile.type === 'level_crossing') {
+      const roadAxis = tile.crossingRoadAxis ?? (1 - (((tile.rotation ?? 0) % 2 + 2) % 2));
+      return roadAxis === 1
+        ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
+        : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
+    }
+
+    return [];
+  }
+
+  /**
    * ① ⑦ ⑧ タイルが実際に接続している方向・高さレベルの一覧を返す。
    * 曲線・勾配・分岐器（開通方向）を考慮し、これを基準に列車の経路探索・接続判定を行う。
    */
@@ -576,11 +607,16 @@ export class WorldMap {
       case 'signal_yard':
       case 'cargo_station_ground':
       case 'cargo_station_elevated':
-      case 'road':
       case 'level_crossing':
         return tile.rotation === 1
           ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
           : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
+
+      case 'external_connection': {
+        // 自都市中心方向への片側接続終端ポート
+        const connectDir = ((tile.rotation % 4) + 4) % 4;
+        return [{ idx: connectDir, level, worldHeight: defaultWorldHeight }];
+      }
 
       case 'rail_curve_ground':
       case 'rail_curve_elevated': {
@@ -715,10 +751,12 @@ export class WorldMap {
 
   /** マップ変更検知ダーティフラグとシリアライズキャッシュ */
   public isDirty: boolean = true;
+  public structureVersion: number = 0;
   private cachedSerializedData: string | null = null;
 
   public markDirty(): void {
     this.isDirty = true;
+    this.structureVersion++;
     this.cachedSerializedData = null;
   }
   public groundHoleHandler: {
@@ -789,7 +827,8 @@ export class WorldMap {
    */
   public isInBounds(x: number, z: number): boolean {
     const half = Math.floor(this.gridSize / 2);
-    return x >= -half && x < half && z >= -half && z < half;
+    // 南端(z = half)・東端(x = half)も北端・西端(-half)と同様に境界線上タイルとして許可
+    return x >= -half && x <= half && z >= -half && z <= half;
   }
 
   /**
@@ -1077,12 +1116,33 @@ export class WorldMap {
   }
 
   /**
+   * 分岐器やシーサスクロッシングによって上書き設置可能な線路タイルかどうかを判定する
+   * （直線・曲線・分岐器・シーサス等の通常線路は上書き可能。駅や信号場、建物、道路、踏切等は上書き不可）
+   */
+  public isOverwritableTrack(x: number, z: number, layer: GridLayer = this.activeLayer): boolean {
+    const tile = this.getTile(x, z, layer);
+    if (!tile || tile.type === 'empty') return true;
+    return (
+      tile.type === 'rail_ground' ||
+      tile.type === 'rail_elevated' ||
+      tile.type === 'rail_curve_ground' ||
+      tile.type === 'rail_curve_elevated' ||
+      tile.type === 'point_switch_ground' ||
+      tile.type === 'point_switch_elevated' ||
+      tile.type === 'scissors_crossing_ground' ||
+      tile.type === 'scissors_crossing_elevated'
+    );
+  }
+
+  /**
    * ② 分岐器（ポイント）の敷設。曲線レールと同じ1マスで完結する
    * （進入側＋直進側＋分岐側の曲線レールを1タイル内に収める）。
    * rotation: 0-3 = 通過方向（進入→直進方向）のインデックス（0=北,1=東,2=南,3=西）。
    * branchSide: 'right'(右分岐) または 'left'(左分岐)。
    */
   public placeSwitch(x: number, z: number, rotation: number, isElevated: boolean = false, branchSide: 'left' | 'right' = 'right', layer: GridLayer = this.activeLayer): boolean {
+    if (!this.isInBounds(x, z)) return false;
+    if (!this.isOverwritableTrack(x, z, layer)) return false;
     const tile = this.getOrCreateTile(x, z, layer);
     if (!tile) return false;
 
@@ -1123,7 +1183,7 @@ export class WorldMap {
    * A-B が1本目の線路、C-D が2本目の線路（Aから見て右手側=acrossDir に1マスずれた位置）。
    */
   public placeScissorsCrossing(originX: number, originZ: number, rotation: number, isElevated: boolean = false, layer: GridLayer = this.activeLayer): boolean {
-    const along = rotation === 1 ? 1 : 2;
+    const along = (rotation % 2 === 1) ? 1 : 2;
     const across = WorldMap.rotateCW(along);
     const alongVec = WorldMap.DIRS[along];
     const acrossVec = WorldMap.DIRS[across];
@@ -1136,10 +1196,12 @@ export class WorldMap {
 
     for (const p of positions) {
       if (!this.isInBounds(p.x, p.z)) return false;
-      if (this.isPermanentTrackOrStation(p.x, p.z, layer)) return false;
+      if (!this.isOverwritableTrack(p.x, p.z, layer)) return false;
       const waterCheck = this.canPlaceAtWater(p.x, p.z, layer);
       if (!waterCheck.allowed) return false;
     }
+
+    const sharedSchedule = createDefaultSwitchSchedule();
 
     positions.forEach((p, role) => {
       const cell = this.gridManagerRef?.getCell(p.x, 1, p.z);
@@ -1151,7 +1213,7 @@ export class WorldMap {
       this.removeTileMesh(t);
       t.type = crossingType;
       t.layer = layer;
-      t.rotation = rotation === 1 ? 1 : 0;
+      t.rotation = (rotation % 2 === 1) ? 1 : 0;
       t.curveDir = undefined;
       t.slopeReversed = undefined;
       t.switchState = 'straight';
@@ -1166,7 +1228,7 @@ export class WorldMap {
       mesh.position.set(p.x * WorldMap.TILE_SIZE, baseH + elevY, p.z * WorldMap.TILE_SIZE);
       mesh.visible = (layer === this.activeLayer);
       this.attachTileMesh(t, mesh);
-      t.switchSchedule = t.switchSchedule || createDefaultSwitchSchedule();
+      t.switchSchedule = t.switchSchedule || sharedSchedule;
     });
 
     this.markDirty();
@@ -1186,24 +1248,33 @@ export class WorldMap {
 
     const order: CrossingState[] = ['straight', 'cross-a', 'cross-b'];
     const nextState = order[(order.indexOf(origin.crossingState ?? 'straight') + 1) % order.length];
-    const success = this.setCrossingState(x, z, nextState, checkLayer);
+    const success = this.setCrossingState(x, z, nextState, checkLayer, false);
     return success ? nextState : null;
   }
 
   /**
    * シーサスクロッシングの開通状態を指定の状態（'straight' | 'cross-a' | 'cross-b'）に設定する
    */
-  public setCrossingState(x: number, z: number, targetState: CrossingState, layer?: GridLayer): boolean {
+  public setCrossingState(x: number, z: number, targetState: CrossingState, layer?: GridLayer, isTransient: boolean = false): boolean {
     const checkLayer = (layer ?? this.activeLayer) as GridLayer;
     const clicked = this.getTile(x, z, checkLayer);
     if (!clicked || !clicked.groupOrigin) return false;
     const origin = this.getTile(clicked.groupOrigin.x, clicked.groupOrigin.z, (clicked.layer ?? checkLayer) as GridLayer);
     if (!origin || origin.crossingRole !== 0) return false;
 
+    // 手動明示的切替（!isTransient）の時はモードを manual に設定し、
+    // 列車通過時や時刻同期処理で勝手に straight へ戻されないようにする
+    if (!isTransient) {
+      if (!origin.switchSchedule) {
+        origin.switchSchedule = createDefaultSwitchSchedule();
+      }
+      origin.switchSchedule.mode = 'manual';
+    }
+
     // 既に同一状態なら再生成をスキップ
     if (origin.crossingState === targetState) return true;
 
-    const along = origin.rotation === 1 ? 1 : 2;
+    const along = (origin.rotation % 2 === 1) ? 1 : 2;
     const across = WorldMap.rotateCW(along);
     const alongVec = WorldMap.DIRS[along];
     const acrossVec = WorldMap.DIRS[across];
@@ -1220,19 +1291,28 @@ export class WorldMap {
       const t = this.getTile(p.x, p.z, (origin.layer ?? checkLayer) as GridLayer);
       if (!t) return;
       t.crossingState = targetState;
+      if (origin.switchSchedule) {
+        t.switchSchedule = origin.switchSchedule;
+      }
+      const typedRole = role as 0 | 1 | 2 | 3;
+      if (t.mesh && ModelFactory.updateScissorsCrossingTileState(t.mesh, typedRole, targetState)) {
+        return;
+      }
       this.removeTileMesh(t);
       const tileLayer = (t.layer ?? checkLayer) as GridLayer;
       const baseH = layerToHeight(tileLayer);
       const elevY = this.getTrackElevationOffset(p.x, p.z, tileLayer);
       t.elevationOffset = elevY;
       const isTunnel = this.isTunnelSection(p.x, p.z, tileLayer);
-      const mesh = ModelFactory.createScissorsCrossingTile(along, role as 0 | 1 | 2 | 3, isElevated, targetState, baseH, isTunnel);
+      const mesh = ModelFactory.createScissorsCrossingTile(along, typedRole, isElevated, targetState, baseH, isTunnel);
       mesh.position.set(p.x * WorldMap.TILE_SIZE, baseH + elevY, p.z * WorldMap.TILE_SIZE);
       mesh.visible = (tileLayer === this.activeLayer);
       this.attachTileMesh(t, mesh);
     });
 
-    this.markDirty();
+    if (!isTransient) {
+      this.markDirty();
+    }
     return true;
   }
 
@@ -1286,7 +1366,8 @@ export class WorldMap {
       tile.type === 'signal_yard' ||
       tile.type.startsWith('point_switch') ||
       tile.type.startsWith('scissors_crossing') ||
-      tile.type === 'level_crossing'
+      tile.type === 'level_crossing' ||
+      tile.type === 'external_connection'
     );
   }
 
@@ -1301,10 +1382,14 @@ export class WorldMap {
   }
 
   /**
-   * 駅・信号場・貨物駅のいずれかであるかを判定
+   * 駅・信号場・貨物駅・隣町接続ゲートウェイのいずれかであるかを判定
    */
   public static isStationTileType(type: string): boolean {
-    return type.startsWith('station') || type.startsWith('cargo_station') || type === 'signal_yard';
+    return (
+      type.startsWith('station') ||
+      type.startsWith('cargo_station') ||
+      type === 'signal_yard'
+    );
   }
 
   /**
@@ -1441,7 +1526,8 @@ export class WorldMap {
       tile.type = 'rail_ground';
     }
 
-    const elevY = (type === 'rail_ground')
+    // ★修正: rail_ground だけでなく external_connection もトンネル区間なら標高オフセットを0(地下貫通)にする
+    const elevY = (type === 'rail_ground' || type === 'external_connection')
       ? this.getTrackElevationOffset(x, z, layer)
       : ((layer === 1) ? this.getElevationOffset(x, z) : 0);
     tile.elevationOffset = elevY;
@@ -1514,6 +1600,26 @@ export class WorldMap {
         case 'industrial':
           mesh = ModelFactory.createIndustrialBuilding(level);
           break;
+        case 'farmland':
+          mesh = ModelFactory.createFarmland(Math.abs(x * 11 + z * 17) % 3);
+          break;
+        case 'external_connection': {
+          tile.isExternalConnection = true;
+          if (isTunnel) {
+            const isEW = (tile.rotation === 1);
+            const dirA = isEW ? { x: -1, z: 0 } : { x: 0, z: -1 };
+            const dirB = isEW ? { x: 1, z: 0 } : { x: 0, z: 1 };
+            const isTunnelA = this.isTunnelSection(x + dirA.x, z + dirA.z, layer);
+            const isTunnelB = this.isTunnelSection(x + dirB.x, z + dirB.z, layer);
+            mesh = ModelFactory.createTunnelTrack(tile.rotation, {
+              start: !isTunnelA,
+              end: !isTunnelB
+            });
+          } else {
+            mesh = ModelFactory.createGroundTrack(tile.rotation, false);
+          }
+          break;
+        }
         default:
           mesh = undefined;
           break;
@@ -1529,9 +1635,11 @@ export class WorldMap {
     // Update neighboring stations if this is a station
     if (WorldMap.isStationTileType(type)) {
       if (!tile.stationName) {
-        tile.stationName = type.startsWith('cargo_station')
-          ? `第${this.getStationCount() + 1}貨物駅`
-          : (type === 'signal_yard' ? `第${this.getStationCount() + 1}信号場` : `第${this.getStationCount() + 1}駅`);
+        tile.stationName = (type === 'external_connection')
+          ? '隣町ゲートウェイ'
+          : (type.startsWith('cargo_station')
+            ? `第${this.getStationCount() + 1}貨物駅`
+            : (type === 'signal_yard' ? `第${this.getStationCount() + 1}信号場` : `第${this.getStationCount() + 1}駅`));
       }
 
       if (type.startsWith('station')) {
@@ -1540,7 +1648,7 @@ export class WorldMap {
     }
 
     // トンネル敷設時、隣接するトンネルタイルの坑口ポータル開閉を更新
-    if (type === 'rail_ground' && isTunnel) {
+    if ((type === 'rail_ground' || type === 'external_connection') && isTunnel) {
       const isEW = (rotation === 1);
       const dirA = isEW ? { x: -1, z: 0 } : { x: 0, z: -1 };
       const dirB = isEW ? { x: 1, z: 0 } : { x: 0, z: 1 };
@@ -1649,6 +1757,31 @@ export class WorldMap {
       } else break;
     }
     return count;
+  }
+
+  /**
+   * ② マップ境界端に隣町接続ゲートウェイ（外部接続都市タイル）を配置
+   */
+  public placeExternalConnection(
+    x: number,
+    z: number,
+    rotation: number,
+    cityId: string,
+    cityName: string,
+    layer: GridLayer = 1
+  ): TileData | undefined {
+    const success = this.setTile(x, z, 'external_connection', rotation, 1, 'right', layer);
+    if (!success) return undefined;
+    const tile = this.getTile(x, z, layer);
+    if (tile) {
+      tile.externalCityId = cityId;
+      tile.isExternalConnection = true;
+      tile.stationName = cityName;
+      if (tile.mesh) {
+        ModelFactory.updateGatewaySign(tile.mesh, cityName, false);
+      }
+    }
+    return tile;
   }
 
   public getStationCount(): number {
@@ -2182,12 +2315,19 @@ export class WorldMap {
   /**
    * ② 分岐器の開通状態を明示的に指定して切り替える
    */
-  public setSwitchState(x: number, z: number, state: SwitchState, layer: GridLayer = this.activeLayer): void {
+  public setSwitchState(x: number, z: number, state: SwitchState, layer: GridLayer = this.activeLayer, isTransient: boolean = false): void {
     const tile = this.getTile(x, z, layer);
     if (!tile || !tile.type.startsWith('point_switch')) return;
     if (tile.switchState === state) return;
 
     tile.switchState = state;
+    if (tile.mesh && ModelFactory.updateSwitchHubState(tile.mesh, tile.switchState === 'diverge')) {
+      if (!isTransient) {
+        this.markDirty();
+      }
+      return;
+    }
+
     if (tile.mesh) {
       tile.mesh.removeFromParent();
       disposeHierarchy(tile.mesh); // 旧メッシュのGPUリソース解放（VRAMリーク防止）
@@ -2204,7 +2344,9 @@ export class WorldMap {
     mesh.position.set(tile.x * WorldMap.TILE_SIZE, baseH + elevY, tile.z * WorldMap.TILE_SIZE);
     mesh.visible = (tileLayer === this.activeLayer);
     this.attachTileMesh(tile, mesh);
-    this.markDirty();
+    if (!isTransient) {
+      this.markDirty();
+    }
   }
 
   /**
@@ -2405,9 +2547,25 @@ export class WorldMap {
    * ⑤ 撤去処理。駅タイルの場合は同一駅グループ（有効長分の全マス）を一括撤去する。
    * シーサスクロッシンググループの一員を撤去した場合は残りを単体線路化する。
    */
-  public demolishTile(x: number, z: number, layer: GridLayer = this.activeLayer): boolean {
+  public demolishTile(
+    x: number,
+    z: number,
+    layer: GridLayer = this.activeLayer,
+    demolishMode: 'track' | 'city' | 'all' = 'all'
+  ): boolean {
     const tile = this.getTile(x, z, layer);
     if (!tile || tile.type === 'empty') return false;
+
+    // 踏切の部分撤去: 線路撤去なら道路に戻し、街づくり撤去なら地上線路に戻す
+    if (tile.type === 'level_crossing' && demolishMode !== 'all') {
+      const railAxis = ((tile.rotation ?? 0) % 2 + 2) % 2;
+      const roadAxis = tile.crossingRoadAxis ?? (1 - railAxis);
+      if (demolishMode === 'track') {
+        return this.setTile(x, z, 'road', roadAxis, 1, 'right', layer);
+      } else if (demolishMode === 'city') {
+        return this.setTile(x, z, 'rail_ground', railAxis, 1, 'right', layer);
+      }
+    }
 
     // ⑤ 駅・信号場タイルの場合: 同一グループ全体を一括撤去する
     // 【データ腐敗バグ解消】signal_yard / cargo_station も一括撤去の対象とし、全階層からグループタイルを収集
@@ -2450,47 +2608,23 @@ export class WorldMap {
         const stLayer = (st.layer ?? layer) as GridLayer;
         this.stationManager.removeTileFromPlatform(sx, sz, stLayer);
 
-        // 【ユーザー要件③】駅舎・ホーム・コンテナ等は線路に付随するオプションパーツとして扱うため、
-        // 駅撤去時は線路を残して元の直線線路（地上線路または高架線路）に復元する！
+        // 駅舎・ホーム・コンテナ等は線路に付随するオプションパーツとして扱うため、
+        // 駅撤去時は線路を残して元の直線線路（地上線路または高架線路）に復元する
         const isElevated = prevType.includes('elevated') || stLayer >= 2;
         const restoreTrackType: TileType = isElevated ? 'rail_elevated' : 'rail_ground';
 
-        this.removeTileMesh(st);
-        st.type = restoreTrackType;
-        st.rotation = rot;
-        st.level = isElevated ? LEVEL_ELEVATED : LEVEL_GROUND;
+        // 駅固有のプロパティをクリアしてから setTile で正規の直線線路（InstancedMesh対応）として再構築
         st.stationPassengers = 0;
-        st.curveDir = undefined;
-        st.switchState = 'straight';
-        st.groupOrigin = undefined;
-        st.crossingRole = undefined;
-        st.crossingState = undefined;
-        st.crossingRoadAxis = undefined;
-        st.slopeReversed = undefined;
-        st.slopePart = undefined;
         st.stationGroupId = undefined;
         st.stationPlatformId = undefined;
         st.stationPart = undefined;
         st.stationPlatformSide = undefined;
         st.stationSchedule = undefined;
-        st.switchSchedule = undefined;
         st.stationName = undefined;
         st.cargoContainers = undefined;
         st.isCargoYard = undefined;
 
-        // 線路メッシュを再生成
-        const baseH = layerToHeight(stLayer);
-        const elevY = this.getTrackElevationOffset(sx, sz, stLayer);
-        st.elevationOffset = elevY;
-        const isTunnel = this.isTunnelSection(sx, sz, stLayer);
-        const trackMesh = isTunnel
-          ? ModelFactory.createTunnelTrack(rot)
-          : (isElevated
-            ? ModelFactory.createElevatedTrack(rot, WorldMap.shouldShowPier(sx, sz, rot), baseH)
-            : ModelFactory.createGroundTrack(rot, false));
-        trackMesh.position.set(sx * WorldMap.TILE_SIZE, baseH + elevY, sz * WorldMap.TILE_SIZE);
-        trackMesh.visible = (stLayer === this.activeLayer);
-        this.attachTileMesh(st, trackMesh);
+        this.setTile(sx, sz, restoreTrackType, rot, 1, 'right', stLayer);
 
         if (prevType.startsWith('station')) {
           this.updateNeighborStations(sx, sz, rot, prevType, stLayer);
@@ -2798,7 +2932,10 @@ export class WorldMap {
           stationPart: t.stationPart,
           stationPlatformSide: t.stationPlatformSide,
           stationSchedule: t.stationSchedule,
-          switchSchedule: t.switchSchedule
+          switchSchedule: t.switchSchedule,
+          externalCityId: t.externalCityId,
+          isExternalConnection: t.isExternalConnection,
+          stationPassengers: t.stationPassengers
         });
       }
     });
@@ -2922,6 +3059,17 @@ export class WorldMap {
         if (item.cargoContainers !== undefined) {
           const restored = this.getTile(item.x, item.z, lyr);
           if (restored) restored.cargoContainers = item.cargoContainers;
+        }
+        if (item.externalCityId || item.isExternalConnection || item.type === 'external_connection') {
+          const restored = this.getTile(item.x, item.z, lyr);
+          if (restored) {
+            restored.externalCityId = item.externalCityId;
+            restored.isExternalConnection = true;
+            if (item.stationPassengers !== undefined) restored.stationPassengers = item.stationPassengers;
+            if (restored.mesh && item.stationName) {
+              ModelFactory.updateGatewaySign(restored.mesh, item.stationName, false);
+            }
+          }
         }
       }
 

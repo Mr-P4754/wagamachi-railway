@@ -272,9 +272,133 @@ export class TrackMeshBuilder {
     const lampMat = new THREE.MeshBasicMaterial({ color: isDiverged ? 0xf59e0b : 0x10b981 });
     const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), lampMat);
     lamp.position.set(branchVec.x * 0.75, railBaseHeight + 0.42, branchVec.z * 0.75);
+    lamp.userData.isSwitchLamp = true;
     group.add(lamp);
 
+    // 開通方向を示す発光シェブロン矢印インジケーター（直進＝双方向矢印、分岐＝単方向矢印）
+    // ① 双方向矢印（直進開通時用：前後に鏃を持つ形状）
+    const biArrowShape = new THREE.Shape();
+    biArrowShape.moveTo(0, 0.40);
+    biArrowShape.lineTo(0.20, 0.18);
+    biArrowShape.lineTo(0.08, 0.20);
+    biArrowShape.lineTo(0.08, -0.20);
+    biArrowShape.lineTo(0.20, -0.18);
+    biArrowShape.lineTo(0, -0.40);
+    biArrowShape.lineTo(-0.20, -0.18);
+    biArrowShape.lineTo(-0.08, -0.20);
+    biArrowShape.lineTo(-0.08, 0.20);
+    biArrowShape.lineTo(-0.20, 0.18);
+    biArrowShape.closePath();
+    const biArrowGeo = new THREE.ShapeGeometry(biArrowShape);
+    biArrowGeo.rotateX(-Math.PI / 2);
+
+    const biBgShape = new THREE.Shape();
+    biBgShape.moveTo(0, 0.46);
+    biBgShape.lineTo(0.26, 0.14);
+    biBgShape.lineTo(0.13, 0.16);
+    biBgShape.lineTo(0.13, -0.16);
+    biBgShape.lineTo(0.26, -0.14);
+    biBgShape.lineTo(0, -0.46);
+    biBgShape.lineTo(-0.26, -0.14);
+    biBgShape.lineTo(-0.13, -0.16);
+    biBgShape.lineTo(-0.13, 0.16);
+    biBgShape.lineTo(-0.26, 0.14);
+    biBgShape.closePath();
+    const biBgGeo = new THREE.ShapeGeometry(biBgShape);
+    biBgGeo.rotateX(-Math.PI / 2);
+    const bgMat = new THREE.MeshBasicMaterial({ color: 0x0f172a, side: THREE.DoubleSide });
+
+    const straightArrowGroup = new THREE.Group();
+    straightArrowGroup.userData.isStraightArrow = true;
+    const biBgMesh = new THREE.Mesh(biBgGeo, bgMat);
+    biBgMesh.position.y = -0.01;
+    const biArrowMat = new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide });
+    const biArrowMesh = new THREE.Mesh(biArrowGeo, biArrowMat);
+    straightArrowGroup.add(biBgMesh);
+    straightArrowGroup.add(biArrowMesh);
+
+    // ② 単方向矢印（分岐開通時用：先端に鏃を持つ形状）
+    const uniArrowShape = new THREE.Shape();
+    uniArrowShape.moveTo(0, 0.38);
+    uniArrowShape.lineTo(0.22, 0.04);
+    uniArrowShape.lineTo(0.10, 0.08);
+    uniArrowShape.lineTo(0.10, -0.28);
+    uniArrowShape.lineTo(-0.10, -0.28);
+    uniArrowShape.lineTo(-0.10, 0.08);
+    uniArrowShape.lineTo(-0.22, 0.04);
+    uniArrowShape.closePath();
+    const uniArrowGeo = new THREE.ShapeGeometry(uniArrowShape);
+    uniArrowGeo.rotateX(-Math.PI / 2);
+
+    const uniBgShape = new THREE.Shape();
+    uniBgShape.moveTo(0, 0.44);
+    uniBgShape.lineTo(0.28, 0.00);
+    uniBgShape.lineTo(0.14, 0.04);
+    uniBgShape.lineTo(0.14, -0.34);
+    uniBgShape.lineTo(-0.14, -0.34);
+    uniBgShape.lineTo(-0.14, 0.04);
+    uniBgShape.lineTo(-0.28, 0.00);
+    uniBgShape.closePath();
+    const uniBgGeo = new THREE.ShapeGeometry(uniBgShape);
+    uniBgGeo.rotateX(-Math.PI / 2);
+
+    const divergeArrowGroup = new THREE.Group();
+    divergeArrowGroup.userData.isDivergeArrow = true;
+    const uniBgMesh = new THREE.Mesh(uniBgGeo, bgMat);
+    uniBgMesh.position.y = -0.01;
+    const uniArrowMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide });
+    const uniArrowMesh = new THREE.Mesh(uniArrowGeo, uniArrowMat);
+    divergeArrowGroup.add(uniBgMesh);
+    divergeArrowGroup.add(uniArrowMesh);
+
+    straightArrowGroup.visible = !isDiverged;
+    divergeArrowGroup.visible = isDiverged;
+
+    const forwardVec = this.DIR_IDX_VEC[forward];
+    const forwardAngle = Math.atan2(forwardVec.x, -forwardVec.z);
+    const branchAngle = Math.atan2(branchVec.x, -branchVec.z);
+
+    const arrowGroup = new THREE.Group();
+    arrowGroup.userData.isSwitchArrow = true;
+    arrowGroup.userData.forwardAngle = forwardAngle;
+    arrowGroup.userData.branchAngle = branchAngle;
+    arrowGroup.position.set(0, railBaseHeight + 0.48, 0);
+    arrowGroup.rotation.y = isDiverged ? branchAngle : forwardAngle;
+
+    arrowGroup.add(straightArrowGroup);
+    arrowGroup.add(divergeArrowGroup);
+    group.add(arrowGroup);
+
     return group;
+  }
+
+  /**
+   * 分岐器メッシュ全体を再生成せず、インジケーターランプおよび開通矢印の向き・色・形状を高速更新する
+   */
+  public static updateSwitchHubState(group: THREE.Object3D, isDiverged: boolean): boolean {
+    let updated = false;
+    const targetColor = isDiverged ? 0xf59e0b : 0x10b981;
+    group.traverse(child => {
+      if (child instanceof THREE.Mesh && child.userData.isSwitchLamp) {
+        const mat = child.material as THREE.MeshBasicMaterial;
+        if (mat && mat.color) {
+          mat.color.setHex(targetColor);
+          updated = true;
+        }
+      }
+      if (child.userData && child.userData.isSwitchArrow) {
+        child.rotation.y = isDiverged ? child.userData.branchAngle : child.userData.forwardAngle;
+        child.traverse(gc => {
+          if (gc.userData && gc.userData.isStraightArrow !== undefined) {
+            gc.visible = !isDiverged;
+          } else if (gc.userData && gc.userData.isDivergeArrow !== undefined) {
+            gc.visible = isDiverged;
+          }
+        });
+        updated = true;
+      }
+    });
+    return updated;
   }
 
   /**
@@ -378,6 +502,8 @@ export class TrackMeshBuilder {
       const lampMat = new THREE.MeshBasicMaterial({ color: lampColor });
       const lamp = new THREE.Mesh(lampGeo, lampMat);
       lamp.position.y = railBaseHeight + 0.62;
+      lamp.userData.isScissorsLamp = true;
+      lamp.userData.crossingRole = role;
       signGroup.add(lamp);
 
       const signX = role === 0 ? 0.75 : -0.75;
@@ -389,6 +515,34 @@ export class TrackMeshBuilder {
       group.rotation.y = Math.PI / 2;
     }
     return group;
+  }
+
+  /**
+   * シーサスクロッシングのメッシュ全体を再生成せず、インジケーターランプの色のみを高速更新する
+   */
+  public static updateScissorsCrossingTileState(
+    group: THREE.Object3D,
+    role: 0 | 1 | 2 | 3,
+    crossingState: 'straight' | 'cross-a' | 'cross-b'
+  ): boolean {
+    if (role !== 0 && role !== 2) return true;
+    const colors: Record<string, number> = {
+      straight: 0x10b981,
+      'cross-a': role === 0 ? 0xf59e0b : 0x10b981,
+      'cross-b': role === 2 ? 0xf59e0b : 0x10b981
+    };
+    const lampColor = colors[crossingState] ?? 0x10b981;
+    let updated = false;
+    group.traverse(child => {
+      if (child instanceof THREE.Mesh && child.userData.isScissorsLamp) {
+        const mat = child.material as THREE.MeshBasicMaterial;
+        if (mat && mat.color) {
+          mat.color.setHex(lampColor);
+          updated = true;
+        }
+      }
+    });
+    return updated;
   }
 
   /**
@@ -667,4 +821,70 @@ export class TrackMeshBuilder {
     poleGroup.add(arm);
     return poleGroup;
   }
+
+  private static gatewaySignCache = new Map<string, THREE.CanvasTexture>();
+
+  /**
+   * 隣町ゲートウェイ看板用のCanvasTextureを生成
+   */
+  public static createGatewaySignTexture(cityName: string, isConnected: boolean): THREE.Texture {
+    if (typeof document === 'undefined') {
+      return new THREE.Texture();
+    }
+    const cacheKey = `${cityName}_${isConnected}`;
+    const cached = TrackMeshBuilder.gatewaySignCache.get(cacheKey);
+    if (cached) return cached;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      // ダークネイビー背景
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, 512, 128);
+      // 外枠アクセントバー
+      ctx.fillStyle = isConnected ? '#10b981' : '#f59e0b';
+      ctx.fillRect(0, 0, 512, 12);
+      // 接続ステータス文字
+      ctx.fillStyle = isConnected ? '#34d399' : '#fbbf24';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(isConnected ? '● 幹線接続中 [CONNECTED]' : '▲ 線路未接続 [OFFLINE]', 496, 20);
+      // 行先都市名
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 42px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cityName, 20, 80);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.userData = { keepAlive: true };
+    TrackMeshBuilder.gatewaySignCache.set(cacheKey, texture);
+    return texture;
+  }
+
+  /**
+   * ② 外部接続都市への境界線路メッシュ生成
+   * 特別なゲートウェイ・ポータル・看板は表示せず、マップ外へ延伸している自然な線路を描画
+   */
+  public static createExternalConnectionTile(
+    rotation: number = 0,
+    _cityName: string = '新東都方面',
+    _isConnected: boolean = false
+  ): THREE.Group {
+    return TrackMeshBuilder.createGroundTrack(rotation, false);
+  }
+
+  /**
+   * 外部都市境界線路メッシュの更新（ゲートウェイ看板廃止に伴う互換用 no-op）
+   */
+  public static updateGatewayMesh(_mesh: THREE.Object3D, _cityName: string, _isConnected: boolean): void {
+    // ゲートウェイ看板・LEDは非表示（通常線路のまま）のため何もしない
+  }
 }
+
+
+
