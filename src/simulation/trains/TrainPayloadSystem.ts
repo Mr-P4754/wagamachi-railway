@@ -117,59 +117,61 @@ export class TrainPayloadSystem {
     onPassengerFare: (amount: number) => void,
     onPassengerCost?: (amount: number) => void
   ): void {
-    if (train.model.category === 'freight') return;
     if (!stoppedTile) return;
 
     const isYard = stoppedTile.type === 'signal_yard';
     const isCargo = stoppedTile.type.startsWith('cargo_station') || !!stoppedTile.isCargoYard;
-    if (isYard || isCargo) return;
 
-    const isExternalGateway = !!stoppedTile.isExternalConnection || stoppedTile.type === 'external_connection';
-    const waiting = stoppedTile.stationPassengers ?? 0;
-    const maxCap = getMaxCapacity(train.model, train.carCount);
-    const freeSeats = Math.max(0, maxCap - train.passengers);
-    const boarding = Math.min(waiting, freeSeats);
+    // 旅客の乗車処理は旅客列車かつ旅客駅のみ実行
+    if (train.model.category !== 'freight' && !isYard && !isCargo) {
+      const isExternalGateway = !!stoppedTile.isExternalConnection || stoppedTile.type === 'external_connection';
+      const waiting = stoppedTile.stationPassengers ?? 0;
+      const maxCap = getMaxCapacity(train.model, train.carCount);
+      const freeSeats = Math.max(0, maxCap - train.passengers);
+      const boarding = Math.min(waiting, freeSeats);
 
-    if (boarding > 0) {
-      train.passengers += boarding;
-      const remainingWaiting = waiting - boarding;
-      stoppedTile.stationPassengers = remainingWaiting;
+      if (boarding > 0) {
+        train.passengers += boarding;
+        const remainingWaiting = waiting - boarding;
+        stoppedTile.stationPassengers = remainingWaiting;
 
-      const platInfo = worldMap.stationManager.getPlatformByTile(
-        train.currentTile.x,
-        train.currentTile.z,
-        train.currentTile.layer
-      );
-      if (platInfo) {
-        for (const t of platInfo.platform.tiles) {
-          const tData = worldMap.getTile(t.x, t.z, (t.layer ?? 1) as GridLayer);
-          if (tData) tData.stationPassengers = remainingWaiting;
-        }
-      }
-
-      // 隣町ゲートウェイからの長距離幹線運賃（1.5倍プレミアム）
-      const fareMultiplier = isExternalGateway ? 1.5 : 1.0;
-      const fare = Math.round(train.model.farePerRide * fareMultiplier * boarding);
-      train.totalPassengers += boarding;
-      train.totalRevenue += fare;
-      train.monthlyProfit = train.totalRevenue - train.totalCost;
-
-      if (isExternalGateway && stoppedTile.externalCityId) {
-        this.externalConnectionManager?.recordPassengersTransported(stoppedTile.externalCityId, boarding);
-      }
-
-      if (platInfo) {
-        worldMap.stationManager.addBoardingRecord(
-          platInfo.station.id,
-          platInfo.platform.id,
-          boarding,
-          fare
+        const platInfo = worldMap.stationManager.getPlatformByTile(
+          train.currentTile.x,
+          train.currentTile.z,
+          train.currentTile.layer
         );
-      }
+        if (platInfo) {
+          for (const t of platInfo.platform.tiles) {
+            const tData = worldMap.getTile(t.x, t.z, (t.layer ?? 1) as GridLayer);
+            if (tData) tData.stationPassengers = remainingWaiting;
+          }
+        }
 
-      onPassengerFare(fare);
+        // 隣町ゲートウェイからの長距離幹線運賃（1.5倍プレミアム）
+        const fareMultiplier = isExternalGateway ? 1.5 : 1.0;
+        const fare = Math.round(train.model.farePerRide * fareMultiplier * boarding);
+        train.totalPassengers += boarding;
+        train.totalRevenue += fare;
+        train.monthlyProfit = train.totalRevenue - train.totalCost;
+
+        if (isExternalGateway && stoppedTile.externalCityId) {
+          this.externalConnectionManager?.recordPassengersTransported(stoppedTile.externalCityId, boarding);
+        }
+
+        if (platInfo) {
+          worldMap.stationManager.addBoardingRecord(
+            platInfo.station.id,
+            platInfo.platform.id,
+            boarding,
+            fare
+          );
+        }
+
+        onPassengerFare(fare);
+      }
     }
 
+    // 区間運行費用は貨物列車も含め発車時に計上
     const tripCost = getRunningCostPerTrip(train.model, train.carCount);
     train.totalCost += tripCost;
     train.monthlyProfit = train.totalRevenue - train.totalCost;
@@ -263,7 +265,11 @@ export class TrainPayloadSystem {
           this.externalConnectionManager?.recordCargoExported(curTile.externalCityId, delivered);
         }
 
-        onPassengerFare(revenue);
+        if (cargoHooks?.onCargoDelivered) {
+          cargoHooks.onCargoDelivered(train.currentTile.x, train.currentTile.z, train.currentTile.layer, delivered, revenue);
+        } else {
+          onPassengerFare(revenue);
+        }
 
         train.cargoLoad = 0;
         train.cargoPickup = null;
@@ -350,7 +356,10 @@ export class TrainPayloadSystem {
           if (dx === 0 && dz === 0) continue;
           const tx = centerX + dx;
           const tz = centerZ + dz;
-          const t = worldMap.getTile(tx, tz, 1);
+          // ★修正: 山岳地表面(surfaceElevation)に建っている建物も確実に取得する
+          const cell = worldMap.gridManagerRef?.getCell(tx, 1, tz);
+          const surfaceLayer = (cell ? Math.max(1, cell.elevation) : 1) as GridLayer;
+          const t = worldMap.getTile(tx, tz, surfaceLayer) || worldMap.getTile(tx, tz, 1);
           if (!t) continue;
 
           const chebyshevDist = Math.max(Math.abs(dx), Math.abs(dz));

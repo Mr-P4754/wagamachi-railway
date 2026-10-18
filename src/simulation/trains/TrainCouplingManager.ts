@@ -115,6 +115,8 @@ export class TrainCouplingManager {
     if (leader.model.category === 'freight' || follower.model.category === 'freight') {
       leader.cargoCapacity = Math.max(0, (combinedCars - 1) * 3);
       leader.cargoLoad = Math.min(leader.cargoCapacity, (leader.cargoLoad ?? 0) + (follower.cargoLoad ?? 0));
+      // 合算後の積載コンテナ数を3D車両モデルに反映
+      VehicleMeshBuilder.updateTrainCargoVisual(leader.cars, leader.cargoLoad);
     }
     leader.totalPassengers += follower.totalPassengers;
     leader.totalRevenue += follower.totalRevenue;
@@ -127,6 +129,9 @@ export class TrainCouplingManager {
     }
     leader.stopElapsedMinutes = 0;
     leader.requiredStopMinutes = Math.max(leader.requiredStopMinutes ?? 0, 2);
+    leader.overrideDepartureRule = null; // ★追加: 旧編成の個別発車ルールを初期化し、駅ホームのダイヤを最優先する
+    leader.isReversingAtStation = false;
+    leader.lastEvaluatedMinute = undefined;
 
     if (onTrainCoupled) {
       onTrainCoupled(leader, follower);
@@ -203,12 +208,16 @@ export class TrainCouplingManager {
       train.cargoCapacity = frontCap;
     }
 
+    const schedule = tile.stationSchedule;
+    const hasAnyScheduleRule = !!schedule && ((schedule.departures?.length ?? 0) > 0 || (schedule.timeZones?.length ?? 0) > 0);
+    const effectiveStopMode = hasAnyScheduleRule ? (train.stopMode && train.stopMode !== 'pass' ? train.stopMode : 'hold') : 'stop';
+
     updateTrainCarCount(train.id, config.frontCars);
     train.isStopped = true;
-    train.stopMode = 'wait';
+    train.stopMode = effectiveStopMode;
     train.stopElapsedMinutes = 0;
-    train.requiredStopMinutes = requiredStopMinutes;
-    train.overrideDepartureRule = config.frontDeparture;
+    train.requiredStopMinutes = Math.max(train.requiredStopMinutes ?? 0, requiredStopMinutes);
+    train.overrideDepartureRule = null;
     train.isReversingAtStation = false;
     if (train.model.category === 'freight') {
       train.cargoCapacity = Math.max(0, (config.frontCars - 1) * 3);
@@ -323,6 +332,29 @@ export class TrainCouplingManager {
       }
     }
 
+    const rearFromPos = new THREE.Vector3(rearTileX * WorldMap.TILE_SIZE, rearFrontPos.y, rearTileZ * WorldMap.TILE_SIZE);
+    const rearToPos = new THREE.Vector3(rearTargetTile.x * WorldMap.TILE_SIZE, rearFrontPos.y, rearTargetTile.z * WorldMap.TILE_SIZE);
+    const rearSpan = rearToPos.clone().sub(rearFromPos);
+    const rearSpanLen = rearSpan.length();
+    let initialRearProgress = 0;
+    if (rearSpanLen > 1e-4) {
+      const proj = rearFrontPos.clone().sub(rearFromPos).dot(rearSpan.normalize());
+      if (proj >= -1e-3) {
+        initialRearProgress = Math.min(0.999, Math.max(0, proj / rearSpanLen));
+      } else {
+        const prevX = Math.round(rearTileX - rearDir.x);
+        const prevZ = Math.round(rearTileZ - rearDir.z);
+        const prevTile = worldMap.getTile(prevX, prevZ, rearLayer);
+        if (prevTile && this.kinematics.isTrackTile(prevTile)) {
+          rearTargetTile = { x: rearTileX, z: rearTileZ, layer: rearLayer };
+          rearTileX = prevX;
+          rearTileZ = prevZ;
+          rearLayer = (prevTile.layer ?? rearLayer) as GridLayer;
+          initialRearProgress = Math.min(0.999, Math.max(0, (rearSpanLen + proj) / rearSpanLen));
+        }
+      }
+    }
+
     const rearTrain: TrainInstance = {
       id: rearId,
       name: `${train.name}-付属`,
@@ -333,7 +365,7 @@ export class TrainCouplingManager {
       currentTile: { x: rearTileX, z: rearTileZ, layer: rearLayer },
       targetTile: rearTargetTile,
       direction: rearDir,
-      progress: 0,
+      progress: initialRearProgress,
       speed: train.speed,
       isStopped: true,
       isAtsBraked: false,
@@ -358,10 +390,12 @@ export class TrainCouplingManager {
       cargoCapacity: train.model.category === 'freight' ? Math.max(0, (config.rearCars - 1) * 3) : 0,
       cargoPickup: train.cargoPickup ? { ...train.cargoPickup } : null,
       cargoTraveledTiles: train.cargoTraveledTiles ?? 0,
-      stopMode: 'wait',
+      stopMode: effectiveStopMode,
       stopElapsedMinutes: 0,
-      requiredStopMinutes,
-      overrideDepartureRule: config.rearDeparture
+      requiredStopMinutes: config.rearReverses
+        ? Math.max(train.requiredStopMinutes ?? 0, requiredStopMinutes)
+        : Math.max(train.requiredStopMinutes ?? 0, requiredStopMinutes) + 1,
+      overrideDepartureRule: null
     };
 
     if (train.model.category === 'freight') {

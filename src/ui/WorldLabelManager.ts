@@ -120,7 +120,7 @@ export class WorldLabelManager {
 
         // ホーム真上のワールド座標を算出
         const baseH = layerToHeight(tileLayer);
-        const elevY = (tileLayer === 1) ? worldMap.getElevationOffset(centerTile.x, centerTile.z) : 0;
+        const elevY = worldMap.getTrackElevationOffset(centerTile.x, centerTile.z, tileLayer);
         const worldX = centerTile.x * WorldMap.TILE_SIZE;
         const worldY = baseH + elevY + 2.3; // ホーム屋根より上の見やすい頭上高さ
         const worldZ = centerTile.z * WorldMap.TILE_SIZE;
@@ -197,8 +197,8 @@ export class WorldLabelManager {
     const trains = trainManager.getTrains();
 
     for (const train of trains) {
-      // 貨物列車は乗客数表示の対象外
-      if (train.model.category === 'freight') continue;
+      // 貨物列車および隣町へマップ外直通走行中の列車は表示対象外
+      if (train.model.category === 'freight' || train.externalTravel) continue;
 
       const trainLayer = train.currentTile.layer;
       // スライサー表示フィルタ
@@ -331,7 +331,7 @@ export class WorldLabelManager {
 
     // 駅・ホームの3Dワールド座標を算出
     const baseH = layerToHeight(layer);
-    const elevY = (layer === 1) ? worldMap.getElevationOffset(tileX, tileZ) : 0;
+    const elevY = worldMap.getTrackElevationOffset(tileX, tileZ, layer);
     const worldX = tileX * WorldMap.TILE_SIZE;
     const worldY = baseH + elevY + 2.5; // ホーム上空
     const worldZ = tileZ * WorldMap.TILE_SIZE;

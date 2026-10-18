@@ -228,7 +228,14 @@ export class PersistenceService {
         { key: 'zones', value: zoneManager.serialize() },
         { key: 'route_templates', value: scheduleUI.serializeTemplates() },
         { key: 'stations', value: worldMap.stationManager.serialize() },
-        { key: 'world_meta', value: { gridSize: worldMap.gridSize } },
+        {
+          key: 'world_meta',
+          value: {
+            gridSize: worldMap.gridSize,
+            terrainType: this.deps.getGridManager().terrainType,
+            seed: this.deps.getGridManager().seed
+          }
+        },
         { key: 'external_connections', value: this.deps.externalConnectionManager?.toSnapshot() }
       ];
 
@@ -318,6 +325,40 @@ export class PersistenceService {
         economy.deserialize(savedEconomy);
       }
 
+      // 2.5 ワールド規模・地形テンプレート・シード値の復元
+      const worldMeta = systemMap.get('world_meta');
+      if (worldMeta && worldMeta.gridSize) {
+        const savedSize = worldMeta.gridSize as MapSize;
+        const savedTerrain: TerrainType = worldMeta.terrainType || getGridManager().terrainType || 'balanced';
+        const savedSeed: number = typeof worldMeta.seed === 'number'
+          ? worldMeta.seed
+          : Math.floor(Math.random() * 0x7fffffff);
+        const curGrid = getGridManager();
+        if (
+          curGrid.mapSize !== savedSize ||
+          curGrid.terrainType !== savedTerrain ||
+          curGrid.seed !== savedSeed ||
+          worldMap.gridSize !== savedSize
+        ) {
+          const newGrid = new GridManager(savedSize, savedTerrain, savedSeed);
+          this.deps.setGridManager(newGrid);
+          renderer.updateGroundAndGridSize(savedSize);
+          worldMap.setGridSize(savedSize);
+          worldMap.setElevationProvider((x, z) => {
+            const cell = newGrid.getCell(x, 1, z);
+            return cell ? Math.max(0, (cell.elevation - 1) * 3.0) : 0;
+          });
+          this.deps.cityGrowth.setGridManager(newGrid);
+          worldMap.gridManagerRef = newGrid;
+          this.deps.chunkManager.setGridManager(newGrid);
+          this.deps.miniMap.setGridManager(newGrid);
+          this.deps.externalConnectionManager?.initDefaultCities(savedSize);
+        }
+      }
+
+      visualEffectManager.clearAllZoneOverlays();
+      visualEffectManager.clearAllCargoYardVisuals();
+
       // 3. タイルデータおよび駅構成
       const savedTiles = await db.tiles.toArray();
       const stationData = systemMap.get('stations');
@@ -379,8 +420,8 @@ export class PersistenceService {
 
       fleetController.ensureIntegrityWithRunningTrains();
 
-      // フォールバック初期列車
-      if (!trainsLoaded && fleetController.getFleetRegistry().length === 0) {
+      // フォールバック初期列車（fleetデータ自体が未保存だった場合のみ生成）
+      if (!trainsLoaded && savedFleet === undefined && fleetController.getFleetRegistry().length === 0) {
         const track = worldMap.getAllTiles().find(t => t.type.includes('station') || t.type.includes('rail'));
         if (track) {
           const vehicle = getVehicleById('commuter-train');
@@ -622,8 +663,11 @@ export class PersistenceService {
 
   /**
    * 新規作成によるゲーム開始（非同期）
+   * @param mapSize マップ規模
+   * @param terrainType 地形テンプレート
+   * @param seed 指定シード値（未指定時は完全ランダムシードを生成）
    */
-  public async startNewGame(mapSize: MapSize, terrainType: TerrainType): Promise<void> {
+  public async startNewGame(mapSize: MapSize, terrainType: TerrainType, seed?: number): Promise<void> {
     const {
       gameState,
       renderer,
@@ -646,7 +690,7 @@ export class PersistenceService {
     } = this.deps;
 
     gameState.startNewGame(mapSize, terrainType);
-    const newGrid = new GridManager(mapSize, terrainType);
+    const newGrid = new GridManager(mapSize, terrainType, seed);
     this.deps.setGridManager(newGrid);
 
     renderer.updateGroundAndGridSize(mapSize);
@@ -685,6 +729,7 @@ export class PersistenceService {
     cameraManager.stopTracking();
     cameraManager.setQuarterViewMode();
     uiManager.setCameraModeUI('orbit');
+    await this.saveGame(false);
   }
 
   /**
@@ -773,9 +818,11 @@ export class PersistenceService {
     const helpModal = document.getElementById('help-modal');
     if (helpModal) helpModal.classList.add('hidden');
 
-    const newGrid = new GridManager(64, 'balanced');
+    const currentSize = this.deps.getGridManager().mapSize || 256;
+    const currentTerrain = this.deps.getGridManager().terrainType || 'balanced';
+    const newGrid = new GridManager(currentSize, currentTerrain);
     this.deps.setGridManager(newGrid);
-    worldMap.setGridSize(64);
+    worldMap.setGridSize(currentSize);
     worldMap.setElevationProvider((x, z) => {
       const cell = newGrid.getCell(x, 1, z);
       return cell ? Math.max(0, (cell.elevation - 1) * 3.0) : 0;
@@ -785,7 +832,7 @@ export class PersistenceService {
 
     onLayerSwitched(1);
 
-    renderer.updateGroundAndGridSize(64);
+    renderer.updateGroundAndGridSize(currentSize);
     renderer.clearGroundHoles();
     worldMap.clearAll();
     this.deps.undoManager?.clear();
@@ -805,7 +852,7 @@ export class PersistenceService {
     chunkManager.setGridManager(newGrid);
     miniMap.setGridManager(newGrid);
 
-    this.deps.externalConnectionManager?.initDefaultCities(64);
+    this.deps.externalConnectionManager?.initDefaultCities(currentSize);
     this.buildInitialCity();
     terrainRenderer.build(newGrid, renderer.scene);
     cameraManager.stopTracking();

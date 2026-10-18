@@ -68,6 +68,8 @@ export class TrainCollisionSystem {
    */
   public canBypassAtsForCoupling(follower: TrainInstance, leader: TrainInstance, worldMap: WorldMap): boolean {
     if (!leader.isStopped) return false;
+    // 異なる車種（旅客と貨物、特急と通勤型など）の異種併合を防止
+    if (follower.model.id !== leader.model.id) return false;
 
     const followerTile = worldMap.getTile(follower.currentTile.x, follower.currentTile.z, follower.currentTile.layer);
     const leaderTile = worldMap.getTile(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer);
@@ -83,6 +85,9 @@ export class TrainCollisionSystem {
     // 駅ID(stationGroupId)ではなく、番線・ホームID(stationPlatformId)で同一ホームか判定する
     const leaderPlatformId = leaderTile.stationPlatformId ?? leaderTile.stationGroupId;
     if (!leaderPlatformId) return false;
+
+    // 同じホームで分割された直後の編成（既に lastStationGroupId がこのホームになっている編成）は再連結させない
+    if (follower.lastStationGroupId === leaderPlatformId) return false;
 
     const targetTileData = worldMap.getTile(follower.targetTile.x, follower.targetTile.z, follower.targetTile.layer);
     let followerPlatformId =
@@ -187,6 +192,19 @@ export class TrainCollisionSystem {
       // 【高倍速LOD】speedMultiplier >= 60 の場合は、台車の微細な幾何計算ループをバイパス
       if (speedMultiplier >= 60) {
         for (const trainB of candidateTrains) {
+          const dx = trainB.frontPosition.x - trainA.frontPosition.x;
+          const dz = trainB.frontPosition.z - trainA.frontPosition.z;
+          const dot = dx * trainA.direction.x + dz * trainA.direction.z;
+          const l1 = next1 ? ((next1.layer ?? trainA.targetTile.layer) as GridLayer) : trainA.targetTile.layer;
+          const isTargetBlocked = trainB.occupiedTiles.some(ot =>
+            (ot.x === trainA.targetTile.x && ot.z === trainA.targetTile.z && ot.layer === trainA.targetTile.layer) ||
+            (next1 !== null && ot.x === next1.x && ot.z === next1.z && ot.layer === l1)
+          );
+
+          if (dot <= 0 && !isTargetBlocked) {
+            continue; // 後方にいる列車なので自列車は停止しない
+          }
+
           if (this.canBypassAtsForCoupling(trainA, trainB, worldMap)) {
             trainA.isApproachingCouple = true;
             continue;

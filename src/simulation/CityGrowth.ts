@@ -2,6 +2,7 @@ import { WorldMap, TileData } from './WorldMap';
 import { GridManager } from '../core/GridManager';
 import { ZoneManager } from '../core/ZoneManager';
 import { GridLayer } from '../core/types';
+import { UndoManager } from '../core/UndoManager';
 
 // 周囲8近傍オフセット
 const NEIGHBORS_8 = [
@@ -61,7 +62,9 @@ export class CityGrowth {
       if (WorldMap.isStationTileType(t.type)) {
         const tLayer = (t.layer ?? 1) as GridLayer;
         const start = this.worldMap.getStationStartTile(t.x, t.z, tLayer) || t;
-        const key = `${start.x}_${start.z}_${start.layer ?? 1}`;
+        // 複数番線を持つ駅が番線ごとに重複評価されるのを防ぐため、駅ID（station.id）を優先キーにする
+        const platInfo = this.worldMap.stationManager.getPlatformByTile(start.x, start.z, tLayer);
+        const key = platInfo ? platInfo.station.id : (start.stationGroupId || `${start.x}_${start.z}_${start.layer ?? 1}`);
         if (!stationGroups.has(key)) {
           stationGroups.set(key, start);
         }
@@ -194,39 +197,35 @@ export class CityGrowth {
             if (isComZone) {
               this.worldMap.setTile(tx, tz, 'commercial', 0, 1, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 20 + 15);
+              totalNewPop += UndoManager.getTilePopulation('commercial', 1);
             } else if (isIndZone) {
               this.worldMap.setTile(tx, tz, 'industrial', 0, 1, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 15 + 10);
+              totalNewPop += UndoManager.getTilePopulation('industrial', 1);
             } else if (isResZone) {
               this.worldMap.setTile(tx, tz, 'residence', 0, 1, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 15 + 10);
+              totalNewPop += UndoManager.getTilePopulation('residence', 1);
             }
           }
         }
         // 2. 既存住宅タイルの処理（商業への転換 または 住宅自身のレベルアップ）
         else if (tile.type === 'residence') {
           let actionTaken = false;
+          const prevPop = UndoManager.getTilePopulation('residence', tile.level);
 
-          // 駅至近の住宅が商業へ転換（駅直近かつ商業ゾーン、または未ゾーニング時）
           if (dist <= 2.0 && maxAllowedLevel >= 2 && developedCount < maxDailyGrowthCount) {
             const allowedByZone = !commercialZoned || zoneHere?.type === 'commercial';
             if (allowedByZone && Math.random() < 0.15) {
-              // 商業Lvも maxAllowedLevel を上限とする
               const nextLvl = Math.min(maxAllowedLevel, tile.level);
               this.worldMap.setTile(tx, tz, 'commercial', 0, nextLvl, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 25 + 20);
+              totalNewPop += Math.max(0, UndoManager.getTilePopulation('commercial', nextLvl) - prevPop);
               actionTaken = true;
             }
           }
 
-          // 商業に転換しなかった住宅のレベルアップ
-          // 【最重要】tile.level < maxAllowedLevel の場合のみレベルアップ許可！
           if (!actionTaken && tile.level < maxAllowedLevel && developedCount < maxDailyGrowthCount) {
-            // 立地条件（道路隣接や距離、ゾーン指定）
             const canUpgrade =
               (tile.level === 1 && (dist <= 4.0 || zoneHere?.type === 'residential')) ||
               (tile.level === 2 && dist <= 3.5 && (hasRoadAdjacent || zoneHere?.type === 'residential')) ||
@@ -238,15 +237,13 @@ export class CityGrowth {
                 const nextLevel = tile.level + 1;
                 this.worldMap.setTile(tx, tz, 'residence', tile.rotation, nextLevel, 'right', targetLayer);
                 developedCount++;
-                const popGains = [0, 15, 30, 60, 100];
-                totalNewPop += popGains[nextLevel] || 25;
+                totalNewPop += UndoManager.getTilePopulation('residence', nextLevel) - prevPop;
               }
             }
           }
         }
         // 3. 既存商業ビルのレベルアップ
         else if (tile.type === 'commercial') {
-          // 【最重要】tile.level < maxAllowedLevel の場合のみレベルアップ許可！
           if (tile.level < maxAllowedLevel && developedCount < maxDailyGrowthCount) {
             const canUpgrade =
               (tile.level === 1 && dist <= 4.0) ||
@@ -256,11 +253,11 @@ export class CityGrowth {
             if (canUpgrade) {
               const upgradeChance = ((radius - dist + 1) / (radius + 1)) * 0.22;
               if (Math.random() < Math.max(0.1, upgradeChance)) {
+                const prevPop = UndoManager.getTilePopulation('commercial', tile.level);
                 const nextLevel = tile.level + 1;
                 this.worldMap.setTile(tx, tz, 'commercial', tile.rotation, nextLevel, 'right', targetLayer);
                 developedCount++;
-                const popGains = [0, 20, 40, 70, 120];
-                totalNewPop += popGains[nextLevel] || 30;
+                totalNewPop += UndoManager.getTilePopulation('commercial', nextLevel) - prevPop;
               }
             }
           }
@@ -269,22 +266,22 @@ export class CityGrowth {
         else if (tile.type === 'industrial') {
           if (tile.level < Math.min(3, maxAllowedLevel) && developedCount < maxDailyGrowthCount) {
             if (Math.random() < 0.15) {
+              const prevPop = UndoManager.getTilePopulation('industrial', tile.level);
               const nextLevel = tile.level + 1;
               this.worldMap.setTile(tx, tz, 'industrial', tile.rotation, nextLevel, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 20 + 15);
+              totalNewPop += UndoManager.getTilePopulation('industrial', nextLevel) - prevPop;
             }
           }
         }
-        // 5. 既存農地タイルの都市化（セルラーオートマトン遷移ルール）
-        // 周囲8マスの建物（residence / commercial）が3つ以上になると、farmland が residence (Lv.1) に自動転換
+        // 5. 既存農地タイルの都市化
         else if (tile.type === 'farmland') {
           if (developedCount < maxDailyGrowthCount) {
             const surroundingBuildings = this.countSurroundingBuildings(tx, tz, targetLayer);
             if (surroundingBuildings >= 3) {
               this.worldMap.setTile(tx, tz, 'residence', 0, 1, 'right', targetLayer);
               developedCount++;
-              totalNewPop += Math.floor(Math.random() * 15 + 10);
+              totalNewPop += UndoManager.getTilePopulation('residence', 1);
             }
           }
         }
@@ -373,7 +370,9 @@ export class CityGrowth {
     for (const { dx, dz } of FARMLAND_OFFSETS) {
       const tx = st.x + dx;
       const tz = st.z + dz;
-      const tile = this.worldMap.getTile(tx, tz, 1);
+      const cell = this.gridManager ? this.gridManager.getCell(tx, 1, tz) : null;
+      const targetLayer = (cell ? Math.max(1, cell.elevation) : 1) as GridLayer;
+      const tile = this.worldMap.getTile(tx, tz, targetLayer) || this.worldMap.getTile(tx, tz, 1);
       if (tile && tile.type === 'farmland') {
         existingFarmlandCount++;
       }

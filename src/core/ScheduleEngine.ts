@@ -21,11 +21,6 @@ export function resolveArrival(schedule: StationSchedule | undefined, hour: numb
   if (!schedule) return { mode: 'hold', requiredStopMinutes: 0 };
   const currentMin = hour * 60 + minute;
 
-  // 駅全体の折り返し設定の有無を確認（ピンまたはゾーンのいずれかに折り返しがあれば初期折り返し候補とする）
-  const hasPinReverse = !!(schedule.reverseDepartures && schedule.reverseDepartures.length > 0);
-  const anyZoneReverse = (schedule.timeZones || []).some(z => z.isReverse);
-  const defaultReverse = hasPinReverse || anyZoneReverse;
-
   // 現在時刻に合致するすべてのゾーンを抽出
   const activeZones = (schedule.timeZones || []).filter(z => isMinuteInZone(currentMin, z.startMin, z.endMin));
 
@@ -42,34 +37,32 @@ export function resolveArrival(schedule: StationSchedule | undefined, hour: numb
     );
   } else if (isPinSplit) {
     splitConfig = schedule.splitConfig || createDefaultSplitConfig(2, 2, false);
-  } else if (schedule.splitConfig && schedule.splitConfig.enabled) {
-    splitConfig = schedule.splitConfig;
   }
 
   if (activeZones.length === 0) {
-    return { mode: 'hold', requiredStopMinutes: 0, isReverse: defaultReverse, splitConfig };
+    return { mode: 'hold', requiredStopMinutes: 0, isReverse: false, splitConfig };
   }
 
   // 1. 通過ゾーンがあれば通過優先
   const passZone = activeZones.find(z => z.mode === 'pass');
   if (passZone) {
-    return { mode: 'pass', requiredStopMinutes: 0, isReverse: !!passZone.isReverse || defaultReverse };
+    return { mode: 'pass', requiredStopMinutes: 0, isReverse: !!passZone.isReverse };
   }
 
   // 2. パターンダイヤゾーンがあれば待機（発車分まで停車）
+  // ※ パターンダイヤでの待機中は、実際の発車時にトリガーとなるパターンゾーン固有の isReverse を正本として評価するため、到着時の全体折り返し汚染を避けるよう false とする
   const patternZones = activeZones.filter(z => z.mode === 'pattern');
   if (patternZones.length > 0) {
-    const anyReverse = patternZones.some(z => z.isReverse);
-    return { mode: 'wait', requiredStopMinutes: 0, isReverse: anyReverse || defaultReverse, splitConfig };
+    return { mode: 'wait', requiredStopMinutes: 0, isReverse: false, splitConfig };
   }
 
   // 3. 停車時間指定ゾーン
   const stopZone = activeZones.find(z => z.mode === 'stop');
   if (stopZone) {
-    return { mode: 'stop', requiredStopMinutes: stopZone.waitMinutes || 1, isReverse: !!stopZone.isReverse || defaultReverse, splitConfig };
+    return { mode: 'stop', requiredStopMinutes: stopZone.waitMinutes || 1, isReverse: !!stopZone.isReverse, splitConfig };
   }
 
-  return { mode: 'hold', requiredStopMinutes: 0, isReverse: defaultReverse, splitConfig };
+  return { mode: 'hold', requiredStopMinutes: 0, isReverse: false, splitConfig };
 }
 
 /**
@@ -185,6 +178,11 @@ export function getPatternDepartureMinutes(zone: TimeZoneRule): number[] {
     if (departures.includes(wrapped)) {
       break;
     }
+    // ゾーン終端時刻（wrapped === zone.endMin）ピッタリの発車は、次ゾーンの開始(startMin)と重複するため含めない
+    // ※ ただし 24:00 (1440) や単一時刻ゾーンを除く
+    if (zone.endMin < 1440 && wrapped === zone.endMin && zone.startMin !== zone.endMin) {
+      break;
+    }
     departures.push(wrapped);
     current += interval;
   }
@@ -221,7 +219,7 @@ export function evaluateStationDeparture(
     const matchedDep = schedule.departures.find(dep => isMinuteInRange(prevMin, currentMin, dep));
     if (matchedDep !== undefined) {
       const isRev = !!(schedule.reverseDepartures && schedule.reverseDepartures.some(rd => Math.abs(rd - matchedDep) <= 1));
-      return { canDepart: true, shouldReverse: isRev || initialReverse };
+      return { canDepart: true, shouldReverse: isRev }; // ★ initialReverse とのORを廃止し、ピンの設定に従わせる
     }
   }
 
@@ -233,46 +231,37 @@ export function evaluateStationDeparture(
   );
 
   if (activeZones.length > 0) {
-    // 2-a. 通過ゾーン: 現在時刻が通過ゾーン内なら即発車
+    // 2-a. 通過ゾーン: 現在時刻が通過ゾーン内なら即発車（通過ゾーン自体の折り返し設定を正本とする）
     const passZone = activeZones.find(z => z.mode === 'pass');
     if (passZone) {
-      return { canDepart: true, shouldReverse: !!passZone.isReverse || initialReverse };
+      return { canDepart: true, shouldReverse: !!passZone.isReverse };
     }
 
-    // 2-b. パターンダイヤゾーン: 
-    // 現在アクティブなパターンゾーンの発車時刻のうち、今回の進行区間（prevMin〜currentMin）に合致するものがあるか判定
-    const matchedPattern = activeZones.find(z => {
+    // 2-b. パターンダイヤゾーン:
+    // 現在アクティブなパターンゾーンの発車時刻のうち、今回の進行区間（prevMin〜currentMin）に合致するものを判定
+    const matchingPatterns = activeZones.filter(z => {
       if (z.mode !== 'pattern') return false;
       const deps = getPatternDepartureMinutes(z);
-      // ① 生成された発車ピンリストとの区間一致
-      if (deps.some(dep => isMinuteInRange(prevMin, currentMin, dep))) {
-        return true;
-      }
-      // ② 高倍速時（1サブステップで複数分進行時）のパターン発車間隔による直接区間判定
-      const patMin = z.patternMinute ?? (z.startMin % 60);
-      const interval = z.patternIntervalMinutes ?? 60;
-      if (isPatternIntervalInRange(prevMin, currentMin, patMin, interval, z.startMin)) {
-        // 発車時刻がゾーン時間内にあることを確認
-        return isZoneIntersectingRange(prevMin, currentMin, z.startMin, z.endMin);
-      }
-      return false;
+      return deps.some(dep => isMinuteInRange(prevMin, currentMin, dep));
     });
-    if (matchedPattern) {
-      return { canDepart: true, shouldReverse: !!matchedPattern.isReverse || initialReverse };
+    if (matchingPatterns.length > 0) {
+      // 複数合致した場合は、現在時刻がゾーン開始分(startMin)と一致するゾーン、または個別設定（後方カード）を優先
+      const matchedPattern = matchingPatterns.find(z => z.startMin === currentMin) || matchingPatterns[matchingPatterns.length - 1];
+      return { canDepart: true, shouldReverse: !!matchedPattern.isReverse };
     }
 
     // 2-c. 停車時間指定ゾーン (stop):
-    // 指定停車時間（waitMinutes）を満たしていれば即座に発車可能（超過即時反映）
+    // 指定停車時間（waitMinutes）を満たしていれば即座に発車可能（そのゾーン固有の折り返し設定を正本とする）
     const readyStopZone = activeZones.find(z => z.mode === 'stop' && stopElapsedMinutes >= (z.waitMinutes || 1));
     if (readyStopZone) {
-      return { canDepart: true, shouldReverse: !!readyStopZone.isReverse || initialReverse };
+      return { canDepart: true, shouldReverse: !!readyStopZone.isReverse };
     }
 
     // パターン待ち、または停車時間未達のstopゾーンが存在する場合は、発車を抑止（待機維持）
     const hasPendingPattern = activeZones.some(z => z.mode === 'pattern');
     const hasUnfinishedStop = activeZones.some(z => z.mode === 'stop');
     if (hasPendingPattern || hasUnfinishedStop) {
-      return { canDepart: false, shouldReverse: initialReverse };
+      return { canDepart: false, shouldReverse: false };
     }
   }
 
@@ -286,7 +275,7 @@ export function evaluateStationDeparture(
   }
 
   // デフォルトは発車せず待機（hold）
-  return { canDepart: false, shouldReverse: initialReverse };
+  return { canDepart: false, shouldReverse: false };
 }
 
 /**

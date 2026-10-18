@@ -177,6 +177,35 @@ export class StationManager {
       this.stations.set(stationId, targetStation);
     }
 
+    // ★追加: 同一軌道軸・同一階層で前後に隣接（直列接続）している既存ホームがあれば、別番線にせずそのホームを延伸統合する
+    const inlinePlatform = targetStation.platforms.find(p => {
+      if (p.trackAxis !== trackAxis) return false;
+      return p.tiles.some(pt =>
+        tiles.some(nt => {
+          if (pt.layer !== nt.layer) return false;
+          const dx = Math.abs(pt.x - nt.x);
+          const dz = Math.abs(pt.z - nt.z);
+          return trackAxis === 0 ? (dx === 0 && dz === 1) : (dz === 0 && dx === 1);
+        })
+      );
+    });
+
+    if (inlinePlatform) {
+      for (const t of tiles) {
+        if (!inlinePlatform.tiles.some(pt => pt.x === t.x && pt.z === t.z && pt.layer === t.layer)) {
+          inlinePlatform.tiles.push(t);
+        }
+        this.tileToPlatform.set(this.makeTileKey(t.x, t.z, t.layer), {
+          stationId: targetStation.id,
+          platformId: inlinePlatform.id
+        });
+      }
+      // 座標順にソートして有効長を更新
+      inlinePlatform.tiles.sort((a, b) => (a.x - b.x) || (a.z - b.z));
+      inlinePlatform.length = inlinePlatform.tiles.length;
+      return { station: targetStation, platform: inlinePlatform };
+    }
+
     // ホームIDの生成と番線番号の採番
     const platformNumber = targetStation.platforms.length + 1;
     const platformId = `${targetStation.id}_p${platformNumber}`;
@@ -241,11 +270,11 @@ export class StationManager {
             // 平行する線路（南北軸なら X差が1〜2マス以内で Zが重複または近接）
             const dx = Math.abs(pt.x - tile.x);
             const dz = Math.abs(pt.z - tile.z);
-            if (trackAxis === 0 && dx >= 1 && dx <= 2 && dz <= 2) {
+            // 平行する近接線路、または同一線路上の前後隣接（ホーム延伸）
+            if (trackAxis === 0 && ((dx >= 1 && dx <= 2 && dz <= 2) || (dx === 0 && dz === 1))) {
               return station;
             }
-            // 東西軸なら Z差が1〜2マス以内で Xが重複または近接
-            if (trackAxis === 1 && dz >= 1 && dz <= 2 && dx <= 2) {
+            if (trackAxis === 1 && ((dz >= 1 && dz <= 2 && dx <= 2) || (dz === 0 && dx === 1))) {
               return station;
             }
           }
@@ -362,6 +391,7 @@ export class StationManager {
     if (!platform) return;
 
     platform.tiles = platform.tiles.filter(t => !(t.x === x && t.z === z && t.layer === layer));
+    platform.length = platform.tiles.length; // 有効長を現在のタイル数に同期
 
     // ホームの全タイルが撤去されたらホームを除去
     if (platform.tiles.length === 0) {

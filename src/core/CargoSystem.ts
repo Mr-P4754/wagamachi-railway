@@ -77,7 +77,7 @@ export class CargoSystem {
     }>();
 
     for (const t of allTiles) {
-      if (t.type.startsWith('cargo_station')) {
+      if (t.type.startsWith('cargo_station') || t.isCargoYard) {
         const groupId = t.stationGroupId || `${t.x},${t.z},${t.layer ?? 1}`;
         if (!cargoStationGroups.has(groupId)) {
           const stTiles = worldMap.getStationTiles(t.x, t.z, (t.layer ?? 1) as GridLayer);
@@ -206,15 +206,11 @@ export class CargoSystem {
       totalDelivered += accepted;
     }
 
-    // 2. もし周辺の商業ゾーンが全て魅力度100に達している場合でも、
-    // 商業エリア内の貨物駅としてコンテナの受入・販売（消費）を完了させ、運賃収入を得られるようにする
+    // 2. 周辺の商業ゾーンが全て魅力度100に達しているか、商業ビル(施設タイル)のみが隣接している場合でも、
+    // 冒頭の isStationInArea('commercial') を満たしているため商業貨物駅として全量受入・販売完了とする
     if (remaining > 0) {
-      const anyCommercial = this.zoneManager.findNearestCommercial(x, z, 40, layer);
-      if (anyCommercial) {
-        // 魅力度はカンスト済みだが、商業エリア内の店舗へ正常に納品・販売された
-        totalDelivered += remaining;
-        remaining = 0;
-      }
+      totalDelivered += remaining;
+      remaining = 0;
     }
 
     // 納品先が全く見つからなかった場合はコンテナを消費せず 0 を返却（ブラックホール蒸発防止）

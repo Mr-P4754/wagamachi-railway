@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GridLayer } from '../core/types';
+import { layerToHeight } from '../core/Grid3D';
 import { WorldMap } from '../simulation/WorldMap';
 import { ZoneManager } from '../core/ZoneManager';
 import { CargoSystem } from '../core/CargoSystem';
@@ -149,8 +150,8 @@ export class VisualEffectManager {
 
       const group = new THREE.Group();
       const elevOffset = curT.elevationOffset ?? 0;
-      const isElevated = curT.type.includes('elevated');
-      const baseHeight = (isElevated ? 3.0 : 0) + elevOffset;
+      const isElevated = curT.type.includes('elevated') || tLayer >= 2;
+      const baseHeight = layerToHeight(tLayer, elevOffset);
       const railBaseHeight = isElevated ? 0.2 : 0;
       const sideMult = curT.stationPlatformSide === 'left' ? -1 : 1;
 

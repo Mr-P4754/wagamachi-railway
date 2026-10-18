@@ -226,10 +226,7 @@ export class Economy {
     stationTax: number;
     carTax: number;
   } {
-    if (currentYear !== undefined) {
-      this.year = currentYear;
-    }
-    const fiscalYear = this.year;
+    const fiscalYear = currentYear !== undefined ? currentYear : this.year;
     this.lastSettledYear = fiscalYear;
 
     // 営業黒字（運賃収入[旅客+貨物] - 維持費）

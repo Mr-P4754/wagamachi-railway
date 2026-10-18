@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WorldMap, CurveDirection, TileType, TileData, createDefaultStationSchedule, TileDataSnapshot, cloneTileSnapshot } from '../simulation/WorldMap';
+import { WorldMap, CurveDirection, TileType, TileData, createDefaultStationSchedule, cloneStationSchedule, TileDataSnapshot, cloneTileSnapshot, getStationScheduleScore } from '../simulation/WorldMap';
 import { TrainManager } from '../simulation/TrainManager';
 import { Economy } from '../simulation/Economy';
 import { AudioManager } from '../engine/AudioManager';
@@ -339,22 +339,19 @@ export class PlacementController {
 
       const groundElevY = this.worldMap.getElevationOffset(tx, tz);
       const activeLayer = this.worldMap.activeLayer;
-      const baseHeight = layerToHeight(activeLayer);
 
       const isSurfaceTool = tool.startsWith('zone-') || tool === 'road' || tool === 'nature' || tool.startsWith('building-');
       const isStationTool = tool === 'station-small' || tool === 'station-elevated' || tool === 'signal-yard' || tool === 'cargo-station';
-      const isTunnelSection = !isStationTool && !isSurfaceTool && (this.worldMap.isTunnelSection(tx, tz, activeLayer) || tool === 'rail-tunnel');
-
       let finalY: number;
       if (isSurfaceTool) {
-        // ゾーニング・道路・建物・自然ツールは常にそのマスの地表（山岳天面）の高さにスナップ
         finalY = groundElevY;
       } else {
-        let effectiveBaseHeight = baseHeight;
+        let effectiveLayer = activeLayer;
         if (tool === 'station-elevated' && activeLayer === 1) {
-          effectiveBaseHeight = layerToHeight(2);
+          effectiveLayer = 2;
         }
-        const elevOffset = (activeLayer === 1 && !isTunnelSection && tool !== 'station-elevated') ? groundElevY : 0;
+        const effectiveBaseHeight = layerToHeight(effectiveLayer);
+        const elevOffset = this.worldMap.getTrackElevationOffset(tx, tz, effectiveLayer);
         finalY = effectiveBaseHeight + elevOffset;
       }
 
@@ -565,10 +562,9 @@ export class PlacementController {
         if (seg.tool === 'rail-curve-elevated') seg.tool = 'rail-curve';
       }
 
-      // ★修正: 既存の直線レールの上にドラッグのL字コーナー(curveDir)が重なった場合、
-      // または始点マスから既存レールと直交する方向へドラッグを開始した場合、自動で分岐器プレビューに変換
+      // ★修正: seg.tool !== 'road' を追加し、道路ドラッグ時は踏切生成へ進ませる
       const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
-      if (existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
+      if (seg.tool !== 'road' && existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
         const straightAxis = (existing.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
         const straightDirs = straightAxis === 0 ? [0, 2] : [1, 3];
 
@@ -625,6 +621,7 @@ export class PlacementController {
       if (!waterCheck.allowed) continue;
       if (this.pendingItems.some(p => p.x === seg.x && p.z === seg.z && (p.layer ?? 1) === seg.layer)) continue;
       const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
+      if (existing && existing.type === 'level_crossing') continue; // 既存踏切の通過は課金対象外
       const isCrossing = !seg.isCorner && isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
       if (this.worldMap.isPermanentTrackOrStation(seg.x, seg.z, seg.layer) && !isCrossing && !seg.isAutoSwitch) continue;
       // 農地(farmland)と自然(nature)のみ、線路・道路の敷設時に自動で切り拓いて上書き可能とする（建物は誤破壊と人口バグ防止のため保護）
@@ -689,8 +686,21 @@ export class PlacementController {
 
     if (this.dragCurrentSegments.length === 0) return;
 
+    const curActiveLayer = this.worldMap.activeLayer;
+    if (this.uiManager.getActiveTool() === 'road' && curActiveLayer < 0) {
+      this.uiManager.showToast('設置不可', '地下階層には道路を設置できません。地上1F以上の階層に切り替えてください。', 'warning');
+      return;
+    }
+
     let addedCount = 0;
     for (const seg of this.dragCurrentSegments) {
+      if (seg.tool === 'road') {
+        const cell = this.gridManager.getCell(seg.x, 1, seg.z);
+        const surfaceElev = cell ? cell.elevation : 1;
+        if (seg.layer < surfaceElev) {
+          seg.layer = surfaceElev as GridLayer;
+        }
+      }
       const waterCheck = this.worldMap.canPlaceAtWater(seg.x, seg.z, seg.layer);
       if (!waterCheck.allowed) continue;
 
@@ -698,11 +708,11 @@ export class PlacementController {
         continue;
       }
       const existing = this.worldMap.getTile(seg.x, seg.z, seg.layer);
+      if (existing && existing.type === 'level_crossing') continue; // 既存踏切はそのまま通過（仮置き不要）
       const isCrossing = !seg.isCorner && isLevelCrossingCombination(seg.tool, seg.rotation, existing, seg.layer);
 
-      // ★修正: 既存の直線レールの上にドラッグのL字コーナー(curveDir または isAutoSwitch)が重なった場合、
-      // または始点マスから直交方向へドラッグした直線の場合、自動で分岐器に変換
-      if (existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
+      // ★修正: seg.tool !== 'road' を追加し、道路ドラッグ時は踏切生成へ進ませる
+      if (seg.tool !== 'road' && existing && (existing.type === 'rail_ground' || existing.type === 'rail_elevated')) {
         const straightAxis = (existing.rotation ?? 0) % 2; // 0: 南北(0,2), 1: 東西(1,3)
         const straightDirs = straightAxis === 0 ? [0, 2] : [1, 3];
         let forward = seg.rotation;
@@ -991,9 +1001,10 @@ export class PlacementController {
     const ghost = this.createGhostMesh(item.tool, item.rotation, item.stationPart ?? 'single', branchSide, platformSide, targetLayer, item.x, item.z);
     if (ghost) {
       const baseHeight = layerToHeight(targetLayer);
-      const isStationOrYard = item.tool === 'station-small' || item.tool === 'station-elevated' || item.tool === 'signal-yard' || item.tool === 'cargo-station';
-      const isTunnel = !isStationOrYard && (this.worldMap.isTunnelSection(item.x, item.z, targetLayer) || item.tool === 'rail-tunnel');
-      const elevY = (targetLayer === 1 && !isTunnel) ? this.worldMap.getElevationOffset(item.x, item.z) : 0;
+      const isSurfaceTool = item.tool === 'road' || item.tool === 'nature' || item.tool.startsWith('building-');
+      const elevY = isSurfaceTool
+        ? ((targetLayer === 1) ? this.worldMap.getElevationOffset(item.x, item.z) : 0)
+        : this.worldMap.getTrackElevationOffset(item.x, item.z, targetLayer);
       ghost.position.set(item.x * WorldMap.TILE_SIZE, baseHeight + elevY, item.z * WorldMap.TILE_SIZE);
       this.scene.add(ghost);
     }
@@ -1043,7 +1054,7 @@ export class PlacementController {
       const part = (len === 1) ? 'single' : (i === 0 ? 'start' : (i === len - 1 ? 'end' : 'mid'));
       const mesh = this.createGhostMesh(tool, rot, part, this.currentSwitchSide, side, targetLayer, tx, tz);
       if (mesh) {
-        const elevY = (targetLayer === 1) ? this.worldMap.getElevationOffset(tx, tz) : 0;
+        const elevY = this.worldMap.getTrackElevationOffset(tx, tz, targetLayer);
         mesh.position.set(stepX * i * WorldMap.TILE_SIZE, elevY, stepZ * i * WorldMap.TILE_SIZE);
         group.add(mesh);
       }
@@ -1128,6 +1139,11 @@ export class PlacementController {
     };
 
     let curLayer: GridLayer = this.worldMap.activeLayer;
+    const isSurfaceOnlyTool = tool === 'road' || tool === 'nature' || tool.startsWith('building-');
+    if (isSurfaceOnlyTool && curLayer < 0) {
+      this.uiManager.showToast('設置不可', '地下階層には道路・建物・植林を設置できません。地上1F以上の階層に切り替えてください。', 'warning');
+      return;
+    }
     if (tool === 'station-elevated' && curLayer === 1) {
       curLayer = 2;
     }
@@ -1145,6 +1161,12 @@ export class PlacementController {
         this.uiManager.showToast('敷設不可', '地下勾配線路は地上1Fから地下B1Fへの接続専用です。地上1Fでご利用ください。', 'warning');
         return;
       }
+    }
+    const cellAtPos = this.gridManager.getCell(x, 1, z);
+    const surfaceElev = cellAtPos ? cellAtPos.elevation : 1;
+    const isSurfacePlacementTool = tool === 'road' || tool === 'nature' || tool.startsWith('building-');
+    if (isSurfacePlacementTool && curLayer < surfaceElev) {
+      curLayer = surfaceElev as GridLayer;
     }
     let effectiveTool = this.resolveAutoToolForLayer(tool, curLayer, x, z);
     if ((tool === 'rail-straight' || tool === 'rail-elevated' || tool === 'rail-tunnel') && this.worldMap.isTunnelSection(x, z, curLayer)) {
@@ -1400,7 +1422,8 @@ export class PlacementController {
       isSwitchCandidate = true;
     }
 
-    const isCrossingCandidate = isLevelCrossingTool || isLevelCrossingCombination(effectiveTool, this.currentRotation, existingTile, curLayer);
+    const isCrossingCandidate = isLevelCrossingTool ||
+      (existingTile?.type !== 'level_crossing' && isLevelCrossingCombination(effectiveTool, this.currentRotation, existingTile, curLayer));
 
     if (this.worldMap.isPermanentTrackOrStation(x, z, curLayer) && !isCrossingCandidate && !isSwitchCandidate && !isScissorsCandidate) {
       this.uiManager.showToast('設置不可', '線路や駅が存在する位置には設置できません。', 'warning');
@@ -1656,20 +1679,55 @@ export class PlacementController {
           existingStationId: stGroupId,
           customName: firstTile?.stationName || defaultCargoName
         });
-        for (const tCoord of gData.tiles) {
+        // 既存タイルにダイヤ設定があれば取得してホーム全体で統一する
+        let sharedSchedule = firstTile?.stationSchedule;
+        let sharedSide = firstTile?.stationPlatformSide ?? 'right';
+        let highestSchedScore = getStationScheduleScore(sharedSchedule);
+        for (const pt of reg.platform.tiles) {
+          const t = this.worldMap.getTile(pt.x, pt.z, pt.layer);
+          if (t?.stationSchedule) {
+            const score = getStationScheduleScore(t.stationSchedule);
+            if (score > highestSchedScore) {
+              highestSchedScore = score;
+              sharedSchedule = t.stationSchedule;
+              sharedSide = t.stationPlatformSide ?? sharedSide;
+            }
+          }
+        }
+
+        const totalLen = reg.platform.tiles.length;
+        reg.platform.tiles.forEach((tCoord, idx) => {
           const t = this.worldMap.getTile(tCoord.x, tCoord.z, tCoord.layer);
           if (t) {
             t.stationGroupId = reg.station.id;
             t.stationPlatformId = reg.platform.id;
             t.stationName = reg.station.name;
-            if (t.mesh) {
+            if (sharedSchedule) {
+              t.stationSchedule = cloneStationSchedule(sharedSchedule);
+            }
+            const expectedPart: 'single' | 'start' | 'mid' | 'end' =
+              totalLen === 1 ? 'single' : (idx === 0 ? 'start' : (idx === totalLen - 1 ? 'end' : 'mid'));
+            if (t.stationPart !== expectedPart && t.type.startsWith('station')) {
+              t.stationPart = expectedPart;
+              t.stationPlatformSide = sharedSide;
+              if (t.mesh) {
+                t.mesh.removeFromParent();
+                disposeHierarchy(t.mesh);
+              }
+              const baseH = layerToHeight(tCoord.layer);
+              const elevY = this.worldMap.getTrackElevationOffset(tCoord.x, tCoord.z, tCoord.layer);
+              const isElev = t.type.includes('elevated') || tCoord.layer >= 2;
+              const newMesh = ModelFactory.createStation(axis, isElev, expectedPart, sharedSide, reg.station.name, baseH);
+              newMesh.position.set(tCoord.x * WorldMap.TILE_SIZE, baseH + elevY, tCoord.z * WorldMap.TILE_SIZE);
+              this.worldMap.attachExternalTileMesh(t, newMesh);
+            } else if (t.mesh) {
               ModelFactory.updateStationSign(t.mesh, reg.station.name);
             }
             if (isCargo && this.onCargoYardVisualUpdate) {
               this.onCargoYardVisualUpdate(tCoord.x, tCoord.z, tCoord.layer);
             }
           }
-        }
+        });
       }
     }
 
@@ -1935,7 +1993,7 @@ export class PlacementController {
                   : (tool === 'cargo-station'
                       ? ModelFactory.createCargoStation(tileRotation, isElevated, stationPlatformSide, baseH)
                       : ModelFactory.createStation(tileRotation, isElevated, stationPart, stationPlatformSide, tile.stationName || '駅', baseH));
-                const elevY = (layer === 1) ? this.worldMap.getElevationOffset(x, z) : 0;
+                const elevY = this.worldMap.getTrackElevationOffset(x, z, layer);
                 newMesh.position.set(x * WorldMap.TILE_SIZE, baseH + elevY, z * WorldMap.TILE_SIZE);
                 this.worldMap.attachExternalTileMesh(tile, newMesh);
               }
@@ -1979,7 +2037,10 @@ export class PlacementController {
 
     if (this.pendingItems.length > 0) {
       if (tool.startsWith('station') || tool === 'signal-yard' || tool === 'cargo-station') {
-        const stationItems = this.pendingItems.filter(p => p.tool === tool);
+        // station-small が station-elevated に自動変換されていても対象として取得する
+        const stationItems = this.pendingItems.filter(
+          p => p.tool.startsWith('station') || p.tool === 'signal-yard' || p.tool === 'cargo-station'
+        );
         if (stationItems.length > 0) {
           const groupCount = Math.min(stationItems.length, this.currentStationLength);
           const startIdx = stationItems.length - groupCount;

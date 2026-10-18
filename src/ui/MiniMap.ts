@@ -386,6 +386,7 @@ export class MiniMap {
 
     // 列車マーカー描画（物流モード時はコンテナ積載中貨物列車をアンバー/オレンジで強調）
     for (const train of this.trainManager.getTrains()) {
+      if (train.externalTravel) continue; // マップ外走行中は非表示
       const tileX = train.frontPosition.x / WorldMap.TILE_SIZE;
       const tileZ = train.frontPosition.z / WorldMap.TILE_SIZE;
       const { px, py } = this.tileToPx(tileX, tileZ);

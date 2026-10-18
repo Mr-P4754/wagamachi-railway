@@ -42,7 +42,7 @@ export class GameApp {
   private terrainRenderer = new TerrainRenderer();
   private audioManager = new AudioManager();
   private gameState = GameState.getInstance();
-  private gridManager = new GridManager(64, 'balanced');
+  private gridManager = new GridManager(256, 'balanced');
   private worldMap: WorldMap;
   private trainManager: TrainManager;
   private cityGrowth: CityGrowth;
@@ -84,7 +84,7 @@ export class GameApp {
   private static readonly LOD_DETAIL_TILES = 38;
 
   constructor() {
-    this.worldMap = new WorldMap(this.renderer.scene, 64);
+    this.worldMap = new WorldMap(this.renderer.scene, 256);
     this.worldMap.setElevationProvider((x, z) => {
       const c = this.gridManager.getCell(x, 1, z);
       return c ? Math.max(0, (c.elevation - 1) * 3.0) : 0;
@@ -363,7 +363,7 @@ export class GameApp {
       ui.setTimeLightingMode(mode, (this.lastEffectiveTime = this.renderer.getTimeOfDay()));
     };
     ui.onGridToggled = (v) => this.renderer.setGridVisible(v);
-    ui.onStartNewGame = async (s, t) => { await this.persistenceService.startNewGame(s, t); };
+    ui.onStartNewGame = async (s, t, seed) => { await this.persistenceService.startNewGame(s, t, seed); };
     ui.onResumeGame = async () => { await this.persistenceService.resumeGame(); };
     ui.onRotateCameraCCW = () => this.cameraManager.rotateStepCCW();
     ui.onRotateCameraCW = () => this.cameraManager.rotateStepCW();
@@ -430,7 +430,12 @@ export class GameApp {
     };
 
     this.trainManager.onTrainSplit = (p, s) => fc.onTrainSplit(p, s);
-    this.trainManager.onTrainCoupled = (l, f) => fc.onTrainCoupled(l, f, () => this.selectedTrainId, (id) => { this.selectedTrainId = id; });
+    this.trainManager.onTrainCoupled = (l, f) => {
+      if (this.cabTargetTrainId === f.id) {
+        this.cabTargetTrainId = l.id;
+      }
+      fc.onTrainCoupled(l, f, () => this.selectedTrainId, (id) => { this.selectedTrainId = id; });
+    };
 
     ui.onConfirmBuyTrain = (m, c) => fc.buyVehicle(m, c);
     ui.onOpenFleetModal = () => { fc.syncFleetStats(); ui.showFleetModal(fc.getFleetRegistry()); };
@@ -634,10 +639,19 @@ export class GameApp {
           this.applyMeshGhost(tile.mesh, false);
         }
       } else {
-        // 階層スライス時:
-        // 地上スライス（displayLayer >= 1）: 地上全階層（l >= 1）を表示（選択階層は通常、他階層は半透明ゴースト）
-        // 地下スライス（displayLayer < 0）: 地下全階層および地上階層を表示
+        const isSurfaceTile =
+          tile.type === 'road' ||
+          tile.type === 'residence' ||
+          tile.type === 'commercial' ||
+          tile.type === 'industrial' ||
+          tile.type === 'nature' ||
+          tile.type === 'farmland' ||
+          tile.type === 'level_crossing';
+        const cell = this.gridManager.getCell(tile.x, 1, tile.z);
+        const surfaceElev = cell ? Math.max(1, cell.elevation) : 1;
+
         const isTarget = (l === displayLayer) ||
+          (displayLayer === 1 && isSurfaceTile && l === surfaceElev) ||
           (tile.type === 'rail_slope' && (l === displayLayer || l + 1 === displayLayer)) ||
           (tile.type === 'rail_slope_underground' && (l === displayLayer || displayLayer === -1)) ||
           (activeTool === 'rail-slope' && typeof displayLayer === 'number' && l === displayLayer + 1);

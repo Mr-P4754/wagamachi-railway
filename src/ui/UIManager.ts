@@ -312,8 +312,11 @@ export class UIManager {
   private btnTitleBack = document.getElementById('btn-title-back');
   private btnTitleStart = document.getElementById('btn-title-start');
   private btnTitleClose = document.getElementById('btn-title-close');
+  private inputTitleSeed = document.getElementById('input-title-seed') as HTMLInputElement | null;
+  private btnSeedRandom = document.getElementById('btn-seed-random') as HTMLButtonElement | null;
   private selectedMapSize: MapSize = 256;
   private selectedTerrainType: TerrainType = 'balanced';
+  private selectedSeed: number | undefined;
 
   // カメラ・視点回転 ＆ 透過ボタン ＆ 方位コンパス
   private btnRotateCCW = document.getElementById('btn-rotate-ccw');
@@ -372,7 +375,7 @@ export class UIManager {
   // 分岐器・シーサスクロッシング用ダイヤ設定UIを開く要求
   public onOpenSwitchSchedule: (tile: TileData) => void = () => {};
   // タイトル画面＆カメラ制御コールバック
-  public onStartNewGame: (size: MapSize, terrain: TerrainType) => void = () => {};
+  public onStartNewGame: (size: MapSize, terrain: TerrainType, seed?: number) => void = () => {};
   public onResumeGame: () => void = () => {};
   public onRotateCameraCCW: () => void = () => {};
   public onRotateCameraCW: () => void = () => {};
@@ -405,6 +408,17 @@ export class UIManager {
     this.btnTitleNew?.addEventListener('click', () => {
       this.titleMainMenu?.classList.add('hidden');
       this.titleNewGameSetup?.classList.remove('hidden');
+      this.rerollSeed();
+    });
+
+    this.btnSeedRandom?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.rerollSeed();
+    });
+
+    this.inputTitleSeed?.addEventListener('input', () => {
+      const val = parseInt(this.inputTitleSeed?.value || '', 10);
+      this.selectedSeed = Number.isFinite(val) ? val : undefined;
     });
 
     this.btnTitleBack?.addEventListener('click', () => {
@@ -449,7 +463,8 @@ export class UIManager {
     // 新規作成開始ボタン
     this.btnTitleStart?.addEventListener('click', () => {
       this.hideTitleScreen();
-      this.onStartNewGame(this.selectedMapSize, this.selectedTerrainType);
+      const finalSeed = this.selectedSeed ?? this.rerollSeed();
+      this.onStartNewGame(this.selectedMapSize, this.selectedTerrainType, finalSeed);
     });
 
     // カメラ 90度ステップ回転ボタン
@@ -873,6 +888,18 @@ export class UIManager {
         container.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
       }
     });
+  }
+
+  /**
+   * ランダムな地形シード値を生成してUIに反映
+   */
+  public rerollSeed(): number {
+    const newSeed = Math.floor(Math.random() * 0x7fffffff);
+    this.selectedSeed = newSeed;
+    if (this.inputTitleSeed) {
+      this.inputTitleSeed.value = newSeed.toString();
+    }
+    return newSeed;
   }
 
   /**
@@ -2302,6 +2329,18 @@ export class UIManager {
   public updateTrainInspectorDynamicValues(train: TrainInstance) {
     if (this.inspectorPanel.classList.contains('hidden')) return;
     if (this.inspectedTrainId !== train.id) return;
+
+    if (train.externalTravel) {
+      const travel = train.externalTravel;
+      const statusText = travel.phase === 'outward'
+        ? `[直通運行中] ${travel.cityName}へ向けて走行中 [残り${Math.ceil(travel.remainingTiles)}マス]`
+        : (travel.phase === 'at_neighbor'
+          ? `[隣町滞在] ${travel.cityName}に停車中 [折り返し待機中]`
+          : `[直通運行中] ${travel.cityName}より帰還中 [残り${Math.ceil(travel.remainingTiles)}マス]`);
+      this.inspectCoords.textContent = `編成 #${train.id} - ${statusText}`;
+    } else {
+      this.inspectCoords.textContent = `編成 #${train.id}`;
+    }
 
     const isFreight = train.model.category === 'freight';
     if (isFreight) {

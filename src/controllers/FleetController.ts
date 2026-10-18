@@ -265,8 +265,9 @@ export class FleetController {
 
     const train = this.trainManager.getTrainById(item.activeTrainId);
     if (train) {
-      item.totalPassengers = (item.totalPassengers ?? 0) + train.totalPassengers;
-      item.totalRevenue = (item.totalRevenue ?? 0) + train.totalRevenue;
+      // ★修正: syncFleetStats と同じく代入にし、二重加算を防ぐ
+      item.totalPassengers = train.totalPassengers;
+      item.totalRevenue = train.totalRevenue;
     }
     this.callbacks.onExitCabView?.();
     this.trainManager.removeTrain(item.activeTrainId);

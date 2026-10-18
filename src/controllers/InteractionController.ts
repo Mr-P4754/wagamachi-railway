@@ -314,25 +314,37 @@ export class InteractionController {
     // 4. カテゴリ別タイル撤去モード
     const demolishScope = DEMOLISH_SCOPE[tool];
     if (demolishScope) {
-      const curLayer = wm.activeLayer;
-      const tile = wm.getTile(x, z, curLayer);
+      let curLayer = wm.activeLayer;
+      let tile = wm.getTile(x, z, curLayer);
+      if ((!tile || tile.type === 'empty') && tool === 'demolish-city') {
+        const cell = gm.getCell(x, 1, z);
+        const surfaceLayer = (cell ? Math.max(1, cell.elevation) : 1) as GridLayer;
+        const surfaceTile = wm.getTile(x, z, surfaceLayer);
+        if (surfaceTile && surfaceTile.type !== 'empty') {
+          curLayer = surfaceLayer;
+          tile = surfaceTile;
+        }
+      }
       if (tile && tile.type !== 'empty') {
         if (!demolishScope.includes(tile.type)) {
           ui.showToast('撤去不可', 'このカテゴリーの撤去ツールでは撤去できない対象です。', 'warning');
           return;
         }
-        const tilesToClean: Array<{ x: number; z: number; layer: GridLayer }> = [];
-        if (tile.type.includes('station') || tile.type === 'signal_yard') {
-          const stTiles = wm.getStationTiles(x, z, curLayer);
-          if (stTiles.length > 0) {
-            for (const st of stTiles) {
-              tilesToClean.push({ x: st.x, z: st.z, layer: (st.layer ?? curLayer) as GridLayer });
-            }
-          } else {
-            tilesToClean.push({ x, z, layer: curLayer });
+        const affectedTiles = wm.getDemolitionAffectedTiles(x, z, curLayer);
+        const tilesToClean: Array<{ x: number; z: number; layer: GridLayer }> = affectedTiles.map(at => ({
+          x: at.x,
+          z: at.z,
+          layer: (at.layer ?? curLayer) as GridLayer
+        }));
+
+        // スロープの場合は接続先の上位/下位階層も在線チェック対象に含める
+        for (const at of affectedTiles) {
+          const baseLyr = (at.layer ?? curLayer) as GridLayer;
+          if (at.type === 'rail_slope' && at.slopePart === 3) {
+            tilesToClean.push({ x: at.x, z: at.z, layer: (baseLyr + 1) as GridLayer });
+          } else if (at.type === 'rail_slope_underground' && at.slopePart === 3) {
+            tilesToClean.push({ x: at.x, z: at.z, layer: -1 as GridLayer });
           }
-        } else {
-          tilesToClean.push({ x, z, layer: curLayer });
         }
 
         tm.updateOccupancyNow();
@@ -344,8 +356,6 @@ export class InteractionController {
         }
 
         const config = TOOL_CONFIG[tool];
-        // 撤去前に影響を受けるすべてのタイル一覧のスナップショットを取得
-        const affectedTiles = wm.getDemolitionAffectedTiles(x, z, curLayer);
         const tileSnapshots: TileSnapshot[] = [];
         for (const at of affectedTiles) {
           tileSnapshots.push({
@@ -688,6 +698,12 @@ export class InteractionController {
         return;
       }
 
+      // タイトル画面表示中はゲーム内ショートカットを無効化
+      const titleOverlay = document.getElementById('title-screen-overlay');
+      if (titleOverlay && !titleOverlay.classList.contains('hidden')) {
+        return;
+      }
+
       // Ctrl+Z (Mac: Cmd+Z) によるUndo実行
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
@@ -754,16 +770,16 @@ export class InteractionController {
           }
         }
 
-        const defaultStation = wm.getTile(-6, 0) || wm.getTile(5, 0);
-        if (defaultStation) {
-          this.deps.scheduleUI.open(defaultStation);
+        const firstStation = wm.getAllTiles().find(t => WorldMap.isStationTileType(t.type));
+        if (firstStation) {
+          this.deps.scheduleUI.open(firstStation);
         }
       }
     });
   }
 
   public cycleCabTrain(dir: 1 | -1, onEnterCabView: (trainId: number) => void): void {
-    const trains = this.deps.trainManager.getTrains();
+    const trains = this.deps.trainManager.getTrains().filter(t => !t.externalTravel);
     if (trains.length === 0) return;
     const curIdx = trains.findIndex(t => t.id === this.deps.getCabTargetTrainId());
     let nextIdx = curIdx + dir;
@@ -818,18 +834,50 @@ export class InteractionController {
 
   public handleSetStationLength(x: number, z: number, targetLen: number): void {
     const wm = this.deps.worldMap;
-    const tile = wm.getTile(x, z, wm.activeLayer) || wm.getTile(x, z);
-    const stLayer = (tile?.layer ?? wm.activeLayer) as GridLayer;
+    const econ = this.deps.economy;
+    const targetLayer = (this.deps.getSelectedTilePos()?.layer ?? wm.activeLayer) as GridLayer;
+    const tile = wm.getTile(x, z, targetLayer) || wm.getTile(x, z, wm.activeLayer) || wm.getTile(x, z);
+    if (!tile) return;
+    const stLayer = (tile.layer ?? targetLayer) as GridLayer;
+    const oldStationTiles = wm.getStationTiles(x, z, stLayer).map(t => ({ x: t.x, z: t.z }));
+    const currentLen = wm.getStationRunLength(x, z, stLayer);
+    if (targetLen === currentLen) return;
+
+    const diff = targetLen - currentLen;
+    const unitCost = tile.type === 'signal_yard'
+      ? TOOL_CONFIG['signal-yard'].cost
+      : tile.type.startsWith('cargo_station')
+      ? TOOL_CONFIG['cargo-station'].cost
+      : tile.type.includes('elevated')
+      ? TOOL_CONFIG['station-elevated'].cost
+      : TOOL_CONFIG['station-small'].cost;
+    const additionalCost = diff > 0 ? diff * unitCost : 0;
+
+    if (additionalCost > 0 && !econ.canSpend(additionalCost, true)) {
+      this.deps.uiManager.showToast('資金不足', `ホーム延伸には ¥${additionalCost.toLocaleString()} が必要です。`, 'danger');
+      return;
+    }
+
     const ok = wm.setStationLength(x, z, targetLen, stLayer, (tx, tz, lyr) => this.deps.trainManager.isTileOccupiedByTrain(tx, tz, lyr));
     if (ok) {
+      if (additionalCost > 0) {
+        econ.spendFunds(additionalCost, true, 'infrastructure', '駅ホーム延伸');
+      }
       this.deps.audioManager.playBuildSound();
       const updated = wm.getTile(x, z, stLayer) || wm.getTile(x, z);
       if (updated) {
         this.deps.uiManager.showInspector(updated, undefined, targetLen, wm.getStationAggregateData(x, z, stLayer));
-        if (updated.type.startsWith('cargo_station')) {
-          for (const st of wm.getStationTiles(x, z, stLayer)) this.deps.visualEffectManager.updateCargoYardVisual(st.x, st.z, stLayer);
+        // 短縮されたタイルのコンテナ表示を消去し、残ったタイルを更新
+        for (const oldPos of oldStationTiles) {
+          this.deps.visualEffectManager.updateCargoYardVisual(oldPos.x, oldPos.z, stLayer);
+        }
+        if (updated.type.startsWith('cargo_station') || updated.isCargoYard) {
+          for (const st of wm.getStationTiles(x, z, stLayer)) {
+            this.deps.visualEffectManager.updateCargoYardVisual(st.x, st.z, stLayer);
+          }
         }
       }
+      this.deps.miniMap.requestStaticUpdate();
     } else {
       this.deps.uiManager.showToast('有効長変更不可', '列車が在線・停車中であるか、ホームを延伸するためのスペースが不足しています。', 'warning');
     }

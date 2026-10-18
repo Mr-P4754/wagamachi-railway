@@ -2849,6 +2849,43 @@ html, body {
   gap: 8px;
 }
 
+.matrix-selector-grid.terrain-grid {
+  grid-template-columns: repeat(5, 1fr);
+}
+
+.seed-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.seed-input {
+  flex: 1;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-family: 'Outfit', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.seed-input:focus {
+  border-color: #38bdf8;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+}
+
+.seed-reroll-btn {
+  padding: 10px 16px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .matrix-btn {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-panel);

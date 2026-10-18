@@ -6,7 +6,8 @@ import {
   createDefaultStationSchedule,
   RouteScheduleTemplate,
   ROUTE_COLORS,
-  cloneStationSchedule
+  cloneStationSchedule,
+  getStationScheduleScore
 } from '../simulation/WorldMap';
 import { GridLayer } from '../core/types';
 import { getPatternDepartureMinutes } from '../core/ScheduleEngine';
@@ -646,15 +647,57 @@ export class ScheduleUI {
 
   public open(tile: TileData): void {
     const lyr = (tile.layer ?? 1) as GridLayer;
-    // 常にそのホーム（番線）の先頭タイルを正本として取得
     const startTile = this.worldMap.getStationStartTile(tile.x, tile.z, lyr) || tile;
-    if (!startTile.stationSchedule) {
-      startTile.stationSchedule = createDefaultStationSchedule();
-    }
-    // ホーム内の全タイルに現在のスケジュールを同期しておく
-    this.applyScheduleToPlatform(startTile, startTile.stationSchedule);
+    const platformTiles = this.worldMap.getStationTiles(startTile.x, startTile.z, lyr);
 
-    this.backupSchedule = cloneStationSchedule(startTile.stationSchedule);
+    // ホーム（番線）を構成する全タイルを重複なく収集（StationManager登録タイルも網羅）
+    const candidateTiles: TileData[] = [];
+    const seenTileKeys = new Set<string>();
+    const addCandidate = (t: TileData | null | undefined) => {
+      if (!t) return;
+      const key = `${t.x},${t.z},${t.layer ?? 1}`;
+      if (!seenTileKeys.has(key)) {
+        seenTileKeys.add(key);
+        candidateTiles.push(t);
+      }
+    };
+
+    addCandidate(tile);
+    addCandidate(startTile);
+    for (const t of platformTiles) {
+      addCandidate(t);
+    }
+
+    const platInfo = this.worldMap.stationManager.getPlatformByTile(tile.x, tile.z, lyr);
+    if (platInfo && platInfo.platform && platInfo.platform.tiles) {
+      for (const pt of platInfo.platform.tiles) {
+        const t = this.worldMap.getTile(pt.x, pt.z, pt.layer);
+        addCandidate(t);
+      }
+    }
+
+    // ホーム内の全候補タイルから、最も設定スコアの高い（情報量の多い）ダイヤを探す
+    let bestSchedule: StationSchedule | null = null;
+    let highestScore = -1;
+
+    for (const cand of candidateTiles) {
+      if (cand.stationSchedule) {
+        const score = getStationScheduleScore(cand.stationSchedule);
+        if (score > highestScore) {
+          highestScore = score;
+          bestSchedule = cand.stationSchedule;
+        }
+      }
+    }
+
+    // 有効な設定が見つかった場合はそれを採用。なければ既存設定、最終フォールバックとして新規デフォルト
+    const activeSchedule = (bestSchedule && highestScore > 0)
+      ? cloneStationSchedule(bestSchedule)
+      : (startTile.stationSchedule || tile.stationSchedule || createDefaultStationSchedule());
+
+    this.applyScheduleToPlatform(startTile, activeSchedule);
+
+    this.backupSchedule = cloneStationSchedule(startTile.stationSchedule!);
     this.currentTile = startTile;
     this.container.classList.remove('hidden');
     this.render();
@@ -1588,6 +1631,9 @@ export class ScheduleUI {
           schedule.departures.splice(origIdx, 1);
           schedule.reverseDepartures = schedule.reverseDepartures.filter(x => x !== oldMin);
           schedule.splitDepartures = schedule.splitDepartures.filter(x => x !== oldMin);
+          if (schedule.splitConfig && schedule.splitDepartures.length === 0) {
+            schedule.splitConfig.enabled = false;
+          }
         } else {
           schedule.timeZones = schedule.timeZones.filter(z => z.id !== origId);
         }

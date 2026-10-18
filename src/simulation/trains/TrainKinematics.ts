@@ -400,7 +400,8 @@ export class TrainKinematics {
         const offsetVec = newFrontPos.clone().sub(fromPos);
         const proj = offsetVec.dot(spanVec.clone().normalize());
 
-        if (proj >= 0) {
+        // ★修正: 浮動小数点誤差(-1e-16等)でelseに入らないよう -1e-3 の許容値を持たせる
+        if (proj >= -1e-3) {
           // タイル中心を通過して次のタイルに向かっている
           train.progress = Math.min(0.999, Math.max(0, proj / spanLen));
         } else {

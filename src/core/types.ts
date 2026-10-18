@@ -4,7 +4,7 @@
 export type MapSize = 64 | 128 | 256 | 512 | 1024;
 
 /** 地形テンプレート */
-export type TerrainType = 'flat' | 'balanced' | 'mountain' | 'coastal';
+export type TerrainType = 'flat' | 'balanced' | 'mountain' | 'coastal' | 'random';
 
 /** 立体階層 (地上1F〜5F: 1〜5, 地下B1F〜B2F: -1, -2) 全7階層 */
 export type GridLayer = -2 | -1 | 1 | 2 | 3 | 4 | 5;

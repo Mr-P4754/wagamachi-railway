@@ -155,14 +155,12 @@ export class UndoManager {
           } else if (curTile.type === 'rail_slope') {
             const baseLayer = (curTile.layer ?? 1) as GridLayer;
             const upperLayer = (baseLayer + 1) as GridLayer;
-            const upperTile = worldMap.getTile(curTile.x, curTile.z, upperLayer);
-            if (upperTile === curTile) {
-              worldMap.setTile(curTile.x, curTile.z, 'empty', 0, 1, 'right', upperLayer);
+            if (worldMap.grid3D.get(curTile.x, upperLayer, curTile.z) === curTile) {
+              worldMap.grid3D.delete(curTile.x, upperLayer, curTile.z);
             }
           } else if (curTile.type === 'rail_slope_underground') {
-            const lowerTile = worldMap.getTile(curTile.x, curTile.z, -1 as GridLayer);
-            if (lowerTile === curTile) {
-              worldMap.setTile(curTile.x, curTile.z, 'empty', 0, 1, 'right', -1 as GridLayer);
+            if (worldMap.grid3D.get(curTile.x, -1 as GridLayer, curTile.z) === curTile) {
+              worldMap.grid3D.delete(curTile.x, -1 as GridLayer, curTile.z);
             }
             worldMap.groundHoleHandler?.remove(curTile.x, curTile.z);
           }

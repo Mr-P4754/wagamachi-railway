@@ -162,7 +162,8 @@ export class TrainManager {
     train: TrainInstance,
     travel: ExternalTravelState,
     onPassengerFare?: (amount: number) => void,
-    hour: number = 12
+    hour: number = 12,
+    cargoHooks?: CargoHooks
   ): void {
     const isFreight = train.model.category === 'freight';
 
@@ -175,7 +176,10 @@ export class TrainManager {
         train.totalPassengers += delivered;
         train.totalRevenue += revenue;
         train.monthlyProfit = train.totalRevenue - train.totalCost;
-        if (onPassengerFare) {
+        // ★修正: 貨物売上として計上
+        if (cargoHooks?.onCargoDelivered) {
+          cargoHooks.onCargoDelivered(travel.entryTile.x, travel.entryTile.z, travel.entryTile.layer, delivered, revenue);
+        } else if (onPassengerFare) {
           onPassengerFare(revenue);
         }
         this.externalConnectionManager?.recordCargoExported(travel.cityId, delivered);
@@ -587,6 +591,28 @@ export class TrainManager {
           this.collisionSystem.canBypassAtsForCoupling(follower, other, this.worldMap)
         );
         if (leader && this.couplingManager.checkCouplingContact(follower, leader, this.worldMap)) {
+          // 連結消滅前に後続列車の駅到着処理（乗客降車・貨物荷役）を先行列車の駅タイル基準で実行
+          const leaderTile = this.worldMap.getTile(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer);
+          if (leaderTile) {
+            const isYard = leaderTile.type === 'signal_yard';
+            const isCargo = leaderTile.type.startsWith('cargo_station') || !!leaderTile.isCargoYard;
+            const isFreight = follower.model.category === 'freight';
+            follower.currentTile = { ...leader.currentTile };
+            if (isCargo && isFreight && cargoHooks) {
+              const isCommercial = cargoHooks.isCommercialStation
+                ? cargoHooks.isCommercialStation(leader.currentTile.x, leader.currentTile.z, leader.currentTile.layer)
+                : false;
+              if (isCommercial) {
+                this.payloadSystem.processCargoUnloading(follower, cargoHooks, onPassengerFare, this.worldMap);
+              } else {
+                this.payloadSystem.processCargoLoading(follower, cargoHooks, this.worldMap);
+              }
+            } else if (!isYard && !isCargo && !isFreight) {
+              const arrival = ScheduleEngine.resolveArrival(leaderTile.stationSchedule, subStepHour, subStepMinute);
+              this.payloadSystem.processAlighting(follower, arrival, false, this.worldMap, onPassengerFare);
+            }
+          }
+
           this.couplingManager.performCoupling(
             leader,
             follower,
@@ -596,6 +622,13 @@ export class TrainManager {
             t => this.disposeTrainMesh(t),
             this.onTrainCoupled
           );
+          if (leaderTile && leaderTile.stationSchedule) {
+            const arr = ScheduleEngine.resolveArrival(leaderTile.stationSchedule, subStepHour, subStepMinute);
+            if (arr.mode !== 'pass') {
+              leader.stopMode = arr.mode;
+            }
+            leader.isReversingAtStation = (arr.mode === 'reverse') || !!arr.isReverse;
+          }
           follower.occupiedTiles = [];
           follower.speed = 0;
           follower.isStopped = true;
@@ -624,7 +657,7 @@ export class TrainManager {
               travel.phase = 'at_neighbor';
               travel.remainingTiles = 0;
               travel.stopMinutesRemaining = 5;
-              this.handleNeighborCityArrival(train, travel, onPassengerFare, subStepHour);
+              this.handleNeighborCityArrival(train, travel, onPassengerFare, subStepHour, cargoHooks);
             }
           } else if (travel.phase === 'at_neighbor') {
             travel.stopMinutesRemaining -= subDt;
@@ -639,10 +672,19 @@ export class TrainManager {
               // 自都市接続部まで帰還！
               travel.remainingTiles = 0;
               const entry = travel.entryTile;
-              const canEnter = this.blockSignalManager.canEnterTile(train.id, entry.x, entry.z, entry.layer);
-              if (canEnter) {
-                this.returnFromExternalTravel(train, travel);
-                hasOccupancyChanged = true;
+              const entryTileData = this.worldMap.getTile(entry.x, entry.z, entry.layer);
+              if (entryTileData && this.kinematics.isTrackTile(entryTileData)) {
+                const returnDir = new THREE.Vector3(-travel.entryDirection.x, 0, -travel.entryDirection.z).normalize();
+                const nextInMap = this.kinematics.findNextTrackTile(entry.x, entry.z, entry.layer, returnDir, true, this.worldMap);
+                const isEntryOccupied = this.isTileOccupiedByTrain(entry.x, entry.z, entry.layer);
+                const isNextOccupied = nextInMap
+                  ? this.isTileOccupiedByTrain(nextInMap.x, nextInMap.z, (nextInMap.layer ?? entry.layer) as GridLayer)
+                  : false;
+                const canEnter = this.blockSignalManager.canEnterTile(train.id, entry.x, entry.z, entry.layer) && !isEntryOccupied && !isNextOccupied;
+                if (canEnter) {
+                  this.returnFromExternalTravel(train, travel);
+                  hasOccupancyChanged = true;
+                }
               }
             }
           }
@@ -695,36 +737,59 @@ export class TrainManager {
           const isSameMinuteAsLastDep = train.lastDepartureMinute !== undefined &&
             Math.abs(((train.lastDepartureMinute % 1440) - (currentTotalMin % 1440) + 1440) % 1440) === 0;
 
+          // 同一ホームの前方に同方向の別列車がまだ停車中(分割直後の前編成など)の場合は、前編成が発車するまで待機させる
+          const curPlatId = stoppedTile?.stationPlatformId || stoppedTile?.stationGroupId;
+          const hasStoppedTrainAheadOnSamePlatform = curPlatId ? this.trains.some(other => {
+            if (other.id === train.id || !other.isStopped || trainsPendingRemoval.includes(other.id)) return false;
+            if (other.currentTile.layer !== train.currentTile.layer) return false;
+            const otherTile = this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer);
+            const otherPlatId = otherTile?.stationPlatformId || otherTile?.stationGroupId;
+            if (otherPlatId !== curPlatId) return false;
+            if (other.direction.dot(train.direction) < 0.5) return false;
+            const dx = other.frontPosition.x - train.frontPosition.x;
+            const dz = other.frontPosition.z - train.frontPosition.z;
+            return (dx * train.direction.x + dz * train.direction.z) > 0.1;
+          }) : false;
+
           if (!canDeparture && !isSameMinuteAsLastDep) {
-            train.lastEvaluatedMinute = currentTotalMin;
-            if (train.overrideDepartureRule) {
-              const rule = train.overrideDepartureRule;
-              if (rule.mode === 'timer') {
-                canDeparture = (train.stopElapsedMinutes ?? 0) >= required;
-              } else if (shouldEvaluateSchedule) {
-                if (rule.mode === 'pattern') {
-                  const patMin = rule.patternMinute ?? 0;
-                  const interval = rule.patternIntervalMinutes ?? 60;
-                  canDeparture = ScheduleEngine.isPatternIntervalInRange(prevTotal, currentTotalMin, patMin, interval);
-                } else if (rule.mode === 'specific') {
-                  const specMin = (((rule.specificHour ?? 0) % 24) * 60 + (rule.specificMinute ?? 0)) % 1440;
-                  canDeparture = ScheduleEngine.isMinuteInRange(prevTotal, currentTotalMin, specMin);
+            if (hasStoppedTrainAheadOnSamePlatform) {
+              // 前編成が同じホームから発車するまで待機し、発車後も最低1分間隔を空ける
+              train.requiredStopMinutes = Math.max(train.requiredStopMinutes ?? 0, Math.floor(train.stopElapsedMinutes ?? 0) + 1);
+              canDeparture = false;
+            } else if (required > 0 && (train.stopElapsedMinutes ?? 0) < required) {
+              // ★修正: 最低必要停車時間(分割・連結作業等)の待機中は lastEvaluatedMinute を更新せず、待機完了後に評価させる
+              canDeparture = false;
+            } else {
+              train.lastEvaluatedMinute = currentTotalMin;
+              if (train.overrideDepartureRule) {
+                const rule = train.overrideDepartureRule;
+                if (rule.mode === 'timer') {
+                  canDeparture = (train.stopElapsedMinutes ?? 0) >= required;
+                } else if (shouldEvaluateSchedule) {
+                  if (rule.mode === 'pattern') {
+                    const patMin = rule.patternMinute ?? 0;
+                    const interval = rule.patternIntervalMinutes ?? 60;
+                    canDeparture = ScheduleEngine.isPatternIntervalInRange(prevTotal, currentTotalMin, patMin, interval);
+                  } else if (rule.mode === 'specific') {
+                    const specMin = (((rule.specificHour ?? 0) % 24) * 60 + (rule.specificMinute ?? 0)) % 1440;
+                    canDeparture = ScheduleEngine.isMinuteInRange(prevTotal, currentTotalMin, specMin);
+                  }
                 }
+              } else if (mode === 'stop' || shouldEvaluateSchedule) {
+                const evalResult = ScheduleEngine.evaluateStationDeparture(
+                  liveSchedule,
+                  subStepHour,
+                  subStepMinute,
+                  train.stopElapsedMinutes ?? 0,
+                  mode,
+                  required,
+                  shouldReverse,
+                  subStepPrevHour,
+                  subStepPrevMinute
+                );
+                canDeparture = evalResult.canDepart;
+                shouldReverse = evalResult.shouldReverse; // ★修正: evalResult の判定結果を正とする
               }
-            } else if (mode === 'stop' || shouldEvaluateSchedule) {
-              const evalResult = ScheduleEngine.evaluateStationDeparture(
-                liveSchedule,
-                subStepHour,
-                subStepMinute,
-                train.stopElapsedMinutes ?? 0,
-                mode,
-                required,
-                shouldReverse,
-                subStepPrevHour,
-                subStepPrevMinute
-              );
-              canDeparture = evalResult.canDepart;
-              shouldReverse = evalResult.shouldReverse || !!train.isReversingAtStation;
             }
           }
 
@@ -750,6 +815,7 @@ export class TrainManager {
             // 乗車処理
             this.payloadSystem.processBoarding(train, stoppedTile ?? null, this.worldMap, onPassengerFare, onPassengerCost);
 
+            train.isReversingAtStation = false; // ★発車確定時は常に確実に折り返しフラグを初期化
             train.lastDepartureMinute = currentTotalMin;
             train.isSignalStopped = false;
             train.isStopped = false;
@@ -905,6 +971,7 @@ export class TrainManager {
               } else {
                 train.isStopped = true;
                 train.progress = 0;
+                train.lastDepartureMinute = undefined; // ★追加: 前駅の発車分ロックを解除
                 this.kinematics.recordCurrentHeadSample(train, this.worldMap);
 
                 if (isExternal) {
@@ -930,23 +997,15 @@ export class TrainManager {
                   this.payloadSystem.processAlighting(train, arrival, !peekNext, this.worldMap, onPassengerFare);
                 }
 
-                // 分割判定
-                let activeSplitConfig = arrival.splitConfig || schedule?.splitConfig;
-                if (activeSplitConfig && activeSplitConfig.enabled && train.carCount >= 2) {
-                  if (activeSplitConfig.frontCars + activeSplitConfig.rearCars !== train.carCount) {
-                    const fCars = Math.max(1, Math.min(train.carCount - 1, activeSplitConfig.frontCars));
-                    activeSplitConfig = {
-                      ...activeSplitConfig,
-                      frontCars: fCars,
-                      rearCars: train.carCount - fCars
-                    };
-                  }
-                }
+                // 分割判定（現在時刻のゾーンまたは発車ピンで有効な arrival.splitConfig のみを使用し、指定両数と一致する編成のみ分割）
+                const activeSplitConfig = arrival.splitConfig;
                 const splitCheck = (!isYard && !isTooLong && train.carCount >= 2)
                   ? validateSplitConfig(train.carCount, activeSplitConfig)
                   : { valid: false };
 
                 if (splitCheck.valid && activeSplitConfig) {
+                  train.stopMode = arrival.mode;
+                  train.requiredStopMinutes = arrival.requiredStopMinutes;
                   const rearTrain = this.couplingManager.performSplit(
                     train,
                     activeSplitConfig,
@@ -959,12 +1018,17 @@ export class TrainManager {
                     (id, count) => this.updateTrainCarCount(id, count),
                     this.onTrainSplit
                   );
-                  trainsPendingAdd.push(rearTrain);
+                  // ★修正: 分割フレーム内の次サブステップから即座に閉塞・ATSが効くよう占有タイルを計算して即時追加
+                  rearTrain.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(rearTrain, this.worldMap);
+                  train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
+                  this.trains.push(rearTrain);
+                  hasOccupancyChanged = true;
                 } else {
                   // 併合（連結）判定: 必ず「同一番線（stationPlatformId）」かつ「同一階層・同一路線軸」の列車のみ対象とする
                   const leader = !isYard
                     ? this.trains.find(other => {
                         if (other.id === train.id || !other.isStopped) return false;
+                        if (other.model.id !== train.model.id) return false; // 同一車種のみ併合可
                         if (other.currentTile.layer !== train.currentTile.layer) return false;
                         const otherTile = this.worldMap.getTile(other.currentTile.x, other.currentTile.z, other.currentTile.layer);
                         if (!otherTile) return false;
@@ -987,6 +1051,8 @@ export class TrainManager {
                       this.onTrainCoupled
                     );
                     wasAbsorbedByCoupling = true;
+                    leader.stopMode = arrival.mode;
+                    leader.isReversingAtStation = (arrival.mode === 'reverse') || !!arrival.isReverse;
                   } else {
                     train.stopMode = arrival.mode;
                     train.stopElapsedMinutes = 0;
@@ -998,7 +1064,21 @@ export class TrainManager {
               }
             }
           } else {
-            train.lastStationGroupId = null;
+            if (train.lastStationGroupId) {
+              train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
+              train.needsOccupancyUpdate = false;
+              const targetTileData = this.worldMap.getTile(train.targetTile.x, train.targetTile.z, train.targetTile.layer);
+              const targetPlatId = targetTileData ? (targetTileData.stationPlatformId || targetTileData.stationGroupId) : null;
+              const stillOnSamePlatform =
+                targetPlatId === train.lastStationGroupId ||
+                train.occupiedTiles.some(ot => {
+                  const t = this.worldMap.getTile(ot.x, ot.z, ot.layer);
+                  return t && (t.stationPlatformId === train.lastStationGroupId || t.stationGroupId === train.lastStationGroupId);
+                });
+              if (!stillOnSamePlatform) {
+                train.lastStationGroupId = null;
+              }
+            }
           }
 
           if (wasAbsorbedByCoupling) {
@@ -1037,9 +1117,19 @@ export class TrainManager {
           } else if (curTileData && curTileData.type.startsWith('scissors_crossing')) {
             const origin = this.worldMap.resolveCrossingOrigin(train.currentTile.x, train.currentTile.z, train.currentTile.layer);
             const switchSched = origin?.switchSchedule;
-            if (origin && switchSched && switchSched.mode === 'timeline') {
-              const targetCrossing = getSwitchDirectionAtTime(switchSched, subStepHour, subStepMinute, true);
-              this.worldMap.setCrossingState(origin.x, origin.z, targetCrossing as CrossingState, train.currentTile.layer, true);
+            if (origin && switchSched) {
+              if (switchSched.mode === 'timeline') {
+                const targetCrossing = getSwitchDirectionAtTime(switchSched, subStepHour, subStepMinute, true);
+                this.worldMap.setCrossingState(origin.x, origin.z, targetCrossing as CrossingState, train.currentTile.layer, true);
+              } else if (switchSched.mode === 'alternate') {
+                const order: CrossingState[] = ['straight', 'cross-a', 'cross-b'];
+                const curState = origin.crossingState ?? 'straight';
+                const nextState = order[(order.indexOf(curState) + 1) % order.length];
+                // 進路解決後に次列車用へ切り替える
+                this.kinematics.resolveNextTileOrReverse(train, this.worldMap);
+                this.worldMap.setCrossingState(origin.x, origin.z, nextState, train.currentTile.layer, true);
+                continue;
+              }
             }
           }
 
@@ -1245,7 +1335,8 @@ export class TrainManager {
     const { cars: newCars } = ModelFactory.createTrainFormation(train.model, newCarCount);
     train.carCount = newCarCount;
     train.capacity = train.model.baseCapacity * newCarCount;
-    train.passengers = Math.min(train.passengers, train.capacity);
+    // ★修正: 100%定員(train.capacity)ではなく最大乗車率込みの上限(getMaxCapacity)でクランプする
+    train.passengers = Math.min(train.passengers, getMaxCapacity(train.model, newCarCount));
     train.cars = newCars;
 
     for (const car of newCars) {
@@ -1328,6 +1419,7 @@ export class TrainManager {
       totalCost: t.totalCost,
       monthlyProfit: t.monthlyProfit,
       fleetId: t.fleetId,
+      lastStationGroupId: t.lastStationGroupId, // ★追加
       isReversed: t.isReversed,
       isReversingAtStation: t.isReversingAtStation,
       scheduledDepartureMinute: t.scheduledDepartureMinute,
@@ -1701,7 +1793,7 @@ export class TrainManager {
                 totalCost: item.totalCost ?? 0,
                 monthlyProfit: item.monthlyProfit ?? 0,
                 fleetId: item.fleetId,
-                lastStationGroupId: null
+                lastStationGroupId: item.lastStationGroupId ?? null
               },
               tile,
               targetTile,
@@ -1745,7 +1837,7 @@ export class TrainManager {
           totalCost: item.totalCost ?? 0,
           monthlyProfit: item.monthlyProfit ?? 0,
           fleetId: item.fleetId,
-          lastStationGroupId: null,
+          lastStationGroupId: item.lastStationGroupId ?? null, // ★修正
           isReversingAtStation: item.isReversingAtStation ?? false,
           scheduledDepartureMinute: item.scheduledDepartureMinute ?? null,
           cargoLoad: actualCargoLoad,

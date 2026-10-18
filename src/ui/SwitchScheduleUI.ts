@@ -293,9 +293,9 @@ export class SwitchScheduleUI {
   }
 
   private formatTime(minutes: number): string {
-    const norm = ((minutes % 1440) + 1440) % 1440;
-    const h = Math.floor(norm / 60).toString().padStart(2, '0');
-    const m = (norm % 60).toString().padStart(2, '0');
+    const clamped = Math.max(0, Math.min(1439, minutes));
+    const h = Math.floor(clamped / 60).toString().padStart(2, '0');
+    const m = (clamped % 60).toString().padStart(2, '0');
     return `${h}:${m}`;
   }
 
@@ -655,7 +655,11 @@ export class SwitchScheduleUI {
       const endInput = card.querySelector<HTMLInputElement>('.sw-end-time');
       if (endInput) {
         endInput.addEventListener('change', () => {
-          rule.endMin = this.parseTime(endInput.value);
+          let mins = this.parseTime(endInput.value);
+          if (mins === 0 && rule.startMin > 0) {
+            mins = 1440;
+          }
+          rule.endMin = mins;
           this.notifyChanged();
         });
       }
