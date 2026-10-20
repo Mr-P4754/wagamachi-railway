@@ -25,7 +25,7 @@ export interface MapChunk {
 /**
  * 山脈の尾根を構成する線分セグメント
  */
-interface RidgeSegment {
+export interface RidgeSegment {
   ax: number;
   az: number;
   bx: number;
@@ -37,12 +37,30 @@ interface RidgeSegment {
 /**
  * 河川を構成する線分セグメント
  */
-interface RiverSegment {
+export interface RiverSegment {
   ax: number;
   az: number;
   bx: number;
   bz: number;
   width: number; // 基本川幅
+}
+
+/**
+ * 地形生成パラメータ・骨格データの完全スナップショット定義
+ */
+export interface TerrainSnapshot {
+  mapSize: MapSize;
+  terrainType: TerrainType;
+  effectiveTerrain: 'flat' | 'balanced' | 'mountain' | 'coastal';
+  seed: number;
+  ridgeSegments: RidgeSegment[];
+  riverSegments: RiverSegment[];
+  coastCos: number;
+  coastSin: number;
+  coastOffset: number;
+  islandCenters: Array<{ x: number; z: number; radius: number; height: number }>;
+  noiseOffsetsX: number[];
+  noiseOffsetsZ: number[];
 }
 
 /**
@@ -403,6 +421,60 @@ export class GridManager {
    */
   public initializeTerrain(): void {
     this.chunks.clear();
+  }
+
+  /**
+   * 現在の地形骨格データとシード値をスナップショットとして出力（セーブ用）
+   */
+  public toSnapshot(): TerrainSnapshot {
+    return {
+      mapSize: this.mapSize,
+      terrainType: this.terrainType,
+      effectiveTerrain: this.effectiveTerrain,
+      seed: this.seed,
+      ridgeSegments: this.ridgeSegments.map(r => ({ ...r })),
+      riverSegments: this.riverSegments.map(r => ({ ...r })),
+      coastCos: this.coastCos,
+      coastSin: this.coastSin,
+      coastOffset: this.coastOffset,
+      islandCenters: this.islandCenters.map(i => ({ ...i })),
+      noiseOffsetsX: [...this.noiseOffsetsX],
+      noiseOffsetsZ: [...this.noiseOffsetsZ]
+    };
+  }
+
+  /**
+   * 保存されたスナップショットから地形骨格データを完全復元（ロード用）
+   */
+  public loadFromSnapshot(snap: Partial<TerrainSnapshot>): void {
+    if (snap.mapSize) this.mapSize = snap.mapSize;
+    if (snap.terrainType) this.terrainType = snap.terrainType;
+    if (snap.effectiveTerrain) this.effectiveTerrain = snap.effectiveTerrain;
+    if (typeof snap.seed === 'number' && Number.isFinite(snap.seed)) {
+      this.seed = snap.seed >>> 0;
+    }
+
+    if (
+      Array.isArray(snap.ridgeSegments) &&
+      Array.isArray(snap.riverSegments) &&
+      Array.isArray(snap.noiseOffsetsX) &&
+      Array.isArray(snap.noiseOffsetsZ) &&
+      snap.noiseOffsetsX.length === 16
+    ) {
+      this.ridgeSegments = snap.ridgeSegments.map(r => ({ ...r }));
+      this.riverSegments = snap.riverSegments.map(r => ({ ...r }));
+      this.coastCos = typeof snap.coastCos === 'number' ? snap.coastCos : 1;
+      this.coastSin = typeof snap.coastSin === 'number' ? snap.coastSin : 0;
+      this.coastOffset = typeof snap.coastOffset === 'number' ? snap.coastOffset : 16;
+      this.islandCenters = Array.isArray(snap.islandCenters) ? snap.islandCenters.map(i => ({ ...i })) : [];
+      this.noiseOffsetsX = [...snap.noiseOffsetsX];
+      this.noiseOffsetsZ = [...snap.noiseOffsetsZ];
+    } else {
+      // 旧セーブデータ等で骨格配列がない場合はシード値から再構築
+      this.buildRandomFeatures();
+    }
+
+    this.initializeTerrain();
   }
 
   /**

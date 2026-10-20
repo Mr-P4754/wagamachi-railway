@@ -46,6 +46,14 @@ export class CityGrowth {
   }
 
   /**
+   * 現在時刻に合わせて都市発展の評価日フラグを同期
+   */
+  public syncTime(day: number, hour: number): void {
+    // すでに12:00を過ぎている状態でロードされた場合は、当日分は評価済みとしてマーク
+    this.lastEvaluatedDay = hour >= 12 ? day : -1;
+  }
+
+  /**
    * 1日1回、正午（12:00以降）にまとめて都市を発展させる（高倍速・フレームスキップ対応）
    */
   public update(hour: number, _minute: number, day: number, onNewBuildings: (popIncrease: number) => void) {

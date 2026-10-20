@@ -1172,6 +1172,7 @@ export class TrainManager {
     let closestTrain: TrainInstance | null = null;
     let closestDistFactor = 0;
     for (const train of this.trains) {
+      if (train.externalTravel) continue; // マップ外走行中の列車はジョイント音を鳴らさない
       if (train.speed > 0.05 && !train.isStopped) {
         const factor = this.getDistanceFactor({
           x: train.frontPosition.x,

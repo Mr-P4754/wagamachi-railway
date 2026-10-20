@@ -311,7 +311,6 @@ export class UIManager {
   private btnTitleHelp = document.getElementById('btn-title-help');
   private btnTitleBack = document.getElementById('btn-title-back');
   private btnTitleStart = document.getElementById('btn-title-start');
-  private btnTitleClose = document.getElementById('btn-title-close');
   private inputTitleSeed = document.getElementById('input-title-seed') as HTMLInputElement | null;
   private btnSeedRandom = document.getElementById('btn-seed-random') as HTMLButtonElement | null;
   private selectedMapSize: MapSize = 256;
@@ -374,6 +373,8 @@ export class UIManager {
   public onOpenStationSchedule: (tile: TileData) => void = () => {};
   // 分岐器・シーサスクロッシング用ダイヤ設定UIを開く要求
   public onOpenSwitchSchedule: (tile: TileData) => void = () => {};
+  // 分岐器・シーサスクロッシングの動作モード・ダイヤ設定変更コールバック
+  public onSwitchScheduleChanged: (tile: TileData) => void = () => {};
   // タイトル画面＆カメラ制御コールバック
   public onStartNewGame: (size: MapSize, terrain: TerrainType, seed?: number) => void = () => {};
   public onResumeGame: () => void = () => {};
@@ -427,11 +428,6 @@ export class UIManager {
     });
 
     this.btnTitleContinue?.addEventListener('click', () => {
-      this.hideTitleScreen();
-      this.onResumeGame();
-    });
-
-    this.btnTitleClose?.addEventListener('click', () => {
       this.hideTitleScreen();
       this.onResumeGame();
     });
@@ -2988,6 +2984,7 @@ export class UIManager {
       btn.addEventListener('click', () => {
         const mode = btn.getAttribute('data-mode') as 'timeline' | 'alternate' | 'manual';
         sched.mode = mode;
+        this.onSwitchScheduleChanged(switchHub);
         this.showInspector(switchHub, switchHub);
       });
     });
@@ -3074,6 +3071,7 @@ export class UIManager {
       modeRow.querySelectorAll<HTMLElement>('#modal-sw-mode-btns .schedule-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           sched.mode = btn.getAttribute('data-mode') as 'timeline' | 'alternate' | 'manual';
+          this.onSwitchScheduleChanged(hub);
           this.renderScheduleModalContent();
         });
       });
@@ -3148,12 +3146,14 @@ export class UIManager {
           for (let m = 0; m < 6; m++) {
             sched.slots![selH * 6 + m] = 'straight';
           }
+          this.onSwitchScheduleChanged(hub);
           this.renderScheduleModalContent();
         });
         tenMinSection.querySelector<HTMLElement>('#btn-fill-hour-diverge')!.addEventListener('click', () => {
           for (let m = 0; m < 6; m++) {
             sched.slots![selH * 6 + m] = 'diverge';
           }
+          this.onSwitchScheduleChanged(hub);
           this.renderScheduleModalContent();
         });
 
@@ -3175,6 +3175,7 @@ export class UIManager {
             if (sched.hourlyDirections) {
               sched.hourlyDirections[selH] = sched.slots![selH * 6];
             }
+            this.onSwitchScheduleChanged(hub);
             this.renderScheduleModalContent();
           });
           gridEl.appendChild(card);
@@ -3203,6 +3204,7 @@ export class UIManager {
             cell.addEventListener('click', () => {
               this.selectedScheduleHour = h;
               sched.slots![slotIdx] = this.switchPaletteDir;
+              this.onSwitchScheduleChanged(hub);
               this.renderScheduleModalContent();
             });
             col.appendChild(cell);

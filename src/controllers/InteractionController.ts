@@ -403,6 +403,7 @@ export class InteractionController {
           }
           this.deps.scheduleUI.refreshOrClose();
           this.deps.switchScheduleUI.refreshOrClose();
+          de.clearCache();
           mm.requestStaticUpdate();
           tr.rebuildAll(gm, this.deps.scene);
           tm.updateOccupancyNow();
@@ -467,8 +468,32 @@ export class InteractionController {
         ui.showToast('資金不足', '貨物ヤード指定に必要な資金が不足しています。', 'danger');
         return;
       }
-      tile.isCargoYard = true;
-      vm.updateCargoYardVisual(tile.x, tile.z, curLayer);
+      // 同一ホームの全タイルを一括で貨物ヤード化し、Undoスナップショットを記録
+      const stationTiles = wm.getStationTiles(x, z, curLayer);
+      const targets = stationTiles.length > 0 ? stationTiles : [tile];
+      const snapshots: TileSnapshot[] = [];
+      for (const st of targets) {
+        const lyr = (st.layer ?? curLayer) as GridLayer;
+        const beforeSnap = cloneTileSnapshot(st);
+        st.isCargoYard = true;
+        vm.updateCargoYardVisual(st.x, st.z, lyr);
+        snapshots.push({
+          x: st.x,
+          z: st.z,
+          layer: lyr,
+          before: beforeSnap,
+          after: cloneTileSnapshot(st)
+        });
+      }
+      if (this.undoManager && snapshots.length > 0) {
+        this.undoManager.pushAction({
+          type: 'placement',
+          tiles: snapshots,
+          cost: config.cost,
+          description: '貨物ヤード指定'
+        });
+      }
+      wm.markDirty();
       audio.playBuildSound();
       return;
     }

@@ -26,6 +26,7 @@ import { BuildingBakery } from '../graphics/structures/BuildingBakery';
 import { UndoManager } from '../core/UndoManager';
 import { db, SavedTileRecord, SavedTrainRecord, SavedEconomyRecord, SavedSystemRecord } from './Database';
 import { ExternalConnectionManager } from '../simulation/ExternalConnectionManager';
+import { GameMaterials } from '../graphics/materials';
 
 export interface PersistenceServiceDependencies {
   gameState: GameState;
@@ -233,7 +234,8 @@ export class PersistenceService {
           value: {
             gridSize: worldMap.gridSize,
             terrainType: this.deps.getGridManager().terrainType,
-            seed: this.deps.getGridManager().seed
+            seed: this.deps.getGridManager().seed,
+            terrainSnapshot: this.deps.getGridManager().toSnapshot()
           }
         },
         { key: 'external_connections', value: this.deps.externalConnectionManager?.toSnapshot() }
@@ -279,6 +281,7 @@ export class PersistenceService {
     const loaded = await this.loadGame();
     if (!loaded) {
       this.buildInitialCity();
+      await this.saveGame(false); // 初回生成時の地形と初期都市を即座に永続化
     }
   }
 
@@ -323,38 +326,34 @@ export class PersistenceService {
       const savedEconomy = await db.economy.get('current');
       if (savedEconomy) {
         economy.deserialize(savedEconomy);
+        this.deps.uiManager.updateInfiniteFundsUI(economy.isInfiniteFunds);
       }
 
-      // 2.5 ワールド規模・地形テンプレート・シード値の復元
+      // 2.5 ワールド規模・地形テンプレート・シード値・地形骨格の完全復元
       const worldMeta = systemMap.get('world_meta');
-      if (worldMeta && worldMeta.gridSize) {
-        const savedSize = worldMeta.gridSize as MapSize;
-        const savedTerrain: TerrainType = worldMeta.terrainType || getGridManager().terrainType || 'balanced';
-        const savedSeed: number = typeof worldMeta.seed === 'number'
-          ? worldMeta.seed
-          : Math.floor(Math.random() * 0x7fffffff);
-        const curGrid = getGridManager();
-        if (
-          curGrid.mapSize !== savedSize ||
-          curGrid.terrainType !== savedTerrain ||
-          curGrid.seed !== savedSeed ||
-          worldMap.gridSize !== savedSize
-        ) {
-          const newGrid = new GridManager(savedSize, savedTerrain, savedSeed);
-          this.deps.setGridManager(newGrid);
-          renderer.updateGroundAndGridSize(savedSize);
-          worldMap.setGridSize(savedSize);
-          worldMap.setElevationProvider((x, z) => {
-            const cell = newGrid.getCell(x, 1, z);
-            return cell ? Math.max(0, (cell.elevation - 1) * 3.0) : 0;
-          });
-          this.deps.cityGrowth.setGridManager(newGrid);
-          worldMap.gridManagerRef = newGrid;
-          this.deps.chunkManager.setGridManager(newGrid);
-          this.deps.miniMap.setGridManager(newGrid);
-          this.deps.externalConnectionManager?.initDefaultCities(savedSize);
-        }
+      const curGrid = getGridManager();
+      const savedSize: MapSize = (worldMeta?.gridSize as MapSize) || (worldMap.gridSize as MapSize) || curGrid.mapSize || 256;
+      const savedTerrain: TerrainType = worldMeta?.terrainType || curGrid.terrainType || 'balanced';
+      const hasSavedSeed = typeof worldMeta?.seed === 'number' && Number.isFinite(worldMeta.seed);
+      const savedSeed: number = hasSavedSeed ? worldMeta.seed : curGrid.seed;
+
+      // GridManager を保存データの設定とシードで生成し、骨格スナップショットがあれば完全復元
+      const newGrid = new GridManager(savedSize, savedTerrain, savedSeed);
+      if (worldMeta?.terrainSnapshot) {
+        newGrid.loadFromSnapshot(worldMeta.terrainSnapshot);
       }
+      this.deps.setGridManager(newGrid);
+      renderer.updateGroundAndGridSize(savedSize);
+      worldMap.setGridSize(savedSize);
+      worldMap.setElevationProvider((x, z) => {
+        const cell = newGrid.getCell(x, 1, z);
+        return cell ? Math.max(0, (cell.elevation - 1) * 3.0) : 0;
+      });
+      this.deps.cityGrowth.setGridManager(newGrid);
+      worldMap.gridManagerRef = newGrid;
+      this.deps.chunkManager.setGridManager(newGrid);
+      this.deps.miniMap.setGridManager(newGrid);
+      this.deps.externalConnectionManager?.initDefaultCities(savedSize);
 
       visualEffectManager.clearAllZoneOverlays();
       visualEffectManager.clearAllCargoYardVisuals();
@@ -395,6 +394,7 @@ export class PersistenceService {
           this.deps.uiManager.setSpeedUI(savedTime.speedLevel);
         }
         economy.syncDate(timeManager.year, timeManager.month, timeManager.day);
+        this.deps.cityGrowth.syncTime(timeManager.day, timeManager.hour);
       }
 
       // 7. 運行中列車および車両基地保有リスト
@@ -449,6 +449,21 @@ export class PersistenceService {
       this.deps.externalConnectionManager?.checkConnections(worldMap);
 
       terrainRenderer.build(getGridManager(), renderer.scene);
+      this.deps.miniMap.rebuildBackground(); // ミニマップの地形背景も確実に同期
+
+      // 旧セーブデータで seed や terrainSnapshot が未保存だった場合、現在の地形データを即座に上書き保存して固定化
+      if (!hasSavedSeed || !worldMeta?.terrainSnapshot) {
+        await db.system.put({
+          key: 'world_meta',
+          value: {
+            gridSize: worldMap.gridSize,
+            terrainType: getGridManager().terrainType,
+            seed: getGridManager().seed,
+            terrainSnapshot: getGridManager().toSnapshot()
+          }
+        });
+      }
+
       return true;
     } catch (err) {
       console.error('[PersistenceService] ロード処理中にエラーが発生しました:', err);
@@ -592,6 +607,14 @@ export class PersistenceService {
       renderer
     } = this.deps;
 
+    // 初期都市構築前に既存のタイル・列車・車両台帳を確実にクリアして増殖を防止
+    worldMap.clearAll();
+    trainManager.removeAllTrains();
+    fleetController.clearAllFleet();
+    zoneManager.clearAll();
+    visualEffectManager.clearAllZoneOverlays();
+    visualEffectManager.clearAllCargoYardVisuals();
+
     // 西側駅（2マスホーム: X=-6, X=-5）
     worldMap.placeStationGroup(-6, 0, 2, 1, false, '西中央駅');
 
@@ -711,8 +734,10 @@ export class PersistenceService {
     trainManager.removeAllTrains();
     fleetController.clearAllFleet();
     economy.resetAll();
+    uiManager.updateInfiniteFundsUI(false);
     timeManager.deserialize({ year: 2026, month: 4, day: 1, hour: 6, minute: 0, speedLevel: 1 });
     uiManager.setSpeedUI(1);
+    cityGrowth.syncTime(1, 6);
     scheduleUI.close();
 
     zoneManager.clearAll();
@@ -729,6 +754,22 @@ export class PersistenceService {
     cameraManager.stopTracking();
     cameraManager.setQuarterViewMode();
     uiManager.setCameraModeUI('orbit');
+
+    // X-Ray透過モードがONなら解除して通常表示に戻す
+    GameMaterials.setTransparentMode(false);
+    terrainRenderer.setTransparentMode(false);
+    uiManager.setXRayActive(false);
+
+    // 昼夜切替モードを初期状態(auto)にリセット
+    renderer.setLightingMode('auto');
+    renderer.updateLightingByTime(6, 0);
+    uiManager.setTimeLightingMode('auto', 'day');
+
+    // ミニマップの物流モードをリセット
+    miniMap.isLogisticsMode = false;
+    const cargoBtn = document.getElementById('minimap-cargo-btn');
+    if (cargoBtn) cargoBtn.classList.remove('active');
+
     await this.saveGame(false);
   }
 
@@ -842,9 +883,11 @@ export class PersistenceService {
     fleetController.clearAllFleet();
     worldLabelManager.clear();
     economy.resetAll();
+    uiManager.updateInfiniteFundsUI(false);
     timeManager.deserialize({ year: 2026, month: 4, day: 1, hour: 6, minute: 0, speedLevel: 1 });
     uiManager.setSpeedUI(1);
     economy.syncDate(2026, 4, 1);
+    cityGrowth.syncTime(1, 6);
     zoneManager.clearAll();
     demandEngine.clearCache();
     visualEffectManager.clearAllZoneOverlays();
@@ -859,6 +902,21 @@ export class PersistenceService {
     cameraManager.setQuarterViewMode();
     uiManager.setCameraModeUI('orbit');
     audioManager.stopCabMotorSound();
+
+    // X-Ray透過モードがONなら解除して通常表示に戻す
+    GameMaterials.setTransparentMode(false);
+    terrainRenderer.setTransparentMode(false);
+    uiManager.setXRayActive(false);
+
+    // 昼夜切替モードを初期状態(auto)にリセット
+    renderer.setLightingMode('auto');
+    renderer.updateLightingByTime(6, 0);
+    uiManager.setTimeLightingMode('auto', 'day');
+
+    // ミニマップの物流モードをリセット
+    miniMap.isLogisticsMode = false;
+    const cargoBtn = document.getElementById('minimap-cargo-btn');
+    if (cargoBtn) cargoBtn.classList.remove('active');
 
     const allTiles = worldMap.getAllTiles();
     const trackCount = allTiles.filter(t => isTrackLikeType(t.type)).length;

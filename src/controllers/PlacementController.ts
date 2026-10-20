@@ -1291,17 +1291,50 @@ export class PlacementController {
       return;
     }
 
-    if (curLayer === 1 && effectiveTool === 'rail-slope-underground') {
+    if (effectiveTool === 'rail-slope' || effectiveTool === 'rail-slope-underground') {
+      const isUnderground = effectiveTool === 'rail-slope-underground';
       const axisVal = this.currentRotation % 2;
       const reversed = this.currentRotation >= 2;
       const axisDirs: [number, number] = axisVal === 1 ? [1, 3] : [0, 2];
       const [, stepIdx] = reversed ? [axisDirs[1], axisDirs[0]] : [axisDirs[0], axisDirs[1]];
       const stepDir = WorldMap.DIRS[stepIdx];
+      const otherLayer: GridLayer = isUnderground ? -1 : ((curLayer + 1) as GridLayer);
+
       for (let i = 0; i < 4; i++) {
         const tx = x + stepDir.x * i;
         const tz = z + stepDir.z * i;
-        if (this.worldMap.getElevationOffset(tx, tz) > 0) {
+
+        if (!this.worldMap.isInBounds(tx, tz)) {
+          this.uiManager.showToast('敷設不可', 'マップ外には敷設できません。', 'warning');
+          return;
+        }
+        if (isUnderground && curLayer === 1 && this.worldMap.getElevationOffset(tx, tz) > 0) {
           this.uiManager.showToast('敷設不可', '山岳・丘陵地帯（標高の高い場所）には地下潜入スロープを敷設できません。平坦な平地（地上1F）をご利用ください。', 'warning');
+          return;
+        }
+        const waterCheck = this.worldMap.canPlaceAtWater(tx, tz, curLayer);
+        if (!waterCheck.allowed) {
+          this.uiManager.showToast('敷設不可', waterCheck.reason || '水上には敷設できません。', 'warning');
+          return;
+        }
+        // 開始階層および接続階層の既存線路・建物チェック
+        if (this.worldMap.isPermanentTrackOrStation(tx, tz, curLayer)) {
+          this.uiManager.showToast('敷設不可', '既存の線路や駅が存在する位置には敷設できません。', 'warning');
+          return;
+        }
+        const otherTile = this.worldMap.getTile(tx, tz, otherLayer);
+        if (otherTile && otherTile.type !== 'empty') {
+          this.uiManager.showToast('敷設不可', '接続先階層に既存の線路や建物が存在するため敷設できません。', 'warning');
+          return;
+        }
+        // 在線チェック
+        if (this.trainManager.isTileOccupiedByTrain(tx, tz, curLayer) || this.trainManager.isTileOccupiedByTrain(tx, tz, otherLayer)) {
+          this.uiManager.showToast('敷設不可', '列車が走行・停車中の位置には敷設できません。', 'warning');
+          return;
+        }
+        // 仮置き衝突チェック
+        if (this.pendingItems.some(p => p.x === tx && p.z === tz && ((p.layer ?? 1) === curLayer || (p.layer ?? 1) === otherLayer))) {
+          this.uiManager.showToast('仮置き不可', 'すでに別の線路や施設が仮置きされています。', 'warning');
           return;
         }
       }
@@ -1474,17 +1507,14 @@ export class PlacementController {
       const axisDirs: [number, number] = axisVal === 1 ? [1, 3] : [0, 2];
       const [, stepIdx] = reversed ? [axisDirs[1], axisDirs[0]] : [axisDirs[0], axisDirs[1]];
       const stepDir = WorldMap.DIRS[stepIdx];
+      const otherLayer: GridLayer = tool === 'rail-slope'
+        ? (layer === 1 ? 2 : ((layer + 1) as GridLayer))
+        : -1;
       for (let i = 0; i < 4; i++) {
         const tx = item.x + stepDir.x * i;
         const tz = item.z + stepDir.z * i;
         positions.push({ x: tx, z: tz, layer });
-        if (tool === 'rail-slope' && i === 3) {
-          const upperLayer: GridLayer = layer === 1 ? 2 : ((layer + 1) as GridLayer);
-          positions.push({ x: tx, z: tz, layer: upperLayer });
-        }
-        if (tool === 'rail-slope-underground' && i === 3) {
-          positions.push({ x: tx, z: tz, layer: -1 });
-        }
+        positions.push({ x: tx, z: tz, layer: otherLayer });
       }
     } else if (tool === 'scissors-crossing' || tool === 'scissors-crossing-elevated') {
       const along = item.rotation === 1 ? 1 : 2;
@@ -1826,14 +1856,12 @@ export class PlacementController {
       const axisDirs: [number, number] = axisVal === 1 ? [1, 3] : [0, 2];
       const [, highIdx] = reversed ? [axisDirs[1], axisDirs[0]] : [axisDirs[0], axisDirs[1]];
       const stepDir = WorldMap.DIRS[highIdx];
+      const upperLayer: GridLayer = (layer + 1) as GridLayer;
       for (let i = 0; i < 4; i++) {
         const tx = x + stepDir.x * i;
         const tz = z + stepDir.z * i;
         targetPositions.push({ x: tx, z: tz, layer });
-        if (i === 3) {
-          const upperLayer: GridLayer = (layer + 1) as GridLayer;
-          targetPositions.push({ x: tx, z: tz, layer: upperLayer });
-        }
+        targetPositions.push({ x: tx, z: tz, layer: upperLayer });
       }
     } else if (tool === 'rail-slope-underground') {
       const axisVal = rotation % 2;
@@ -1845,10 +1873,7 @@ export class PlacementController {
         const tx = x + stepDir.x * i;
         const tz = z + stepDir.z * i;
         targetPositions.push({ x: tx, z: tz, layer });
-        if (i === 3) {
-          const lowerLayer: GridLayer = -1;
-          targetPositions.push({ x: tx, z: tz, layer: lowerLayer });
-        }
+        targetPositions.push({ x: tx, z: tz, layer: -1 });
       }
     } else if (tool === 'scissors-crossing' || tool === 'scissors-crossing-elevated') {
       const along = rotation === 1 ? 1 : 2;

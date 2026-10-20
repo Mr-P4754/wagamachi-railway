@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { EngineRenderer, TimeOfDay, GraphicsQuality } from './engine/Renderer';
 import { CameraManager } from './graphics/CameraManager';
 import { AudioManager } from './engine/AudioManager';
-import { WorldMap } from './simulation/WorldMap';
+import { WorldMap, TileData } from './simulation/WorldMap';
 import { TrainManager } from './simulation/TrainManager';
 import { CityGrowth } from './simulation/CityGrowth';
 import { Economy } from './simulation/Economy';
@@ -139,29 +139,7 @@ export class GameApp {
       this.worldMap.markDirty();
     };
     this.switchScheduleUI = new SwitchScheduleUI(this.worldMap);
-    this.switchScheduleUI.onScheduleChanged = (tile) => {
-      if (tile.type.startsWith('scissors_crossing')) {
-        const orig = this.worldMap.resolveCrossingOrigin(tile.x, tile.z, tile.layer);
-        if (orig) {
-          orig.switchSchedule = tile.switchSchedule;
-          const along = (orig.rotation % 2 === 1) ? 1 : 2;
-          const across = WorldMap.rotateCW(along);
-          const alongVec = WorldMap.DIRS[along];
-          const acrossVec = WorldMap.DIRS[across];
-          const lyr = (orig.layer ?? 1) as GridLayer;
-          const positions = [
-            { x: orig.x, z: orig.z },
-            { x: orig.x + alongVec.x, z: orig.z + alongVec.z },
-            { x: orig.x + acrossVec.x, z: orig.z + acrossVec.z },
-            { x: orig.x + alongVec.x + acrossVec.x, z: orig.z + alongVec.z + acrossVec.z }
-          ];
-          for (const p of positions) {
-            const t = this.worldMap.getTile(p.x, p.z, lyr);
-            if (t) t.switchSchedule = orig.switchSchedule;
-          }
-        }
-      }
-    };
+    this.switchScheduleUI.onScheduleChanged = (tile) => this.handleSwitchScheduleChanged(tile);
 
     this.visualEffectManager = new VisualEffectManager(this.renderer.scene, this.worldMap, this.zoneManager, this.cargoSystem);
     this.fleetController = new FleetController(
@@ -185,6 +163,7 @@ export class GameApp {
         this.scheduleUI.refreshOrClose();
         this.switchScheduleUI.refreshOrClose();
         this.externalConnectionManager.checkConnections(this.worldMap);
+        this.demandEngine.clearCache();
       }
     });
     this.placementController = new PlacementController({
@@ -195,6 +174,7 @@ export class GameApp {
       onPlacementExecuted: () => {
         this.applyLayerSlicing(this.currentDisplayLayer);
         this.miniMap.requestStaticUpdate();
+        this.demandEngine.clearCache();
         this.terrainRenderer.rebuildAll(this.gridManager, this.renderer.scene);
         this.externalConnectionManager.checkConnections(this.worldMap, (city) => {
           this.uiManager.showToast('祝・幹線開通！', `${city.name}との直通線路が開通しました！広域輸送が開始されます。`, 'info');
@@ -428,6 +408,7 @@ export class GameApp {
       ui.closeInspector();
       this.switchScheduleUI.open(tile.type.startsWith('scissors_crossing') ? (this.worldMap.resolveCrossingOrigin(tile.x, tile.z, tile.layer) ?? tile) : tile);
     };
+    ui.onSwitchScheduleChanged = (tile) => this.handleSwitchScheduleChanged(tile);
 
     this.trainManager.onTrainSplit = (p, s) => fc.onTrainSplit(p, s);
     this.trainManager.onTrainCoupled = (l, f) => {
@@ -562,15 +543,20 @@ export class GameApp {
     this.renderer.disableCabHeadlight();
     this.updateBuildingLod();
 
-    // クォータービュー復帰時に対象列車を追従
+    // クォータービュー復帰時に対象列車を追従（マップ内を走行中の場合のみ）
     if (followId !== null && followId !== undefined) {
-      this.selectedTrainId = followId;
-      this.cabTargetTrainId = followId;
       const target = this.trainManager.getFollowTargetByTrainId(followId);
       const train = this.trainManager.getTrainById(followId);
-      if (target && train) {
+      if (target && train && !train.externalTravel) {
+        this.selectedTrainId = followId;
+        this.cabTargetTrainId = followId;
         this.switchActiveLayer(train.currentTile.layer, false);
         this.cameraManager.startTracking(target, false);
+      } else {
+        // マップ外に出た列車や消滅した列車の場合は追従ターゲットをクリア
+        this.selectedTrainId = null;
+        this.cabTargetTrainId = null;
+        this.cameraManager.stopTracking();
       }
     }
   }
@@ -889,6 +875,34 @@ export class GameApp {
 
     this.lastTime = performance.now();
     requestAnimationFrame(this.gameLoop.bind(this));
+  }
+
+  /**
+   * 分岐器・シーサスクロッシングのダイヤ設定変更時の同期・ダーティマーク処理
+   */
+  private handleSwitchScheduleChanged(tile: TileData): void {
+    if (tile.type.startsWith('scissors_crossing')) {
+      const orig = this.worldMap.resolveCrossingOrigin(tile.x, tile.z, tile.layer);
+      if (orig) {
+        orig.switchSchedule = tile.switchSchedule;
+        const along = (orig.rotation % 2 === 1) ? 1 : 2;
+        const across = WorldMap.rotateCW(along);
+        const alongVec = WorldMap.DIRS[along];
+        const acrossVec = WorldMap.DIRS[across];
+        const lyr = (orig.layer ?? 1) as GridLayer;
+        const positions = [
+          { x: orig.x, z: orig.z },
+          { x: orig.x + alongVec.x, z: orig.z + alongVec.z },
+          { x: orig.x + acrossVec.x, z: orig.z + acrossVec.z },
+          { x: orig.x + alongVec.x + acrossVec.x, z: orig.z + alongVec.z + acrossVec.z }
+        ];
+        for (const p of positions) {
+          const t = this.worldMap.getTile(p.x, p.z, lyr);
+          if (t) t.switchSchedule = orig.switchSchedule;
+        }
+      }
+    }
+    this.worldMap.markDirty();
   }
 
   public getGridManager(): GridManager { return this.gridManager; }

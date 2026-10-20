@@ -2722,25 +2722,6 @@ html, body {
   gap: 28px;
 }
 
-.title-close-btn {
-  position: absolute;
-  top: 16px;
-  right: 18px;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  font-size: 18px;
-  cursor: pointer;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  transition: all 0.15s;
-}
-
-.title-close-btn:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.1);
-}
-
 .title-header {
   text-align: center;
 }

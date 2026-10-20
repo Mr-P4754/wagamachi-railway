@@ -79,6 +79,7 @@ export interface SavedEconomyRecord {
   yearlyHistory: any[];
   lastDepreciationCost?: number;
   lastTotalBookValue?: number;
+  isInfiniteFunds?: boolean;
   depreciationLedger?: any;
 }
 

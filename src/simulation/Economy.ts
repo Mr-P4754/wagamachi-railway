@@ -467,6 +467,7 @@ export class Economy {
       yearlyHistory: this.yearlyHistory,
       lastDepreciationCost: this.lastDepreciationCost,
       lastTotalBookValue: this.lastTotalBookValue,
+      isInfiniteFunds: this.isInfiniteFunds,
       depreciationLedger: this.depreciationManager.toSnapshot()
     };
   }
@@ -496,6 +497,7 @@ export class Economy {
     this.lastSettledYear = safeNum(data.lastSettledYear, 2025);
     this.lastDepreciationCost = safeNum(data.lastDepreciationCost, 0);
     this.lastTotalBookValue = safeNum(data.lastTotalBookValue, 0);
+    this.isInfiniteFunds = !!data.isInfiniteFunds;
 
     if (data.depreciationLedger) {
       this.depreciationManager.loadFromSnapshot(data.depreciationLedger);
@@ -536,6 +538,7 @@ export class Economy {
     this.lastSettledYear = 2025;
     this.lastDepreciationCost = 0;
     this.lastTotalBookValue = 0;
+    this.isInfiniteFunds = false;
     this.depreciationManager.clear();
     this.monthlyHistory = [];
     this.yearlyHistory = [];

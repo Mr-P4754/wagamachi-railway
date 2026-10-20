@@ -286,6 +286,15 @@ export class FleetController {
     if (!item || item.status !== 'deployed' || item.activeTrainId === undefined) return;
     const train = this.trainManager.getTrainById(item.activeTrainId);
     if (train) {
+      if (train.externalTravel) {
+        this.uiManager.showToast(
+          'マップ外走行中',
+          `【${train.name}】は現在「${train.externalTravel.cityName}」へ直通走行中のため、マップ内に帰還するまでカメラ追跡できません。`,
+          'info'
+        );
+        this.uiManager.showTrainInspector(train);
+        return;
+      }
       if (train.currentTile.layer !== this.worldMap.activeLayer) {
         onLayerSwitch(train.currentTile.layer);
       }

@@ -1049,16 +1049,19 @@ export class WorldMap {
       x: originX + stepDir.x * i,
       z: originZ + stepDir.z * i
     }));
+    const upperLayer: GridLayer = (layer + 1) as GridLayer;
     for (const p of positions) {
       if (!this.isInBounds(p.x, p.z)) return false;
       if (this.isPermanentTrackOrStation(p.x, p.z, layer)) return false;
+      // 上位階層(upperLayer)にも既に線路や駅・建物が存在しないかチェック
+      const upperTile = this.getTile(p.x, p.z, upperLayer);
+      if (upperTile && upperTile.type !== 'empty') return false;
       const waterCheck = this.canPlaceAtWater(p.x, p.z, layer);
       if (!waterCheck.allowed) return false;
     }
 
     // トンネル区間内では 0m、地上地表では標高オフセットをベース高さ基準とする
     const originElevOffset = this.getTrackElevationOffset(originX, originZ, layer);
-    const upperLayer: GridLayer = (layer + 1) as GridLayer;
 
     positions.forEach((p, i) => {
       const tile = this.getOrCreateTile(p.x, p.z, layer)!;
@@ -1111,6 +1114,9 @@ export class WorldMap {
     for (const p of positions) {
       if (!this.isInBounds(p.x, p.z)) return false;
       if (this.isPermanentTrackOrStation(p.x, p.z, layer)) return false;
+      // 地下B1F(-1)に既に線路や地下駅が存在しないかチェック
+      const lowerTile = this.getTile(p.x, p.z, -1);
+      if (lowerTile && lowerTile.type !== 'empty') return false;
       const waterCheck = this.canPlaceAtWater(p.x, p.z, layer);
       if (!waterCheck.allowed) return false;
 

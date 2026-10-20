@@ -241,6 +241,8 @@ export class UndoManager {
 
       for (const [groupId, gData] of stationGroups) {
         if (gData.tiles.length > 0) {
+          // タイルを座標順（X優先、次にZ）にソートして順序を保証
+          gData.tiles.sort((a, b) => (a.x - b.x) || (a.z - b.z));
           const axis = gData.rotation % 2;
           const reg = worldMap.stationManager.registerPlatform({
             tiles: gData.tiles,
@@ -260,7 +262,7 @@ export class UndoManager {
               if (tile.mesh && !gData.isSignalYard) {
                 ModelFactory.updateStationSign(tile.mesh, reg.station.name);
               }
-              if (gData.isCargoStation && this.deps.onCargoYardVisualUpdate) {
+              if ((gData.isCargoStation || tile.isCargoYard) && this.deps.onCargoYardVisualUpdate) {
                 this.deps.onCargoYardVisualUpdate(pt.x, pt.z, pt.layer);
               }
             }
