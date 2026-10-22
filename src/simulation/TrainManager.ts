@@ -114,27 +114,88 @@ export class TrainManager {
     if (dir === 'east' && direction.x > 0.3) return true;
     if (dir === 'west' && direction.x < -0.3) return true;
 
+    // 曲線レールや分岐器がマップ境界端に設置されている場合、内側から進入して外向きポートへ抜けるケースも判定
+    const exits = WorldMap.getTileExits(tile);
+    if (exits.length >= 2) {
+      let headingIdx = 0;
+      let bestDot = -Infinity;
+      for (let i = 0; i < 4; i++) {
+        const d = WorldMap.DIRS[i];
+        const dot = direction.x * d.x + direction.z * d.z;
+        if (dot > bestDot) {
+          bestDot = dot;
+          headingIdx = i;
+        }
+      }
+      const incomingSide = WorldMap.opposite(headingIdx);
+      const outIdx = dir === 'north' ? 0 : dir === 'east' ? 1 : dir === 'south' ? 2 : 3;
+      if (incomingSide !== outIdx && exits.some(e => e.idx === incomingSide) && exits.some(e => e.idx === outIdx)) {
+        if (tile.type.startsWith('point_switch')) {
+          const forward = ((tile.rotation % 4) + 4) % 4;
+          const back = WorldMap.opposite(forward);
+          const branchDir = tile.switchBranchSide === 'left' ? WorldMap.rotateCCW(forward) : WorldMap.rotateCW(forward);
+          const resolvedOut = (incomingSide === forward || incomingSide === branchDir)
+            ? back
+            : (tile.switchState === 'diverge' ? branchDir : forward);
+          return resolvedOut === outIdx;
+        }
+        return true;
+      }
+    }
+
     return false;
+  }
+
+  /**
+   * 外部接続状態から帰還時の進行方向（自都市内側向き単位ベクトル）を安全に解決する
+   */
+  private resolveReturnDirection(travel: ExternalTravelState, entryTile?: TileData): THREE.Vector3 {
+    const extDir = entryTile
+      ? ExternalConnectionManager.getExternalConnectionDirection(entryTile, this.worldMap.gridSize)
+      : null;
+    if (extDir === 'north') return new THREE.Vector3(0, 0, 1);
+    if (extDir === 'south') return new THREE.Vector3(0, 0, -1);
+    if (extDir === 'east') return new THREE.Vector3(-1, 0, 0);
+    if (extDir === 'west') return new THREE.Vector3(1, 0, 0);
+
+    if (travel.entryDirection && (Math.abs(travel.entryDirection.x) > 0.01 || Math.abs(travel.entryDirection.z) > 0.01)) {
+      return new THREE.Vector3(-travel.entryDirection.x, 0, -travel.entryDirection.z).normalize();
+    }
+
+    if (Math.abs(travel.entryTile.x) >= Math.abs(travel.entryTile.z)) {
+      return new THREE.Vector3(travel.entryTile.x > 0 ? -1 : 1, 0, 0);
+    }
+    return new THREE.Vector3(0, 0, travel.entryTile.z > 0 ? -1 : 1);
   }
 
   /**
    * 外部接続線路からマップ外へ向かう列車を外部直通走行状態に遷移させる
    */
   public startExternalTravel(train: TrainInstance, borderTile: TileData): void {
-    const cityId = borderTile.externalCityId || 'ext_city';
-    const city = this.externalConnectionManager?.getCityById(cityId);
+    const extDir = ExternalConnectionManager.getExternalConnectionDirection(borderTile, this.worldMap.gridSize);
+    const defaultCityId = extDir ? `ext_${extDir}` : 'ext_city';
+    const cityId = borderTile.externalCityId || defaultCityId;
+    const city = this.externalConnectionManager?.getCityById(cityId)
+      || (extDir ? this.externalConnectionManager?.getCityByDirection(extDir) : undefined);
     const cityName = city?.name || borderTile.stationName || '隣町方面';
     const borderLayer = (borderTile.layer ?? train.currentTile.layer) as GridLayer;
+
+    // 外向き単位ベクトルを正規化（曲線等から境界に入った場合も正確な方角ベクトルを保持）
+    const outwardVec = extDir === 'north' ? { x: 0, y: 0, z: -1 }
+      : extDir === 'south' ? { x: 0, y: 0, z: 1 }
+      : extDir === 'east' ? { x: 1, y: 0, z: 0 }
+      : extDir === 'west' ? { x: -1, y: 0, z: 0 }
+      : { x: train.direction.x, y: train.direction.y, z: train.direction.z };
 
     // 境界タイル座標に正規化して保持（セーブ＆ロード時の境界外参照エラーを防止）
     train.currentTile = { x: borderTile.x, z: borderTile.z, layer: borderLayer };
     train.targetTile = { x: borderTile.x, z: borderTile.z, layer: borderLayer };
 
     train.externalTravel = {
-      cityId,
+      cityId: city?.id || cityId,
       cityName,
       entryTile: { x: borderTile.x, z: borderTile.z, layer: borderLayer },
-      entryDirection: { x: train.direction.x, y: train.direction.y, z: train.direction.z },
+      entryDirection: outwardVec,
       phase: 'outward',
       distanceTiles: 50, // 隣町は接続部から50マス先
       remainingTiles: 50,
@@ -144,11 +205,14 @@ export class TrainManager {
     // マップ上から非表示にし、自都市線路の占有を解放
     train.mesh.visible = false;
     train.occupiedTiles = [];
+    train.needsOccupancyUpdate = false;
     train.isStopped = false;
     train.isSignalStopped = false;
     train.isAtsBraked = false;
+    train.isTrapped = false;
     train.progress = 0;
     train.lastStationGroupId = null;
+    this.blockSignalManager.unregisterTrain(train.id);
 
     if (this.onExternalTravelStateChanged) {
       this.onExternalTravelStateChanged(train, `【${train.name}】が${cityName}へ向けてマップ外へ出発しました（片道50マス）`);
@@ -237,7 +301,8 @@ export class TrainManager {
    */
   public returnFromExternalTravel(train: TrainInstance, travel: ExternalTravelState): void {
     const entry = travel.entryTile;
-    const returnDir = new THREE.Vector3(-travel.entryDirection.x, 0, -travel.entryDirection.z).normalize();
+    const curTileData = this.worldMap.getTile(entry.x, entry.z, entry.layer);
+    const returnDir = this.resolveReturnDirection(travel, curTileData);
 
     train.currentTile = { x: entry.x, z: entry.z, layer: entry.layer };
     train.direction = returnDir.clone();
@@ -245,13 +310,20 @@ export class TrainManager {
     train.isStopped = false;
     train.isSignalStopped = false;
     train.isAtsBraked = false;
+    train.isTrapped = false;
+    if (!train.speed || train.speed <= 0) {
+      train.speed = train.model.speedTilesPerMinute ?? 1.5;
+    }
 
-    const curTileData = this.worldMap.getTile(entry.x, entry.z, entry.layer);
     const nextTile = curTileData
       ? this.kinematics.findNextTrackTile(entry.x, entry.z, entry.layer, returnDir, true, this.worldMap)
       : null;
 
     if (nextTile) {
+      const nextDir = new THREE.Vector3(nextTile.x - entry.x, 0, nextTile.z - entry.z).normalize();
+      if (nextDir.lengthSq() > 0.001) {
+        train.direction.copy(nextDir);
+      }
       train.targetTile = { x: nextTile.x, z: nextTile.z, layer: (nextTile.layer ?? entry.layer) as GridLayer };
     } else {
       train.targetTile = { ...train.currentTile };
@@ -263,17 +335,17 @@ export class TrainManager {
     train.frontPosition.copy(spawnPos);
     train.heightY = startH;
 
-    const initialYaw = Math.atan2(returnDir.x, returnDir.z);
+    const initialYaw = Math.atan2(train.direction.x, train.direction.z);
     train.cars.forEach((car, i) => {
       car.rotation.order = 'YXZ';
-      car.position.copy(spawnPos).addScaledVector(returnDir, -i * ModelFactory.CAR_SPACING);
+      car.position.copy(spawnPos).addScaledVector(train.direction, -i * ModelFactory.CAR_SPACING);
       car.rotation.set(0, initialYaw, 0);
     });
 
     const initialHistory: PathSample[] = [];
     let accumDist = 0;
     for (let i = train.carCount - 1; i >= 0; i--) {
-      const pos = spawnPos.clone().addScaledVector(returnDir, -i * ModelFactory.CAR_SPACING);
+      const pos = spawnPos.clone().addScaledVector(train.direction, -i * ModelFactory.CAR_SPACING);
       if (initialHistory.length > 0) {
         accumDist += pos.distanceTo(initialHistory[initialHistory.length - 1].pos);
       }
@@ -288,9 +360,10 @@ export class TrainManager {
     }
     train.pathHistory = initialHistory;
 
-    // メッシュを再表示し、状態をクリア
+    // メッシュを再表示し、状態をクリアして即座に在線タイルを更新
     train.mesh.visible = true;
     train.externalTravel = undefined;
+    train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
     train.needsOccupancyUpdate = true;
     train.lastStationGroupId = null;
 
@@ -552,6 +625,14 @@ export class TrainManager {
       // (2-A) 在線ロック更新 ＆ 閉塞更新
       const activeTrains = this.trains.filter(t => !trainsPendingRemoval.includes(t.id));
       for (const train of activeTrains) {
+        if (train.externalTravel) {
+          if (train.occupiedTiles && train.occupiedTiles.length > 0) {
+            train.occupiedTiles = [];
+            hasOccupancyChanged = true;
+          }
+          train.needsOccupancyUpdate = false;
+          continue;
+        }
         const isStatic = !!(train.isStopped || train.isSignalStopped || train.isAtsBraked || train.isTrapped);
         if (isStatic && train.occupiedTiles && train.occupiedTiles.length > 0) {
           train.needsOccupancyUpdate = false;
@@ -671,14 +752,44 @@ export class TrainManager {
             if (travel.remainingTiles <= 0) {
               // 自都市接続部まで帰還！
               travel.remainingTiles = 0;
-              const entry = travel.entryTile;
-              const entryTileData = this.worldMap.getTile(entry.x, entry.z, entry.layer);
+              let entry = travel.entryTile;
+              let entryTileData = this.worldMap.getTile(entry.x, entry.z, entry.layer);
+
+              // 万一、直通走行中に元の接続部タイルが撤去されていた場合のフォールバック探索
+              if (!entryTileData || !this.kinematics.isTrackTile(entryTileData)) {
+                const fallbackDir = this.resolveReturnDirection(travel);
+                // 1) 自都市内側方向へ直線状に最大10マス探索し、残存している線路端を探す
+                for (let stepIn = 1; stepIn <= 10; stepIn++) {
+                  const cx = Math.round(entry.x + fallbackDir.x * stepIn);
+                  const cz = Math.round(entry.z + fallbackDir.z * stepIn);
+                  const cand = this.worldMap.getTile(cx, cz, entry.layer);
+                  if (cand && this.kinematics.isTrackTile(cand)) {
+                    entry = { x: cx, z: cz, layer: entry.layer };
+                    travel.entryTile = entry;
+                    entryTileData = cand;
+                    break;
+                  }
+                }
+                // 2) それでも見つからない場合、同一都市（方角）の他の接続境界線路を探す
+                if (!entryTileData || !this.kinematics.isTrackTile(entryTileData)) {
+                  const altTile = this.worldMap.getAllTiles().find(t =>
+                    t.externalCityId === travel.cityId && this.kinematics.isTrackTile(t)
+                  );
+                  if (altTile) {
+                    entry = { x: altTile.x, z: altTile.z, layer: (altTile.layer ?? 1) as GridLayer };
+                    travel.entryTile = entry;
+                    entryTileData = altTile;
+                  }
+                }
+              }
+
               if (entryTileData && this.kinematics.isTrackTile(entryTileData)) {
-                const returnDir = new THREE.Vector3(-travel.entryDirection.x, 0, -travel.entryDirection.z).normalize();
+                syncSwitchOrCrossingTimelineAtTile(entry.x, entry.z, entry.layer, subStepHour, subStepMinute);
+                const returnDir = this.resolveReturnDirection(travel, entryTileData);
                 const nextInMap = this.kinematics.findNextTrackTile(entry.x, entry.z, entry.layer, returnDir, true, this.worldMap);
-                const isEntryOccupied = this.isTileOccupiedByTrain(entry.x, entry.z, entry.layer);
+                const isEntryOccupied = this.isTileOccupiedByTrain(entry.x, entry.z, entry.layer, train.id);
                 const isNextOccupied = nextInMap
-                  ? this.isTileOccupiedByTrain(nextInMap.x, nextInMap.z, (nextInMap.layer ?? entry.layer) as GridLayer)
+                  ? this.isTileOccupiedByTrain(nextInMap.x, nextInMap.z, (nextInMap.layer ?? entry.layer) as GridLayer, train.id)
                   : false;
                 const canEnter = this.blockSignalManager.canEnterTile(train.id, entry.x, entry.z, entry.layer) && !isEntryOccupied && !isNextOccupied;
                 if (canEnter) {
@@ -897,7 +1008,10 @@ export class TrainManager {
             }
           }
 
-          const isBorderExternal = !!curTileData?.isExternalConnection;
+          const isBorderExternal = !!curTileData && (
+            !!curTileData.isExternalConnection ||
+            ExternalConnectionManager.getExternalConnectionDirection(curTileData, this.worldMap.gridSize) !== null
+          );
 
           // 外部直通線路において、進行方向がマップ外（外部都市方面）を向いている場合はマップ外へ出発！
           if (isBorderExternal && curTileData && TrainManager.isHeadingToOutside(curTileData, train.direction, this.worldMap.gridSize)) {
@@ -1152,6 +1266,7 @@ export class TrainManager {
       // 次サブステップ用の先頭車位置更新
       for (const t of this.trains) {
         if (!trainsPendingRemoval.includes(t.id)) {
+          if (t.externalTravel) continue;
           if (shouldRecordHistory) {
             this.kinematics.recordCurrentHeadSample(t, this.worldMap);
           } else {
@@ -1263,12 +1378,16 @@ export class TrainManager {
 
   public updateOccupancyNow(): void {
     for (const train of this.trains) {
+      if (train.externalTravel) {
+        train.occupiedTiles = [];
+        continue;
+      }
       train.occupiedTiles = this.collisionSystem.calculateOccupiedTiles(train, this.worldMap);
     }
   }
 
-  public isTileOccupiedByTrain(x: number, z: number, layer: GridLayer): boolean {
-    return this.collisionSystem.isTileOccupiedByTrain(x, z, layer, this.trains, this.worldMap);
+  public isTileOccupiedByTrain(x: number, z: number, layer: GridLayer, excludeTrainId?: number): boolean {
+    return this.collisionSystem.isTileOccupiedByTrain(x, z, layer, this.trains, this.worldMap, excludeTrainId);
   }
 
   public getFollowTarget(trainIndex: number = 0): FollowTarget | null {

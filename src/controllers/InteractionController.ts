@@ -100,6 +100,7 @@ export class InteractionController {
     this.raycaster.setFromCamera(this.mousePos, this.deps.cameraManager.activeCamera);
     let closest: { train: ReturnType<TrainManager['getTrains']>[number]; dist: number } | null = null;
     for (const train of this.deps.trainManager.getTrains()) {
+      if (train.externalTravel || !train.mesh.visible) continue;
       const hits = this.raycaster.intersectObject(train.mesh, true);
       if (hits.length > 0 && (!closest || hits[0].distance < closest.dist)) {
         closest = { train, dist: hits[0].distance };

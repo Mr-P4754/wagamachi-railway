@@ -21,6 +21,7 @@ export class TrainCollisionSystem {
    * ① 最大10両編成の全車両（先頭車〜最後尾車）が存在する全タイル座標を算出
    */
   public calculateOccupiedTiles(train: TrainInstance, worldMap: WorldMap): Array<{ x: number; z: number; layer: GridLayer }> {
+    if (train.externalTravel) return [];
     const tilesMap = new Map<string, { x: number; z: number; layer: GridLayer }>();
 
     for (let i = 0; i < train.carCount; i++) {
@@ -118,7 +119,7 @@ export class TrainCollisionSystem {
     // 1. 在線タイル逆引きインデックスの構築 (O(N))
     const tileOccupancyMap = new Map<string, TrainInstance>();
     for (const train of trains) {
-      if (!train || !train.occupiedTiles || train.occupiedTiles.length === 0) continue;
+      if (!train || train.externalTravel || !train.occupiedTiles || train.occupiedTiles.length === 0) continue;
       for (const t of train.occupiedTiles) {
         const key = `${t.x},${t.layer},${t.z}`;
         const existing = tileOccupancyMap.get(key);
@@ -131,7 +132,7 @@ export class TrainCollisionSystem {
     // 2. 各列車の前方探索と ATS 判定 (O(N))
     for (let i = 0; i < trains.length; i++) {
       const trainA = trains[i];
-      if (!trainA || !trainA.occupiedTiles || trainA.occupiedTiles.length === 0) continue;
+      if (!trainA || trainA.externalTravel || !trainA.occupiedTiles || trainA.occupiedTiles.length === 0) continue;
 
       if (trainA.isStopped) {
         trainA.isAtsBraked = false;
@@ -278,12 +279,17 @@ export class TrainCollisionSystem {
     z: number,
     layer: GridLayer,
     trains: TrainInstance[],
-    worldMap: WorldMap
+    worldMap: WorldMap,
+    excludeTrainId?: number
   ): boolean {
     const tile = worldMap.getTile(x, z, layer);
     const isEmptyTile = !tile || tile.type === 'empty';
 
     for (const train of trains) {
+      // 外部都市へ直通走行中（マップ外）の列車および除外指定された自列車は占有判定から除外
+      if (train.externalTravel) continue;
+      if (excludeTrainId !== undefined && train.id === excludeTrainId) continue;
+
       if (isEmptyTile) {
         const isPhysicallyNear = train.cars.some(car => {
           const distSq = (car.position.x - x * WorldMap.TILE_SIZE) ** 2 +

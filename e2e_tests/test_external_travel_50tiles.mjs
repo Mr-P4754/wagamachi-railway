@@ -101,6 +101,9 @@ async function runExternalTravelTest() {
 
       // 1ステップ時間を進めて境界到達＆外部旅行突入をトリガー
       tm.update(0.1, 1);
+      // さらに複数ステップ進めても在線占有（occupiedTiles）が復活しないことを確認
+      tm.update(0.1, 1);
+      tm.update(0.1, 1);
 
       return {
         trainId: train.id,
