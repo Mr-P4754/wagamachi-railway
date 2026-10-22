@@ -251,9 +251,14 @@ export class TrainManager {
       }
 
       // 隣町からの特産品積み込み（最大積載量）
+      // 自都市帰還後の荷降ろし時に50マス分の長距離輸送運賃が切り捨てられないよう、
+      // 積込基準座標を境界から隣町方向へ distanceTiles マス進んだ仮想座標に設定する
       const cap = train.cargoCapacity ?? Math.max(0, (train.carCount - 1) * 3);
       train.cargoLoad = cap;
-      train.cargoPickup = { x: travel.entryTile.x, z: travel.entryTile.z };
+      train.cargoPickup = {
+        x: travel.entryTile.x + Math.round(travel.entryDirection.x * travel.distanceTiles),
+        z: travel.entryTile.z + Math.round(travel.entryDirection.z * travel.distanceTiles)
+      };
       train.cargoTraveledTiles = travel.distanceTiles;
       VehicleMeshBuilder.updateTrainCargoVisual(train.cars, train.cargoLoad);
 

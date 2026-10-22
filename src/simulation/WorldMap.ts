@@ -354,6 +354,8 @@ export interface TileDataSnapshot {
   isCargoYard?: boolean;
   cargoContainers?: number;
   elevationOffset?: number;
+  externalCityId?: string;
+  isExternalConnection?: boolean;
 }
 
 /**
@@ -388,7 +390,9 @@ export function cloneTileSnapshot(tile: TileData | undefined | null): TileDataSn
     switchSchedule: tile.switchSchedule ? cloneSwitchSchedule(tile.switchSchedule) : undefined,
     isCargoYard: tile.isCargoYard,
     cargoContainers: tile.cargoContainers,
-    elevationOffset: tile.elevationOffset
+    elevationOffset: tile.elevationOffset,
+    externalCityId: tile.externalCityId,
+    isExternalConnection: tile.isExternalConnection
   };
 }
 
@@ -2972,6 +2976,13 @@ export class WorldMap {
       }
     } else {
       this.setTile(snap.x, snap.z, snap.type, snap.rotation, snap.level, 'right', lyr);
+    }
+
+    const finalTile = this.getTile(snap.x, snap.z, lyr);
+    if (finalTile) {
+      if (snap.externalCityId !== undefined) finalTile.externalCityId = snap.externalCityId;
+      if (snap.isExternalConnection !== undefined) finalTile.isExternalConnection = snap.isExternalConnection;
+      if (snap.stationName && !finalTile.stationName) finalTile.stationName = snap.stationName;
     }
 
     this.updateUpperElevatedPiers(snap.x, snap.z, lyr);

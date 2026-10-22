@@ -356,8 +356,18 @@ export class GameApp {
         ui.showToast('列車未運行', '運行中の列車がありません。先に列車を購入・配置してください。', 'info');
         return;
       }
-      const targetId = this.cabTargetTrainId ?? this.selectedTrainId ?? trs[0].id;
-      const train = this.trainManager.getTrainById(targetId) ?? trs[0];
+      if (this.cameraManager.viewMode !== 'quarter_view' && this.cameraManager.viewMode !== 'chase_view') {
+        this.exitCabView();
+        return;
+      }
+      const inMapTrains = trs.filter(t => !t.externalTravel);
+      if (inMapTrains.length === 0) {
+        ui.showToast('マップ外走行中', 'すべての運行列車が現在隣町へ直通運行中です。', 'info');
+        return;
+      }
+      const targetId = this.cabTargetTrainId ?? this.selectedTrainId ?? inMapTrains[0].id;
+      const candidate = this.trainManager.getTrainById(targetId);
+      const train = (candidate && !candidate.externalTravel) ? candidate : inMapTrains[0];
       if (train) {
         this.switchActiveLayer(train.currentTile.layer, false);
       }
@@ -365,18 +375,18 @@ export class GameApp {
         this.enterChaseView(train.id);
       } else if (this.cameraManager.viewMode === 'chase_view') {
         this.enterCabView(train.id);
-      } else {
-        this.exitCabView();
       }
     };
     ui.onCabToggleModeRequested = () => {
-      const trs = this.trainManager.getTrains();
-      if (trs.length === 0) return;
-      const targetId = this.cabTargetTrainId ?? this.selectedTrainId ?? trs[0].id;
+      const inMapTrains = this.trainManager.getTrains().filter(t => !t.externalTravel);
+      if (inMapTrains.length === 0) return;
+      const targetId = this.cabTargetTrainId ?? this.selectedTrainId ?? inMapTrains[0].id;
+      const candidate = this.trainManager.getTrainById(targetId);
+      const validId = (candidate && !candidate.externalTravel) ? candidate.id : inMapTrains[0].id;
       if (this.cameraManager.viewMode === 'cab_view') {
-        this.enterChaseView(targetId);
+        this.enterChaseView(validId);
       } else if (this.cameraManager.viewMode === 'chase_view') {
-        this.enterCabView(targetId);
+        this.enterCabView(validId);
       }
     };
     ui.onChaseTrainRequested = (trainId) => this.enterChaseView(trainId);

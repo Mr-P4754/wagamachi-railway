@@ -894,11 +894,17 @@ export class InteractionController {
       if (updated) {
         this.deps.uiManager.showInspector(updated, undefined, targetLen, wm.getStationAggregateData(x, z, stLayer));
         // 短縮されたタイルのコンテナ表示を消去し、残ったタイルを更新
+        const newStationTiles = wm.getStationTiles(x, z, stLayer);
+        const newTileSet = new Set(newStationTiles.map(st => `${st.x},${st.z}`));
         for (const oldPos of oldStationTiles) {
-          this.deps.visualEffectManager.updateCargoYardVisual(oldPos.x, oldPos.z, stLayer);
+          if (!newTileSet.has(`${oldPos.x},${oldPos.z}`)) {
+            this.deps.visualEffectManager.removeCargoYardVisual(oldPos.x, oldPos.z, stLayer);
+          } else {
+            this.deps.visualEffectManager.updateCargoYardVisual(oldPos.x, oldPos.z, stLayer);
+          }
         }
         if (updated.type.startsWith('cargo_station') || updated.isCargoYard) {
-          for (const st of wm.getStationTiles(x, z, stLayer)) {
+          for (const st of newStationTiles) {
             this.deps.visualEffectManager.updateCargoYardVisual(st.x, st.z, stLayer);
           }
         }

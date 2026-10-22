@@ -501,6 +501,7 @@ export class PersistenceService {
       if (legacyEconomy) {
         try {
           economy.deserialize(JSON.parse(legacyEconomy));
+          this.deps.uiManager.updateInfiniteFundsUI(economy.isInfiniteFunds);
         } catch (e) {
           console.warn('[PersistenceService] 旧経済データパース失敗:', e);
         }
@@ -535,6 +536,7 @@ export class PersistenceService {
               this.deps.uiManager.setSpeedUI(t.speedLevel);
             }
             economy.syncDate(timeManager.year, timeManager.month, timeManager.day);
+            this.deps.cityGrowth.syncTime(timeManager.day, timeManager.hour);
           }
         } catch (e) {
           console.warn('[PersistenceService] 旧日時データパース失敗:', e);
@@ -582,6 +584,8 @@ export class PersistenceService {
       }
 
       terrainRenderer.build(getGridManager(), renderer.scene);
+      this.deps.externalConnectionManager?.checkConnections(worldMap);
+      this.deps.miniMap.rebuildBackground();
       console.info('[PersistenceService] localStorage から IndexedDB への移行が正常に完了しました！');
       return true;
     } catch (err) {
@@ -739,6 +743,8 @@ export class PersistenceService {
     uiManager.setSpeedUI(1);
     cityGrowth.syncTime(1, 6);
     scheduleUI.close();
+    this.deps.switchScheduleUI.close();
+    uiManager.closeInspector();
 
     zoneManager.clearAll();
     visualEffectManager.clearAllZoneOverlays();
