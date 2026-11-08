@@ -1,4 +1,4 @@
-import { WorldMap } from '../simulation/WorldMap';
+import { WorldMap, WorldMapSerializer } from '../simulation/WorldMap';
 import { GridManager } from '../core/GridManager';
 import { GridLayer, MapSize, TerrainType } from '../core/types';
 import { TrainManager } from '../simulation/TrainManager';
@@ -152,51 +152,7 @@ export class PersistenceService {
       const { worldMap, zoneManager, economy, trainManager, fleetController, timeManager, uiManager, scheduleUI } = this.deps;
 
       // 【ステップA: タイルデータの抽出】
-      const tileRecords: SavedTileRecord[] = [];
-      for (const t of worldMap.getAllTiles()) {
-        // シーサスクロッシングの従属マス(B/C/D)は起点(A)から復元されるため重複登録を除外
-        if (t.groupOrigin && t.crossingRole !== 0) continue;
-        if (t.type !== 'empty') {
-          tileRecords.push({
-            id: `${t.x},${t.z},${t.layer ?? 1}`,
-            x: t.x,
-            z: t.z,
-            layer: (t.layer ?? 1) as GridLayer,
-            type: t.type,
-            rotation: t.rotation,
-            level: t.level,
-            elevationOffset: t.elevationOffset,
-            curveDir: t.curveDir,
-            switchState: t.switchState,
-            switchBranchSide: t.switchBranchSide,
-            switchSchedule: t.switchSchedule,
-            crossingState: t.crossingState,
-            crossingRoadAxis: t.crossingRoadAxis,
-            slopePart: t.slopePart,
-            slopeReversed: t.slopeReversed,
-            cargoContainers: t.cargoContainers,
-            stationName: t.stationName,
-            stationGroupId: t.stationGroupId,
-            stationPlatformId: t.stationPlatformId,
-            stationPart: t.stationPart,
-            stationPlatformSide: t.stationPlatformSide,
-            stationSchedule: t.stationSchedule,
-            stationPassengers: t.stationPassengers,
-            isCargoYard: t.isCargoYard,
-            externalCityId: t.externalCityId,
-            isExternalConnection: t.isExternalConnection,
-            // 互換キー
-            rot: t.rotation,
-            lvl: t.level,
-            sw: t.switchState,
-            branchSide: t.switchBranchSide,
-            crossState: t.crossingState,
-            roadAxis: t.crossingRoadAxis,
-            slopeRev: t.slopeReversed,
-            cargoYard: t.isCargoYard
-          });
-        }
-      }
+      const tileRecords: SavedTileRecord[] = WorldMapSerializer.extractSavedTileRecords(worldMap.getAllTiles());
 
       // 【ステップB: 列車・経済・システム設定データの抽出】
       const rawTrains = trainManager.serialize();
@@ -583,6 +539,7 @@ export class PersistenceService {
         } catch {}
       }
 
+      renderer.updateGroundAndGridSize(worldMap.gridSize);
       terrainRenderer.build(getGridManager(), renderer.scene);
       this.deps.externalConnectionManager?.checkConnections(worldMap);
       this.deps.miniMap.rebuildBackground();
@@ -610,6 +567,8 @@ export class PersistenceService {
       visualEffectManager,
       renderer
     } = this.deps;
+
+    renderer.updateGroundAndGridSize(worldMap.gridSize);
 
     // 初期都市構築前に既存のタイル・列車・車両台帳を確実にクリアして増殖を防止
     worldMap.clearAll();

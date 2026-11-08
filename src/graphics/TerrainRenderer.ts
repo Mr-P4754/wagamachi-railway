@@ -271,6 +271,7 @@ export class TerrainRenderer {
   public rebuildChunk(cx: number, cz: number, gridManager: GridManager, _scene?: THREE.Scene): void {
     const key = GridManager.getChunkKey(cx, cz);
     const existing = this.chunkGroups.get(key);
+    const wasVisible = existing ? existing.visible : true;
     if (existing) {
       this.terrainGroup.remove(existing);
       this.disposeChunkGroup(existing);
@@ -278,6 +279,7 @@ export class TerrainRenderer {
     }
     const chunk = gridManager.ensureChunk(cx, cz);
     const newGroup = this.buildChunkGroup(chunk, gridManager);
+    newGroup.visible = wasVisible;
     this.chunkGroups.set(key, newGroup);
     this.terrainGroup.add(newGroup);
   }
@@ -288,6 +290,29 @@ export class TerrainRenderer {
   public rebuildChunkAt(worldX: number, worldZ: number, gridManager: GridManager, _scene?: THREE.Scene): void {
     const { cx, cz } = gridManager.worldToChunkCoords(worldX, worldZ);
     this.rebuildChunk(cx, cz, gridManager, _scene);
+  }
+
+  /**
+   * 指定座標リストのうち、山岳地形（elevation > 1）のセルを含む構築済みチャンクのみを差分再構築
+   */
+  public rebuildChunksAtPositions(
+    positions: Iterable<{ x: number; z: number }>,
+    gridManager: GridManager,
+    _scene?: THREE.Scene
+  ): void {
+    const affectedChunks = new Map<string, { cx: number; cz: number }>();
+    for (const pos of positions) {
+      const cell = gridManager.getCell(pos.x, 1, pos.z);
+      if (!cell || cell.elevation <= 1) continue;
+      const { cx, cz } = gridManager.worldToChunkCoords(pos.x, pos.z);
+      const key = GridManager.getChunkKey(cx, cz);
+      if (this.chunkGroups.has(key) && !affectedChunks.has(key)) {
+        affectedChunks.set(key, { cx, cz });
+      }
+    }
+    for (const { cx, cz } of affectedChunks.values()) {
+      this.rebuildChunk(cx, cz, gridManager, _scene);
+    }
   }
 
   /**

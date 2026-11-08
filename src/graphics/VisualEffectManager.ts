@@ -2,9 +2,27 @@ import * as THREE from 'three';
 import { GridLayer } from '../core/types';
 import { layerToHeight } from '../core/Grid3D';
 import { WorldMap } from '../simulation/WorldMap';
-import { ZoneManager } from '../core/ZoneManager';
+import { ZoneManager, ZoneType } from '../core/ZoneManager';
 import { CargoSystem } from '../core/CargoSystem';
 import { disposeHierarchy } from './materials';
+
+interface ZoneInstancedBucket {
+  type: ZoneType;
+  material: THREE.MeshBasicMaterial;
+  mesh: THREE.InstancedMesh;
+  capacity: number;
+  count: number;
+  keyToIndex: Map<string, number>;
+  indexToKey: string[];
+}
+
+const ZONE_COLORS: Record<ZoneType, number> = {
+  residential: 0x22c55e,
+  commercial: 0x3b82f6,
+  industrial: 0xeab308
+};
+
+const INITIAL_ZONE_CAPACITY = 256;
 
 /**
  * 貨物ヤードのコンテナ描画演出およびRCIゾーニング3D半透明オーバーレイの管理クラス
@@ -15,13 +33,22 @@ export class VisualEffectManager {
   private zoneManager: ZoneManager;
   private cargoSystem: CargoSystem;
 
-  // RCIゾーニング半透明オーバーレイ
+  // RCIゾーニング半透明オーバーレイ（GPUインスタンシング管理）
   private zoneOverlayGroup: THREE.Group = new THREE.Group();
-  private zoneOverlayMeshes: Map<string, THREE.Mesh> = new Map();
+  private readonly zonePlaneGeo: THREE.PlaneGeometry = (() => {
+    const geo = new THREE.PlaneGeometry(WorldMap.TILE_SIZE * 0.94, WorldMap.TILE_SIZE * 0.94);
+    geo.rotateX(-Math.PI / 2);
+    geo.userData.keepAlive = true;
+    return geo;
+  })();
+  private zoneBuckets: Map<ZoneType, ZoneInstancedBucket> = new Map();
+  private cellZoneTypes: Map<string, ZoneType> = new Map();
+  private readonly tempMatrix: THREE.Matrix4 = new THREE.Matrix4();
 
   // 貨物ヤードのコンテナ段数視覚演出管理
   private cargoYardMeshes: Map<string, THREE.Group> = new Map();
   private cargoYardSignatures: Map<string, string> = new Map();
+  private currentDisplayLayer: GridLayer | 'all' = 1;
 
   // 貨物ヤードのコンテナ共有ジオメトリ（全コンテナで使い回し、disposeHierarchy の解放対象外）
   private readonly cargoContainerGeo: THREE.BoxGeometry = (() => {
@@ -45,6 +72,78 @@ export class VisualEffectManager {
 
     this.zoneOverlayGroup.name = 'ZoneOverlayGroup';
     this.scene.add(this.zoneOverlayGroup);
+
+    (['residential', 'commercial', 'industrial'] as ZoneType[]).forEach(type => {
+      const material = new THREE.MeshBasicMaterial({
+        color: ZONE_COLORS[type],
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false
+      });
+      material.userData.keepAlive = true;
+      const mesh = this.createInstancedMesh(material, INITIAL_ZONE_CAPACITY);
+      this.zoneOverlayGroup.add(mesh);
+      this.zoneBuckets.set(type, {
+        type,
+        material,
+        mesh,
+        capacity: INITIAL_ZONE_CAPACITY,
+        count: 0,
+        keyToIndex: new Map(),
+        indexToKey: []
+      });
+    });
+  }
+
+  private createInstancedMesh(material: THREE.MeshBasicMaterial, capacity: number): THREE.InstancedMesh {
+    const mesh = new THREE.InstancedMesh(this.zonePlaneGeo, material, capacity);
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    return mesh;
+  }
+
+  private ensureBucketCapacity(bucket: ZoneInstancedBucket, required: number): void {
+    if (required <= bucket.capacity) return;
+    let newCapacity = bucket.capacity;
+    while (newCapacity < required) {
+      newCapacity *= 2;
+    }
+    const newMesh = this.createInstancedMesh(bucket.material, newCapacity);
+    newMesh.instanceMatrix.array.set(bucket.mesh.instanceMatrix.array);
+    newMesh.count = bucket.count;
+    newMesh.instanceMatrix.needsUpdate = true;
+
+    this.zoneOverlayGroup.remove(bucket.mesh);
+    bucket.mesh.dispose();
+    this.zoneOverlayGroup.add(newMesh);
+    bucket.mesh = newMesh;
+    bucket.capacity = newCapacity;
+  }
+
+  private removeCellFromBucket(key: string): void {
+    const prevType = this.cellZoneTypes.get(key);
+    if (!prevType) return;
+    this.cellZoneTypes.delete(key);
+
+    const bucket = this.zoneBuckets.get(prevType);
+    if (!bucket) return;
+    const idx = bucket.keyToIndex.get(key);
+    if (idx === undefined) return;
+
+    const lastIdx = bucket.count - 1;
+    if (idx !== lastIdx) {
+      const lastKey = bucket.indexToKey[lastIdx];
+      bucket.mesh.getMatrixAt(lastIdx, this.tempMatrix);
+      bucket.mesh.setMatrixAt(idx, this.tempMatrix);
+      bucket.keyToIndex.set(lastKey, idx);
+      bucket.indexToKey[idx] = lastKey;
+    }
+    bucket.keyToIndex.delete(key);
+    bucket.indexToKey.pop();
+    bucket.count--;
+    bucket.mesh.count = bucket.count;
+    bucket.mesh.instanceMatrix.needsUpdate = true;
   }
 
   /**
@@ -54,27 +153,35 @@ export class VisualEffectManager {
     for (const { x, z } of cells) {
       const key = `${x},${z}`;
       const zone = this.zoneManager.getZone(x, z);
-      let mesh = this.zoneOverlayMeshes.get(key);
       if (!zone) {
-        if (mesh) {
-          this.zoneOverlayGroup.remove(mesh);
-          this.zoneOverlayMeshes.delete(key);
-        }
+        this.removeCellFromBucket(key);
         continue;
       }
-      const color = zone.type === 'residential' ? 0x22c55e : zone.type === 'commercial' ? 0x3b82f6 : 0xeab308;
+
+      const prevType = this.cellZoneTypes.get(key);
+      if (prevType && prevType !== zone.type) {
+        this.removeCellFromBucket(key);
+      }
+
+      const bucket = this.zoneBuckets.get(zone.type);
+      if (!bucket) continue;
+
       const groundH = this.worldMap.getElevationOffset(x, z);
-      if (!mesh) {
-        const geo = new THREE.PlaneGeometry(WorldMap.TILE_SIZE * 0.94, WorldMap.TILE_SIZE * 0.94);
-        const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.32, depthWrite: false });
-        mesh = new THREE.Mesh(geo, mat);
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.position.set(x * WorldMap.TILE_SIZE, groundH + 0.04, z * WorldMap.TILE_SIZE);
-        this.zoneOverlayGroup.add(mesh);
-        this.zoneOverlayMeshes.set(key, mesh);
+      this.tempMatrix.makeTranslation(x * WorldMap.TILE_SIZE, groundH + 0.04, z * WorldMap.TILE_SIZE);
+
+      const existingIdx = bucket.keyToIndex.get(key);
+      if (existingIdx !== undefined) {
+        bucket.mesh.setMatrixAt(existingIdx, this.tempMatrix);
+        bucket.mesh.instanceMatrix.needsUpdate = true;
       } else {
-        mesh.position.set(x * WorldMap.TILE_SIZE, groundH + 0.04, z * WorldMap.TILE_SIZE);
-        (mesh.material as THREE.MeshBasicMaterial).color.setHex(color);
+        this.ensureBucketCapacity(bucket, bucket.count + 1);
+        const idx = bucket.count++;
+        bucket.keyToIndex.set(key, idx);
+        bucket.indexToKey.push(key);
+        bucket.mesh.setMatrixAt(idx, this.tempMatrix);
+        bucket.mesh.count = bucket.count;
+        bucket.mesh.instanceMatrix.needsUpdate = true;
+        this.cellZoneTypes.set(key, zone.type);
       }
     }
   }
@@ -87,11 +194,7 @@ export class VisualEffectManager {
       for (let dz = -radius; dz <= radius; dz++) {
         if (Math.hypot(dx, dz) > radius + 0.4) continue;
         const key = `${x + dx},${z + dz}`;
-        const mesh = this.zoneOverlayMeshes.get(key);
-        if (mesh) {
-          this.zoneOverlayGroup.remove(mesh);
-          this.zoneOverlayMeshes.delete(key);
-        }
+        this.removeCellFromBucket(key);
       }
     }
   }
@@ -100,18 +203,20 @@ export class VisualEffectManager {
    * すべてのゾーンオーバーレイをクリア
    */
   public clearAllZoneOverlays(): void {
-    for (const mesh of this.zoneOverlayMeshes.values()) {
-      this.zoneOverlayGroup.remove(mesh);
-      mesh.geometry.dispose();
-      (mesh.material as THREE.Material).dispose();
+    this.cellZoneTypes.clear();
+    for (const bucket of this.zoneBuckets.values()) {
+      bucket.keyToIndex.clear();
+      bucket.indexToKey.length = 0;
+      bucket.count = 0;
+      bucket.mesh.count = 0;
+      bucket.mesh.instanceMatrix.needsUpdate = true;
     }
-    this.zoneOverlayMeshes.clear();
   }
 
   /**
    * 貨物駅グループのコンテナ描写（1個単位のリアルタイム増減・最大3段）視覚演出の更新
    */
-  public updateCargoYardVisual(x: number, z: number, layer: GridLayer, currentDisplayLayer: GridLayer | 'all' = 1): void {
+  public updateCargoYardVisual(x: number, z: number, layer: GridLayer, currentDisplayLayer: GridLayer | 'all' = this.currentDisplayLayer): void {
     const tile = this.worldMap.getTile(x, z, layer);
     if (!tile || (!tile.type.startsWith('cargo_station') && !tile.isCargoYard)) {
       this.removeCargoYardVisual(x, z, layer);
@@ -215,6 +320,7 @@ export class VisualEffectManager {
    * 階層スライス変更時にコンテナメッシュの可視性を同期
    */
   public applyLayerVisibility(currentDisplayLayer: GridLayer | 'all'): void {
+    this.currentDisplayLayer = currentDisplayLayer;
     for (const [key, group] of this.cargoYardMeshes.entries()) {
       const parts = key.split(',');
       const layer = parseInt(parts[2], 10) as GridLayer;
@@ -231,10 +337,8 @@ export class VisualEffectManager {
     this.cargoVisualTimer += deltaTime;
     if (this.cargoVisualTimer >= 1.5) {
       this.cargoVisualTimer = 0;
-      for (const tile of this.worldMap.getAllTiles()) {
-        if (tile.isCargoYard || tile.type.startsWith('cargo_station')) {
-          this.updateCargoYardVisual(tile.x, tile.z, (tile.layer ?? 1) as GridLayer);
-        }
+      for (const tile of this.worldMap.getCargoTiles()) {
+        this.updateCargoYardVisual(tile.x, tile.z, (tile.layer ?? 1) as GridLayer, this.currentDisplayLayer);
       }
     }
   }
@@ -244,6 +348,13 @@ export class VisualEffectManager {
    */
   public dispose(): void {
     this.clearAllZoneOverlays();
+    for (const bucket of this.zoneBuckets.values()) {
+      this.zoneOverlayGroup.remove(bucket.mesh);
+      bucket.mesh.dispose();
+      bucket.material.dispose();
+    }
+    this.zoneBuckets.clear();
+    this.zonePlaneGeo.dispose();
     this.clearAllCargoYardVisuals();
     this.scene.remove(this.zoneOverlayGroup);
   }

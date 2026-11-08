@@ -406,7 +406,7 @@ export class InteractionController {
           this.deps.switchScheduleUI.refreshOrClose();
           de.clearCache();
           mm.requestStaticUpdate();
-          tr.rebuildAll(gm, this.deps.scene);
+          tr.rebuildChunksAtPositions(tilesToClean, gm, this.deps.scene);
           tm.updateOccupancyNow();
           pc.clearHoverStationGhost();
           this.deps.externalConnectionManager?.checkConnections(wm);

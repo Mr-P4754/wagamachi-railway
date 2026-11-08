@@ -277,7 +277,7 @@ export class UndoManager {
     }
 
     // 3. 後処理・描画更新
-    terrainRenderer.rebuildAll(this.deps.getGridManager(), scene);
+    terrainRenderer.rebuildChunksAtPositions(action.tiles, this.deps.getGridManager(), scene);
     miniMap.requestStaticUpdate();
     trainManager.updateOccupancyNow();
 

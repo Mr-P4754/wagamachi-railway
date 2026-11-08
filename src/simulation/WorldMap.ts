@@ -2,547 +2,64 @@ import * as THREE from 'three';
 import { ModelFactory } from '../models/ModelFactory';
 import { GridLayer } from '../core/types';
 import { Grid3D, layerToHeight } from '../core/Grid3D';
-import { StationManager, StationSaveData } from '../core/StationManager';
+import { StationManager } from '../core/StationManager';
 import { disposeHierarchy } from '../graphics/materials';
 import { InstancedMeshManager } from '../graphics/InstancedMeshManager';
 import { RenderBucketRegistry } from '../graphics/RenderBucketRegistry';
+import {
+  CurveDirection,
+  SwitchState,
+  CrossingState,
+  TileData,
+  TileType,
+  TileDataSnapshot,
+  TileExit,
+  DirVec,
+  LEVEL_GROUND,
+  LEVEL_ELEVATED,
+  SLOPE_PARTS,
+  cloneStationSchedule,
+  cloneSwitchSchedule,
+  cloneTileSnapshot,
+  createDefaultStationSchedule,
+  createDefaultCargoStationSchedule,
+  createDefaultSwitchSchedule
+} from './world/types';
+import { TrackTopology } from './world/TrackTopology';
+import { WorldMapSerializer } from './world/WorldMapSerializer';
 
-export type TileType =
-  | 'empty'
-  | 'rail_ground'
-  | 'rail_elevated'
-  | 'rail_curve_ground'
-  | 'rail_curve_elevated'
-  | 'point_switch_ground'
-  | 'point_switch_elevated'
-  | 'scissors_crossing_ground'
-  | 'scissors_crossing_elevated'
-  | 'rail_slope'
-  | 'rail_slope_underground'
-  | 'station_ground'
-  | 'station_elevated'
-  | 'signal_yard'
-  | 'cargo_station_ground'
-  | 'cargo_station_elevated'
-  | 'road'
-  | 'level_crossing'
-  | 'residence'
-  | 'commercial'
-  | 'industrial'
-  | 'nature'
-  | 'farmland'
-  | 'external_connection';
-
-export type CurveDirection = 'N_E' | 'E_S' | 'S_W' | 'W_N';
-export type SwitchState = 'straight' | 'diverge';
-export type CrossingState = 'straight' | 'cross-a' | 'cross-b';
-
-export interface TileData {
-  x: number;
-  z: number;
-  layer?: GridLayer; // 全7階層立体レイヤー (-2..5, デフォルトは地上1F: 1)
-  type: TileType;
-  rotation: number; // Straight/road/station/slope/踏切: 0=NS軸,1=EW軸。分岐器・シーサス: 0-3(北,東,南,西)=通過方向。
-  level: number;
-  mesh?: THREE.Group;
-  stationPassengers: number;
-  landValue: number;
-
-  // Additional Railway Systems
-  curveDir?: CurveDirection;
-  switchState?: SwitchState;
-  slopeReversed?: boolean;
-  elevationOffset?: number; // 標高に応じた高さオフセット (elevation - 1) * 3.0
-
-  // ① 4マス勾配レール: 0(地上側の端)〜3(高架側の端)のパート番号
-  slopePart?: number;
-
-  // ③ シーサスクロッシング(2×2)グループ管理: 4マスすべてが持つ、起点座標への参照・自身の役割・開通状態
-  groupOrigin?: { x: number; z: number };
-  crossingRole?: 0 | 1 | 2 | 3; // 0=A(起点/北西or北東側), 1=B, 2=C, 3=D
-  crossingState?: CrossingState;
-
-  // ⑤ 踏切: 交差する道路の軸（rotationと直交する軸）
-  crossingRoadAxis?: number;
-
-  // ② 分岐器の分岐方向 ('right': 右分岐 / 'left': 左分岐)
-  switchBranchSide?: 'left' | 'right';
-
-  // ① 駅舎ホームの配置方向 ('right': 線路進行右側 / 'left': 線路進行左側)
-  stationPlatformSide?: 'left' | 'right';
-
-  // ⑤ 駅・ホーム参照ポインタ（StationManager を正本とする）
-  stationGroupId?: string; // StationData.id に対応
-  stationPlatformId?: string; // PlatformData.id に対応
-  stationPart?: 'single' | 'start' | 'mid' | 'end'; // 3Dメッシュ形状用
-  stationName?: string; // 看板・UI用キャッシュ名称
-  stationSchedule?: StationSchedule; // ダイヤ設定
-
-  passengerAccumulator?: number;
-
-  // ① 分岐器ダイヤ設定（24時間タイムラインバー方式: 直進、分岐、交互切替）
-  switchSchedule?: SwitchSchedule;
-
-  // ④ 貨物ヤード指定（駅・信号場タイルに付与し、貨物列車の積み降ろし拠点として扱う）
-  isCargoYard?: boolean;
-  // 貨物駅に蓄積されているコンテナ数（工業施設から毎日17:00に追加、列車積載で減少）
-  cargoContainers?: number;
-
-  // ② 隣町外部接続ゲートウェイノード
-  externalCityId?: string;
-  isExternalConnection?: boolean;
-}
-
-export type StationActionMode = 'stop' | 'wait' | 'pass' | 'reverse' | 'hold' | 'pattern';
-
-export interface TimeZoneRule {
-  id: string;
-  startMin: number; // 0-1439 (開始時刻の分)
-  endMin: number;   // 1-1440 (終了時刻の分)
-  mode: 'pass' | 'stop' | 'pattern'; // 通過、〇分停車、またはパターンダイヤ
-  waitMinutes?: number;  // stop時の停車分数
-  patternMinute?: number; // pattern時の基準分 (0-59)
-  patternIntervalMinutes?: number; // pattern時の発車間隔（分単位、例: 15, 20, 30, 60, 120。デフォルト60）
-  isReverse?: boolean;   // この時間帯での発車時に折り返すか
-  isSplit?: boolean;     // この時間帯での到着時に編成を分割するか
-  splitFrontCars?: number; // 分割時の前編成両数（デフォルト2）
-  splitRearCars?: number;  // 分割時の後編成両数（デフォルト2）
-  splitRearReverses?: boolean; // 分割後の後発編成が折り返すか
-}
-
-/** 発車ルール（パターンダイヤ／特定時刻発／即時＝停車時間経過後・分割編成等の互換用） */
-export type DepartureMode = 'timer' | 'pattern' | 'specific';
-
-export interface DepartureRule {
-  mode: DepartureMode;
-  patternMinute?: number; // 'pattern': 基準分（0-59）
-  patternIntervalMinutes?: number; // 'pattern': 発車間隔（分単位。デフォルト60）
-  specificHour?: number;  // 'specific': 指定時刻発の時（0-23）
-  specificMinute?: number; // 'specific': 指定時刻発の分（0-59）
-}
-
-/** 途中駅での分割（切り離し）設定。前○両／後○両に分離し、それぞれ独立した発車ルールを割り当てる */
-export interface SplitConfig {
-  enabled: boolean;
-  frontCars: number; // 前○両（進行方向基準で先頭側）
-  rearCars: number;  // 後○両
-  frontDeparture: DepartureRule;
-  rearDeparture: DepartureRule;
-  rearReverses: boolean; // 後発編成が折り返し（逆方向発車）するか
-}
-
-export function createDefaultSplitConfig(frontCars: number = 2, rearCars: number = 2, rearReverses: boolean = false): SplitConfig {
-  return {
-    enabled: true,
-    frontCars,
-    rearCars,
-    frontDeparture: { mode: 'timer' },
-    rearDeparture: { mode: 'timer' },
-    rearReverses
-  };
-}
-
-export interface StationSchedule {
-  // ① 1分単位の発車時刻ピン（0-1439の配列）
-  departures: number[];
-  // ② 時間帯ゾーン（通過 / 〇分停車 / パターンダイヤ）
-  timeZones: TimeZoneRule[];
-  // ③ 折り返し指定された発車ピン時刻(分)の配列
-  reverseDepartures?: number[];
-  // ④ 分割指定された発車ピン時刻(分)の配列
-  splitDepartures?: number[];
-  // ⑤ 折り返し・分割設定（既存機能の互換維持）
-  reverseDelayMinutes?: number; 
-  splitConfig?: SplitConfig;
-}
-
-/** 路線・系統単位で再利用可能なダイヤ設定テンプレート */
-export interface RouteScheduleTemplate {
-  templateId: string;
-  templateName: string;
-  color: string;
-  schedule: StationSchedule;
-}
-
-/**
- * 運行系統テンプレート用のプリセット識別カラーパレット
- */
-export const ROUTE_COLORS: string[] = [
-  '#38bdf8', // シアン (本線普通)
-  '#f59e0b', // アンバー (快速)
-  '#ef4444', // レッド (特急)
-  '#10b981', // エメラルド (支線・環状線)
-  '#8b5cf6', // パープル (空港アクセス)
-  '#ec4899', // ピンク (観光列車)
-  '#06b6d4', // ターコイズ
-  '#84cc16'  // ライム
-];
-
-/**
- * StationSchedule の完全なディープコピーを生成するヘルパー
- * （配列や子オブジェクトの参照を完全に切り離し、他駅やテンプレートへの予期せぬ変更伝播を防止）
- */
-export function cloneStationSchedule(src: StationSchedule): StationSchedule {
-  return {
-    departures: [...(src.departures || [])],
-    timeZones: (src.timeZones || []).map(tz => ({ ...tz })),
-    reverseDepartures: src.reverseDepartures ? [...src.reverseDepartures] : [],
-    splitDepartures: src.splitDepartures ? [...src.splitDepartures] : [],
-    reverseDelayMinutes: src.reverseDelayMinutes,
-    splitConfig: src.splitConfig
-      ? {
-          enabled: src.splitConfig.enabled,
-          frontCars: src.splitConfig.frontCars,
-          rearCars: src.splitConfig.rearCars,
-          frontDeparture: { ...src.splitConfig.frontDeparture },
-          rearDeparture: { ...src.splitConfig.rearDeparture },
-          rearReverses: src.splitConfig.rearReverses
-        }
-      : undefined
-  };
-}
-
-/**
- * 駅ダイヤに何らかの設定（発車ピン、時間帯ゾーン、折り返し、分割等）が施されているかを判定する
- */
-export function hasStationScheduleContent(src?: StationSchedule | null): boolean {
-  if (!src) return false;
-  if ((src.departures?.length ?? 0) > 0) return true;
-  if ((src.timeZones?.length ?? 0) > 0) return true;
-  if ((src.reverseDepartures?.length ?? 0) > 0) return true;
-  if ((src.splitDepartures?.length ?? 0) > 0) return true;
-  if (src.splitConfig && src.splitConfig.enabled) return true;
-  if (src.reverseDelayMinutes !== undefined && src.reverseDelayMinutes > 0) return true;
-  return false;
-}
-
-/**
- * ダイヤ設定の情報量（充実度）スコアを計算し、複数タイルの中から最も信頼できる設定を選定するために使用
- */
-export function getStationScheduleScore(src?: StationSchedule | null): number {
-  if (!src) return 0;
-  let score = 0;
-  score += (src.departures?.length ?? 0) * 2;
-  score += (src.timeZones?.length ?? 0) * 10;
-  score += (src.reverseDepartures?.length ?? 0) * 2;
-  score += (src.splitDepartures?.length ?? 0) * 2;
-  if (src.splitConfig && src.splitConfig.enabled) score += 5;
-  if (src.reverseDelayMinutes !== undefined && src.reverseDelayMinutes > 0) score += 1;
-  return score;
-}
-
-/**
- * 分単位の時刻が指定の時間帯（日またぎ対応）に含まれるか判定する
- */
-export function isMinuteInZone(currentMin: number, startMin: number, endMin: number): boolean {
-  if (startMin <= endMin) {
-    return currentMin >= startMin && currentMin <= endMin;
-  } else {
-    // 日またぎ（例: 22:00〜06:00 -> 1320〜360分）
-    return currentMin >= startMin || currentMin <= endMin;
-  }
-}
-
-/**
- * 分岐線路・シーサスクロッシングの時間帯開通ルール
- */
-export interface SwitchTimeZoneRule {
-  id: string;
-  type: 'time_range' | 'pattern'; // 'time_range': 時間帯指定, 'pattern': パターン指定
-  startMin: number; // 0-1439 (開始時刻の分)
-  endMin: number;   // 1-1440 (終了時刻の分)
-  // パターン指定時（毎時 startPatternMin 分 〜 endPatternMin 分）
-  startPatternMin?: number; // 0-59
-  endPatternMin?: number;   // 0-59
-  // シーサスクロッシング用渡り線指定（'cross-a' | 'cross-b'）、分岐器用（'diverge'）
-  targetState?: 'diverge' | 'cross-a' | 'cross-b';
-}
-
-export type SwitchScheduleMode = 'manual' | 'timeline' | 'alternate';
-
-export interface SwitchSchedule {
-  mode: SwitchScheduleMode;
-  defaultState?: 'straight'; // デフォルトは直進
-  rules: SwitchTimeZoneRule[]; // 分岐開通ルール配列
-  // レガシー互換用
-  slots?: Array<'straight' | 'diverge'>;
-  hourlyDirections?: Array<'straight' | 'diverge'>;
-}
-
-export function createDefaultDepartureRule(): DepartureRule {
-  return { mode: 'timer', patternMinute: 0, specificHour: 7, specificMinute: 0 };
-}
-
-export function createDefaultStationSchedule(): StationSchedule {
-  return {
-    departures: [],
-    timeZones: [], // 初期状態は空（＝24時間すべて「停車したまま」）
-    reverseDepartures: [],
-    reverseDelayMinutes: 3,
-    splitConfig: undefined
-  };
-}
-
-export function createDefaultCargoStationSchedule(): StationSchedule {
-  return {
-    departures: [],
-    timeZones: [
-      {
-        id: 'cargo_default_stop',
-        startMin: 0,
-        endMin: 1440,
-        mode: 'stop',
-        waitMinutes: 5 // 貨物駅は荷役・入換作業のためデフォルト5分停車
-      }
-    ],
-    reverseDelayMinutes: 5,
-    splitConfig: undefined
-  };
-}
-
-export function createDefaultSwitchSchedule(): SwitchSchedule {
-  return {
-    mode: 'timeline',
-    defaultState: 'straight',
-    rules: [],
-    slots: new Array(144).fill('straight'),
-    hourlyDirections: new Array(24).fill('straight')
-  };
-}
-
-/**
- * SwitchSchedule の完全なディープコピーを生成するヘルパー
- */
-export function cloneSwitchSchedule(src: SwitchSchedule): SwitchSchedule {
-  return {
-    mode: src.mode,
-    defaultState: src.defaultState,
-    rules: (src.rules || []).map(r => ({ ...r })),
-    slots: src.slots ? [...src.slots] : undefined,
-    hourlyDirections: src.hourlyDirections ? [...src.hourlyDirections] : undefined
-  };
-}
-
-/**
- * Undo復元用のタイルスナップショットデータ構造（メッシュ以外の完全なタイル状態）
- */
-export interface TileDataSnapshot {
-  x: number;
-  z: number;
-  layer: GridLayer;
-  type: TileType;
-  rotation: number;
-  level: number;
-  stationPassengers?: number;
-  landValue?: number;
-  curveDir?: CurveDirection;
-  switchState?: SwitchState;
-  slopeReversed?: boolean;
-  slopePart?: number;
-  groupOrigin?: { x: number; z: number };
-  crossingRole?: 0 | 1 | 2 | 3;
-  crossingState?: CrossingState;
-  crossingRoadAxis?: number;
-  switchBranchSide?: 'left' | 'right';
-  stationPlatformSide?: 'left' | 'right';
-  stationGroupId?: string;
-  stationPlatformId?: string;
-  stationPart?: 'single' | 'start' | 'mid' | 'end';
-  stationName?: string;
-  stationSchedule?: StationSchedule;
-  switchSchedule?: SwitchSchedule;
-  isCargoYard?: boolean;
-  cargoContainers?: number;
-  elevationOffset?: number;
-  externalCityId?: string;
-  isExternalConnection?: boolean;
-}
-
-/**
- * TileData のディープコピースナップショットを生成するヘルパー
- */
-export function cloneTileSnapshot(tile: TileData | undefined | null): TileDataSnapshot | null {
-  if (!tile || tile.type === 'empty') return null;
-  return {
-    x: tile.x,
-    z: tile.z,
-    layer: (tile.layer ?? 1) as GridLayer,
-    type: tile.type,
-    rotation: tile.rotation,
-    level: tile.level,
-    stationPassengers: tile.stationPassengers,
-    landValue: tile.landValue,
-    curveDir: tile.curveDir,
-    switchState: tile.switchState,
-    slopeReversed: tile.slopeReversed,
-    slopePart: tile.slopePart,
-    groupOrigin: tile.groupOrigin ? { ...tile.groupOrigin } : undefined,
-    crossingRole: tile.crossingRole,
-    crossingState: tile.crossingState,
-    crossingRoadAxis: tile.crossingRoadAxis,
-    switchBranchSide: tile.switchBranchSide,
-    stationPlatformSide: tile.stationPlatformSide,
-    stationGroupId: tile.stationGroupId,
-    stationPlatformId: tile.stationPlatformId,
-    stationPart: tile.stationPart,
-    stationName: tile.stationName,
-    stationSchedule: tile.stationSchedule ? cloneStationSchedule(tile.stationSchedule) : undefined,
-    switchSchedule: tile.switchSchedule ? cloneSwitchSchedule(tile.switchSchedule) : undefined,
-    isCargoYard: tile.isCargoYard,
-    cargoContainers: tile.cargoContainers,
-    elevationOffset: tile.elevationOffset,
-    externalCityId: tile.externalCityId,
-    isExternalConnection: tile.isExternalConnection
-  };
-}
-
-export function getStationSlotMode(schedule: StationSchedule | undefined, hour: number, minute: number): StationActionMode {
-  if (!schedule) return 'hold';
-  const currentMin = hour * 60 + minute;
-  const activeModes: StationActionMode[] = [];
-  for (const zone of schedule.timeZones || []) {
-    let inRange = false;
-    if (zone.startMin <= zone.endMin) {
-      inRange = currentMin >= zone.startMin && currentMin <= zone.endMin;
-    } else {
-      inRange = currentMin >= zone.startMin || currentMin <= zone.endMin;
-    }
-    if (inRange) {
-      activeModes.push(zone.mode);
-    }
-  }
-  if (activeModes.includes('pass')) return 'pass';
-  if (activeModes.includes('pattern')) return 'pattern';
-  if (activeModes.includes('stop')) return 'stop';
-  return 'hold';
-}
-
-export function getSwitchSlotDirection(schedule: SwitchSchedule | undefined, hour: number, minute: number): 'straight' | 'diverge' {
-  if (!schedule) return 'straight';
-  const slotIdx = ((hour % 24) * 6) + Math.min(5, Math.floor((minute % 60) / 10));
-  if (schedule.slots && schedule.slots[slotIdx]) {
-    return schedule.slots[slotIdx];
-  }
-  if (schedule.hourlyDirections && schedule.hourlyDirections[hour % 24]) {
-    return schedule.hourlyDirections[hour % 24];
-  }
-  return 'straight';
-}
-
-/**
- * 指定時刻における分岐線路／シーサスクロッシングの開通方向を判定する
- * デフォルトは「直進（straight）」。合致する時間帯・パターンルールがあれば分岐方向を返す。
- */
-export function getSwitchDirectionAtTime(
-  schedule: SwitchSchedule | undefined,
-  hour: number,
-  minute: number,
-  isScissors: boolean = false
-): 'straight' | 'diverge' | 'cross-a' | 'cross-b' {
-  if (!schedule) return 'straight';
-  if (schedule.mode === 'manual') return 'straight';
-  if (schedule.mode === 'alternate') return 'straight';
-
-  const currentMin = hour * 60 + minute;
-  const currentMinute = minute;
-
-  // 新方式: rules 配列を評価
-  if (schedule.rules && schedule.rules.length > 0) {
-    for (const rule of schedule.rules) {
-      if (!isMinuteInZone(currentMin, rule.startMin, rule.endMin)) {
-        continue;
-      }
-
-      if (rule.type === 'time_range') {
-        // 時間帯指定で分岐
-        return rule.targetState || (isScissors ? 'cross-a' : 'diverge');
-      } else if (rule.type === 'pattern') {
-        // パターンで分岐（毎時 startPatternMin 〜 endPatternMin）
-        const sPat = rule.startPatternMin ?? 0;
-        const ePat = rule.endPatternMin ?? 0;
-        let inPattern = false;
-        if (sPat <= ePat) {
-          inPattern = currentMinute >= sPat && currentMinute <= ePat;
-        } else {
-          // 毎時分またぎ（例: 55分〜05分）
-          inPattern = currentMinute >= sPat || currentMinute <= ePat;
-        }
-        if (inPattern) {
-          return rule.targetState || (isScissors ? 'cross-a' : 'diverge');
-        }
-      }
-    }
-    return 'straight';
-  }
-
-  // レガシー互換用フォールバック
-  return getSwitchSlotDirection(schedule, hour, minute);
-}
-
-// ---------------------------------------------------------------------------
-// ① ⑦ ⑧ 線路接続モデル（方向インデックス: 0=北, 1=東, 2=南, 3=西）
-// レベルは 0(地上)〜4(高架) の5段階。4マス勾配レールは1マスごとに1段ずつ高さが変わるため、
-// 「高い側と低い側」がそのまま隣接しても、レベルが完全一致しない限り接続とは判定されない。
-// ---------------------------------------------------------------------------
-export interface DirVec { x: number; z: number; }
-export interface TileExit {
-  idx: number;
-  level: number;
-  worldHeight?: number; // 線路端点の実際のワールド高さ（標高オフセット込み）
-  targetOffset?: { dx: number; dz: number }; // ② シーサスクロッシング等の対角線移動用オフセット
-}
-export const LEVEL_GROUND = 0;
-export const LEVEL_ELEVATED = 4;
-export const SLOPE_PARTS = 4;
+export * from './world/types';
+export { TrackTopology } from './world/TrackTopology';
+export { WorldMapSerializer } from './world/WorldMapSerializer';
 
 export class WorldMap {
   public static GRID_SIZE = 64;
   public static readonly TILE_SIZE = 2.0;
 
-  public static readonly DIRS: DirVec[] = [
-    { x: 0, z: -1 }, // 0: North
-    { x: 1, z: 0 },  // 1: East
-    { x: 0, z: 1 },  // 2: South
-    { x: -1, z: 0 }  // 3: West
-  ];
+  public static readonly DIRS: DirVec[] = TrackTopology.DIRS;
 
   public static opposite(idx: number): number {
-    return (idx + 2) % 4;
+    return TrackTopology.opposite(idx);
   }
 
   public static rotateCW(idx: number): number {
-    return (idx + 1) % 4;
+    return TrackTopology.rotateCW(idx);
   }
 
   public static rotateCCW(idx: number): number {
-    return (idx + 3) % 4;
+    return TrackTopology.rotateCCW(idx);
   }
 
   public static curveDirToIndices(cd: CurveDirection): [number, number] {
-    switch (cd) {
-      case 'N_E': return [0, 1];
-      case 'E_S': return [1, 2];
-      case 'S_W': return [2, 3];
-      case 'W_N': return [3, 0];
-    }
+    return TrackTopology.curveDirToIndices(cd);
   }
 
   public static indicesToCurveDir(a: number, b: number): CurveDirection {
-    const key = [a, b].sort((x, y) => x - y).join(',');
-    if (key === '0,1') return 'N_E';
-    if (key === '1,2') return 'E_S';
-    if (key === '2,3') return 'S_W';
-    if (key === '0,3') return 'W_N';
-    throw new Error(`Invalid curve direction pair: ${a},${b}`);
+    return TrackTopology.indicesToCurveDir(a, b);
   }
 
-  /**
-   * ② 高架の橋脚は連続4マスごとに1本だけ設置する（間のマスは橋脚なしでデッキのみ）。
-   * 線路の軸方向に沿った絶対座標が4の倍数のマスにのみ橋脚を表示する。
-   */
   public static shouldShowPier(x: number, z: number, rotation: number): boolean {
-    const coord = rotation === 1 ? x : z;
-    return (((coord % 4) + 4) % 4) === 0;
+    return TrackTopology.shouldShowPier(x, z, rotation);
   }
 
   /**
@@ -595,182 +112,12 @@ export class WorldMap {
     }
   }
 
-  /**
-   * 道路ネットワーク接続判定用: 道路および踏切（crossingRoadAxis）の接続方向・高さを返す
-   */
   public static getRoadExits(tile: TileData): TileExit[] {
-    const isElevated = tile.type.includes('elevated');
-    const level: number = isElevated ? LEVEL_ELEVATED : LEVEL_GROUND;
-    const elevOffset = tile.elevationOffset ?? 0;
-    const tileLayer: GridLayer = tile.layer ?? (isElevated ? 2 : 1);
-    const defaultWorldHeight = layerToHeight(tileLayer, elevOffset);
-
-    if (tile.type === 'road') {
-      return tile.rotation === 1
-        ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
-        : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
-    }
-
-    if (tile.type === 'level_crossing') {
-      const roadAxis = tile.crossingRoadAxis ?? (1 - (((tile.rotation ?? 0) % 2 + 2) % 2));
-      return roadAxis === 1
-        ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
-        : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
-    }
-
-    return [];
+    return TrackTopology.getRoadExits(tile);
   }
 
-  /**
-   * ① ⑦ ⑧ タイルが実際に接続している方向・高さレベルの一覧を返す。
-   * 曲線・勾配・分岐器（開通方向）を考慮し、これを基準に列車の経路探索・接続判定を行う。
-   */
   public static getTileExits(tile: TileData): TileExit[] {
-    const isElevated = tile.type.includes('elevated');
-    const level: number = isElevated ? LEVEL_ELEVATED : LEVEL_GROUND;
-    const elevOffset = tile.elevationOffset ?? 0;
-    const tileLayer: GridLayer = tile.layer ?? (isElevated ? 2 : 1);
-    const defaultWorldHeight = layerToHeight(tileLayer, elevOffset);
-
-    switch (tile.type) {
-      case 'rail_ground':
-      case 'rail_elevated':
-      case 'station_ground':
-      case 'station_elevated':
-      case 'signal_yard':
-      case 'cargo_station_ground':
-      case 'cargo_station_elevated':
-      case 'level_crossing':
-        return tile.rotation === 1
-          ? [{ idx: 1, level, worldHeight: defaultWorldHeight }, { idx: 3, level, worldHeight: defaultWorldHeight }]
-          : [{ idx: 0, level, worldHeight: defaultWorldHeight }, { idx: 2, level, worldHeight: defaultWorldHeight }];
-
-      case 'external_connection': {
-        // 自都市中心方向への片側接続終端ポート
-        const connectDir = ((tile.rotation % 4) + 4) % 4;
-        return [{ idx: connectDir, level, worldHeight: defaultWorldHeight }];
-      }
-
-      case 'rail_curve_ground':
-      case 'rail_curve_elevated': {
-        if (!tile.curveDir) return [];
-        const [i1, i2] = WorldMap.curveDirToIndices(tile.curveDir);
-        return [
-          { idx: i1, level, worldHeight: defaultWorldHeight },
-          { idx: i2, level, worldHeight: defaultWorldHeight }
-        ];
-      }
-
-      case 'rail_slope': {
-        // ① ③ 4マス勾配（地上⇔高架）: パート番号(0-3)ごとに地上(0)〜高架(4)のうち1段分だけ高さが変わる。
-        const part = tile.slopePart ?? 0;
-        const lowLevel = part;
-        const highLevel = part + 1;
-        // ★修正: 設置階層(tileLayer)の基準高さを加算し、2F→3F等の高架間スロープでも高さを一致させる
-        const baseLayerH = layerToHeight(tileLayer, elevOffset);
-        const lowWorldHeight = baseLayerH + part * 0.75;
-        const highWorldHeight = baseLayerH + (part + 1) * 0.75;
-
-        const axis: [number, number] = tile.rotation === 1 ? [1, 3] : [0, 2];
-        const [lowIdx, highIdx] = tile.slopeReversed ? [axis[1], axis[0]] : [axis[0], axis[1]];
-        return [
-          { idx: lowIdx, level: lowLevel, worldHeight: lowWorldHeight },
-          { idx: highIdx, level: highLevel, worldHeight: highWorldHeight }
-        ];
-      }
-
-      case 'rail_slope_underground': {
-        // ② 4マス地下勾配（地上⇔地下）: 地上(0m)から地下(-3.0m)へ4マスで潜る
-        const part = tile.slopePart ?? 0;
-        const highWorldHeight = elevOffset - part * 0.75;
-        const lowWorldHeight = elevOffset - (part + 1) * 0.75;
-
-        const axis: [number, number] = tile.rotation === 1 ? [1, 3] : [0, 2];
-        const [highIdx, lowIdx] = tile.slopeReversed ? [axis[1], axis[0]] : [axis[0], axis[1]];
-        return [
-          { idx: highIdx, level: -part, worldHeight: highWorldHeight },
-          { idx: lowIdx, level: -(part + 1), worldHeight: lowWorldHeight }
-        ];
-      }
-
-      case 'point_switch_ground':
-      case 'point_switch_elevated': {
-        // ③ 分岐器は1マスに根元(back)、直進(forward)、分岐(branchDir)の3方向のポートを持つ。
-        const forward = ((tile.rotation % 4) + 4) % 4;
-        const back = WorldMap.opposite(forward);
-        const branchDir = tile.switchBranchSide === 'left' ? WorldMap.rotateCCW(forward) : WorldMap.rotateCW(forward);
-        return [
-          { idx: back, level, worldHeight: defaultWorldHeight },
-          { idx: forward, level, worldHeight: defaultWorldHeight },
-          { idx: branchDir, level, worldHeight: defaultWorldHeight }
-        ];
-      }
-
-      case 'scissors_crossing_ground':
-      case 'scissors_crossing_elevated':
-        return WorldMap.getScissorsExits(tile, level, defaultWorldHeight);
-
-      default:
-        return [];
-    }
-  }
-
-  /**
-   * ② シーサスクロッシング(2×2)の接続方向・対角移動オフセットを役割(A/B/C/D)と開通状態から計算する。
-   * along = 通過方向の軸、across = 2本の並行線路を隔てる方向。
-   * 'straight': 4マスとも通常の複線としてそれぞれ独立に直進。
-   * 'cross-a' : A ⇄ D の対角渡り線が開通（中央のダイヤモンド交差を通って対向線路へ直進移動）。B, Cは直進。
-   * 'cross-b' : C ⇄ B の対角渡り線が開通（中央のダイヤモンド交差を通って対向線路へ直進移動）。A, Dは直進。
-   */
-  private static getScissorsExits(tile: TileData, level: number, worldHeight: number): TileExit[] {
-    const along = tile.rotation === 1 ? 1 : 2;
-    const backAlong = WorldMap.opposite(along);
-    const across = WorldMap.rotateCW(along);
-    const alongVec = WorldMap.DIRS[along];
-    const acrossVec = WorldMap.DIRS[across];
-    const role = tile.crossingRole ?? 0;
-    const state = tile.crossingState ?? 'straight';
-
-    if (state === 'straight') {
-      return [{ idx: along, level, worldHeight }, { idx: backAlong, level, worldHeight }];
-    }
-
-    if (state === 'cross-a') {
-      if (role === 0) {
-        // A: 手前から対角のDへ移動（渡り線）
-        return [
-          { idx: backAlong, level, worldHeight },
-          { idx: along, level, worldHeight, targetOffset: { dx: alongVec.x + acrossVec.x, dz: alongVec.z + acrossVec.z } }
-        ];
-      }
-      if (role === 3) {
-        // D: 奥から対角のAへ戻る、またはAから進入してきた列車がDの先の主線(along)へ進出
-        return [
-          { idx: along, level, worldHeight },
-          { idx: backAlong, level, worldHeight, targetOffset: { dx: -alongVec.x - acrossVec.x, dz: -alongVec.z - acrossVec.z } }
-        ];
-      }
-      // B, C は主線直進可能
-      return [{ idx: along, level, worldHeight }, { idx: backAlong, level, worldHeight }];
-    }
-
-    // cross-b
-    if (role === 2) {
-      // C: 手前から対角のBへ移動（渡り線）
-      return [
-        { idx: backAlong, level, worldHeight },
-        { idx: along, level, worldHeight, targetOffset: { dx: alongVec.x - acrossVec.x, dz: alongVec.z - acrossVec.z } }
-      ];
-    }
-    if (role === 1) {
-      // B: 奥から対角のCへ戻る、またはCから進入してきた列車がBの先の主線(along)へ進出
-      return [
-        { idx: along, level, worldHeight },
-        { idx: backAlong, level, worldHeight, targetOffset: { dx: -alongVec.x + acrossVec.x, dz: -alongVec.z + acrossVec.z } }
-      ];
-    }
-    // A, D は主線直進可能
-    return [{ idx: along, level, worldHeight }, { idx: backAlong, level, worldHeight }];
+    return TrackTopology.getTileExits(tile);
   }
 
   public gridSize: number = 64;
@@ -788,11 +135,19 @@ export class WorldMap {
   public isDirty: boolean = true;
   public structureVersion: number = 0;
   private cachedSerializedData: string | null = null;
+  private cachedAllTiles: TileData[] | null = null;
+  private cachedLayerTiles: Map<GridLayer, TileData[]> = new Map();
+  private cachedBuildingTiles: TileData[] | null = null;
+  private cachedCargoTiles: TileData[] | null = null;
 
   public markDirty(): void {
     this.isDirty = true;
     this.structureVersion++;
     this.cachedSerializedData = null;
+    this.cachedAllTiles = null;
+    this.cachedLayerTiles.clear();
+    this.cachedBuildingTiles = null;
+    this.cachedCargoTiles = null;
   }
   public groundHoleHandler: {
     add: (x: number, z: number, rotation: number) => void;
@@ -932,33 +287,68 @@ export class WorldMap {
   }
 
   /**
-   * 全階層の有効なタイルを取得する
+   * 全階層の有効なタイルを取得する（構造変更時までキャッシュ）
    */
   public getAllTiles(filterLayer?: GridLayer): TileData[] {
-    const result: TileData[] = [];
-    const seenTiles = new Set<TileData>(); // ★追加: スロープ跨がり登録による同一インスタンス重複を防止
-    const seenGroundKeys = new Set<string>();
-    for (const tile of this.grid3D.values()) {
-      if (tile.type !== 'empty' && !seenTiles.has(tile)) {
-        if (filterLayer === undefined || tile.layer === filterLayer) {
+    if (this.cachedAllTiles === null) {
+      const all: TileData[] = [];
+      const seenTiles = new Set<TileData>(); // スロープ跨がり登録による同一インスタンス重複を防止
+      const seenGroundKeys = new Set<string>();
+      for (const tile of this.grid3D.values()) {
+        if (tile.type !== 'empty' && !seenTiles.has(tile)) {
           seenTiles.add(tile);
-          result.push(tile);
+          all.push(tile);
           if ((tile.layer ?? 1) === 1) {
             seenGroundKeys.add(this.getKey(tile.x, tile.z));
           }
         }
       }
-    }
-    // 互換性のため地上1Fのタイルもマージ（旧実装の result.some() による O(N^2) 走査を廃止）
-    if (filterLayer === undefined || filterLayer === 1) {
+      // 互換性のため地上1Fのタイルもマージ
       for (const tile of this.tiles.values()) {
         if (tile.type !== 'empty' && !seenTiles.has(tile) && !seenGroundKeys.has(this.getKey(tile.x, tile.z))) {
           seenTiles.add(tile);
-          result.push(tile);
+          all.push(tile);
         }
       }
+      this.cachedAllTiles = all;
     }
-    return result;
+
+    if (filterLayer === undefined) {
+      return this.cachedAllTiles;
+    }
+
+    let layerList = this.cachedLayerTiles.get(filterLayer);
+    if (!layerList) {
+      layerList = this.cachedAllTiles.filter(
+        tile => tile.layer === filterLayer || (filterLayer === 1 && tile.layer === undefined)
+      );
+      this.cachedLayerTiles.set(filterLayer, layerList);
+    }
+    return layerList;
+  }
+
+  /**
+   * LOD対象となる建物タイル一覧を取得（キャッシュ付き）
+   */
+  public getBuildingTiles(): TileData[] {
+    if (this.cachedBuildingTiles === null) {
+      this.cachedBuildingTiles = this.getAllTiles().filter(
+        t => t.type === 'residence' || t.type === 'commercial' || t.type === 'industrial' || !!t.mesh?.userData?.buildingLod
+      );
+    }
+    return this.cachedBuildingTiles;
+  }
+
+  /**
+   * 貨物ヤード・貨物駅タイル一覧を取得（キャッシュ付き）
+   */
+  public getCargoTiles(): TileData[] {
+    if (this.cachedCargoTiles === null) {
+      this.cachedCargoTiles = this.getAllTiles().filter(
+        t => t.isCargoYard || t.type === 'cargo_station_ground' || t.type === 'cargo_station_elevated'
+      );
+    }
+    return this.cachedCargoTiles;
   }
 
   /**
@@ -2583,6 +1973,8 @@ export class WorldMap {
 
   private resetTileData(tile: TileData) {
     this.removeTileMesh(tile);
+    const wasRailGround = tile.type === 'rail_ground';
+    const prevRotation = tile.rotation;
     // スロープの跨がり登録（高架・地下）を解除
     if (tile.type === 'rail_slope') {
       const baseLayer = (tile.layer ?? 1) as GridLayer;
@@ -2598,18 +1990,7 @@ export class WorldMap {
       }
       this.groundHoleHandler?.remove(tile.x, tile.z);
     }
-    if (tile.type === 'rail_ground') {
-      const isEW = (tile.rotation === 1);
-      const dirA = isEW ? { x: -1, z: 0 } : { x: 0, z: -1 };
-      const dirB = isEW ? { x: 1, z: 0 } : { x: 0, z: 1 };
-      const lyr = tile.layer ?? 1;
-      const tx = tile.x;
-      const tz = tile.z;
-      setTimeout(() => {
-        this.updateTunnelTilePortal(tx + dirA.x, tz + dirA.z, lyr);
-        this.updateTunnelTilePortal(tx + dirB.x, tz + dirB.z, lyr);
-      }, 0);
-    }
+
     tile.type = 'empty';
     tile.rotation = 0;
     tile.level = 1;
@@ -2641,6 +2022,15 @@ export class WorldMap {
       this.tiles.delete(this.getKey(tx, tz));
     }
 
+    // マップから削除された直後に同期的に隣接トンネルタイルの坑口ポータルを更新（非同期 setTimeout による競合を排除）
+    if (wasRailGround) {
+      const isEW = (prevRotation === 1);
+      const dirA = isEW ? { x: -1, z: 0 } : { x: 0, z: -1 };
+      const dirB = isEW ? { x: 1, z: 0 } : { x: 0, z: 1 };
+      this.updateTunnelTilePortal(tx + dirA.x, tz + dirA.z, layer);
+      this.updateTunnelTilePortal(tx + dirB.x, tz + dirB.z, layer);
+    }
+
     // 直上階層の高架線路の橋脚を再計算（下層が撤去されたため地上まで延長）
     this.updateUpperElevatedPiers(tx, tz, layer);
     this.markDirty();
@@ -2670,42 +2060,9 @@ export class WorldMap {
       }
     }
 
-    // ⑤ 駅・信号場タイルの場合: 同一グループ全体を一括撤去する
-    // 【データ腐敗バグ解消】signal_yard / cargo_station も一括撤去の対象とし、全階層からグループタイルを収集
+    // ⑤ 駅・信号場タイルの場合: 同一番線グループ全体を一括撤去する
     if (tile.type.includes('station') || tile.type === 'signal_yard') {
-      const tilesToDemolish: TileData[] = [];
-      if (tile.stationPlatformId) {
-        // ★修正: 駅全体(stationGroupId)ではなく、クリックした番線(stationPlatformId)のみを撤去対象にする
-        const targetPlatId = tile.stationPlatformId;
-        this.getAllTiles().forEach(t => {
-          if (t.stationPlatformId === targetPlatId) {
-            tilesToDemolish.push(t);
-          }
-        });
-      } else if (tile.stationGroupId) {
-        // stationPlatformId が未設定の場合でも、同一線路上の連続タイルのみを取得
-        tilesToDemolish.push(...this.getStationTiles(x, z, layer));
-      } else {
-        // レガシー駅・信号場の場合: 連続するマスを収集
-        const startTile = this.getStationStartTile(x, z, layer);
-        if (startTile) {
-          const rot = startTile.rotation;
-          const stType = startTile.type;
-          const stepX = (rot % 2 === 1) ? 1 : 0;
-          const stepZ = (rot % 2 === 1) ? 0 : 1;
-          let curX = startTile.x, curZ = startTile.z;
-          while (true) {
-            const t = this.getTile(curX, curZ, layer);
-            if (t && t.type === stType && (t.rotation % 2 === rot % 2)) {
-              tilesToDemolish.push(t);
-              curX += stepX;
-              curZ += stepZ;
-            } else break;
-          }
-        } else {
-          tilesToDemolish.push(tile);
-        }
-      }
+      const tilesToDemolish = this.getDemolitionAffectedTiles(x, z, layer);
 
       for (const st of tilesToDemolish) {
         const prevType = st.type;
@@ -2744,26 +2101,16 @@ export class WorldMap {
     if (tile.groupOrigin) {
       const origin = this.getTile(tile.groupOrigin.x, tile.groupOrigin.z, layer);
       if (origin && origin.crossingRole === 0) {
-        const along = origin.rotation === 1 ? 1 : 2;
-        const across = WorldMap.rotateCW(along);
-        const alongVec = WorldMap.DIRS[along];
-        const acrossVec = WorldMap.DIRS[across];
         const isElevated = origin.type.includes('elevated');
         const normalRailType: TileType = isElevated ? 'rail_elevated' : 'rail_ground';
         const mainAxisRot = origin.rotation === 1 ? 1 : 0;
+        const groupTiles = this.getDemolitionAffectedTiles(x, z, layer);
 
-        const group = [
-          { x: origin.x, z: origin.z },
-          { x: origin.x + alongVec.x, z: origin.z + alongVec.z },
-          { x: origin.x + acrossVec.x, z: origin.z + acrossVec.z },
-          { x: origin.x + alongVec.x + acrossVec.x, z: origin.z + alongVec.z + acrossVec.z }
-        ];
-        for (const p of group) {
-          if (p.x === x && p.z === z) continue;
-          const t = this.getTile(p.x, p.z, layer);
-          if (t && t.type.startsWith('scissors_crossing')) {
+        for (const t of groupTiles) {
+          if (t.x === x && t.z === z) continue;
+          if (t.type.startsWith('scissors_crossing')) {
             // 残ったマスを主線の向きに沿った通常の直線レールに安全に退行させる
-            this.setTile(p.x, p.z, normalRailType, mainAxisRot, 1, 'right', layer);
+            this.setTile(t.x, t.z, normalRailType, mainAxisRot, 1, 'right', layer);
           }
         }
       }
@@ -2771,24 +2118,9 @@ export class WorldMap {
 
     // 勾配線路（地上・地下ともに4マス構成）の一括撤去
     if (tile.type === 'rail_slope' || tile.type === 'rail_slope_underground') {
-      const rot = tile.rotation;
-      const rev = !!tile.slopeReversed;
-      const part = tile.slopePart ?? 0;
-      const axis: [number, number] = rot === 1 ? [1, 3] : [0, 2];
-      const [, stepIdx] = rev ? [axis[1], axis[0]] : [axis[0], axis[1]];
-      const stepDir = WorldMap.DIRS[stepIdx];
-      // part 0 の起点マス座標を算出
-      const originX = tile.x - stepDir.x * part;
-      const originZ = tile.z - stepDir.z * part;
-      const baseLayer = (tile.layer ?? 1) as GridLayer;
-
-      for (let i = 0; i < SLOPE_PARTS; i++) {
-        const sx = originX + stepDir.x * i;
-        const sz = originZ + stepDir.z * i;
-        const st = this.getTile(sx, sz, baseLayer);
-        if (st && st.type === tile.type) {
-          this.resetTileData(st);
-        }
+      const slopeTiles = this.getDemolitionAffectedTiles(x, z, layer);
+      for (const st of slopeTiles) {
+        this.resetTileData(st);
       }
       return true;
     }
@@ -3003,6 +2335,7 @@ export class WorldMap {
     this.tiles.clear();
     this.grid3D.clear();
     this.initializeGrid();
+    this.markDirty();
   }
 
   public dispose() {
@@ -3022,42 +2355,7 @@ export class WorldMap {
       return this.cachedSerializedData;
     }
 
-    const nonEmpties: any[] = [];
-    const allTiles = this.getAllTiles();
-    allTiles.forEach(t => {
-      // ③ シーサスクロッシングの非起点マス(B/C/D)は起点(A)から復元可能なため保存対象から除外
-      if (t.groupOrigin && t.crossingRole !== 0) return;
-      if (t.type !== 'empty') {
-        nonEmpties.push({
-          x: t.x,
-          z: t.z,
-          layer: t.layer ?? 1,
-          type: t.type,
-          rot: t.rotation,
-          lvl: t.level,
-          curveDir: t.curveDir,
-          sw: t.switchState,
-          branchSide: t.switchBranchSide,
-          slopeRev: t.slopeReversed,
-          slopePart: t.slopePart,
-          crossState: t.crossingState,
-          roadAxis: t.crossingRoadAxis,
-          cargoYard: t.isCargoYard,
-          cargoContainers: t.cargoContainers,
-          stationName: t.stationName,
-          stationGroupId: t.stationGroupId,
-          stationPlatformId: t.stationPlatformId,
-          stationPart: t.stationPart,
-          stationPlatformSide: t.stationPlatformSide,
-          stationSchedule: t.stationSchedule,
-          switchSchedule: t.switchSchedule,
-          externalCityId: t.externalCityId,
-          isExternalConnection: t.isExternalConnection,
-          stationPassengers: t.stationPassengers,
-          elevationOffset: t.elevationOffset
-        });
-      }
-    });
+    const nonEmpties = WorldMapSerializer.extractSavedTileRecords(this.getAllTiles());
 
     // 【駅の記憶喪失解消】v2 フォーマット: タイル一覧に加えて stationManager の全状態をシリアライズ
     const serialized = JSON.stringify({
@@ -3073,27 +2371,9 @@ export class WorldMap {
 
   public deserialize(jsonOrData: string | { tiles: any[]; stations?: any } | any[]) {
     try {
-      let data: any[];
-      let stationData: StationSaveData | null = null;
-
-      if (typeof jsonOrData === 'string') {
-        const parsed = JSON.parse(jsonOrData);
-        if (Array.isArray(parsed)) {
-          data = parsed;
-        } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tiles)) {
-          data = parsed.tiles;
-          stationData = parsed.stations ?? null;
-        } else {
-          return;
-        }
-      } else if (Array.isArray(jsonOrData)) {
-        data = jsonOrData;
-      } else if (jsonOrData && typeof jsonOrData === 'object' && Array.isArray(jsonOrData.tiles)) {
-        data = jsonOrData.tiles;
-        stationData = jsonOrData.stations ?? null;
-      } else {
-        return;
-      }
+      const parsed = WorldMapSerializer.parseSavePayload(jsonOrData);
+      if (!parsed) return;
+      const { data, stationData } = parsed;
 
       this.clearAll();
 
@@ -3254,6 +2534,7 @@ export class WorldMap {
           }
         }
       }
+      this.markDirty();
     } catch (e) {
       console.error('Failed to load save data', e);
     }

@@ -171,11 +171,11 @@ export class GameApp {
       economy: this.economy, audioManager: this.audioManager, uiManager: this.uiManager, inputController: this.inputController,
       getFleetController: () => this.fleetController,
       undoManager: this.undoManager,
-      onPlacementExecuted: () => {
-        this.applyLayerSlicing(this.currentDisplayLayer);
+      onPlacementExecuted: (affectedPositions) => {
+        this.applyLayerSlicingForTiles(affectedPositions, this.currentDisplayLayer);
         this.miniMap.requestStaticUpdate();
         this.demandEngine.clearCache();
-        this.terrainRenderer.rebuildAll(this.gridManager, this.renderer.scene);
+        this.terrainRenderer.rebuildChunksAtPositions(affectedPositions, this.gridManager, this.renderer.scene);
         this.externalConnectionManager.checkConnections(this.worldMap, (city) => {
           this.uiManager.showToast('祝・幹線開通！', `${city.name}との直通線路が開通しました！広域輸送が開始されます。`, 'info');
         });
@@ -610,6 +610,72 @@ export class GameApp {
     });
   }
 
+  private applyLayerSlicingToTile(tile: TileData, displayLayer: GridLayer | 'all', activeTool: string): void {
+    if (!tile.mesh) return;
+    const l = tile.layer ?? 1;
+    const isAll = displayLayer === 'all';
+    const isUnderground = displayLayer !== 'all' && displayLayer < 0;
+
+    if (isAll) {
+      // All 表示: 地上階層（1F以上）をすべて通常表示
+      const isVisible = l >= 1;
+      tile.mesh.visible = isVisible;
+      if (isVisible) {
+        this.applyMeshGhost(tile.mesh, false);
+      }
+    } else {
+      const isSurfaceTile =
+        tile.type === 'road' ||
+        tile.type === 'residence' ||
+        tile.type === 'commercial' ||
+        tile.type === 'industrial' ||
+        tile.type === 'nature' ||
+        tile.type === 'farmland' ||
+        tile.type === 'level_crossing';
+      const cell = this.gridManager.getCell(tile.x, 1, tile.z);
+      const surfaceElev = cell ? Math.max(1, cell.elevation) : 1;
+
+      const isTarget = (l === displayLayer) ||
+        (displayLayer === 1 && isSurfaceTile && l === surfaceElev) ||
+        (tile.type === 'rail_slope' && (l === displayLayer || l + 1 === displayLayer)) ||
+        (tile.type === 'rail_slope_underground' && (l === displayLayer || displayLayer === -1)) ||
+        (activeTool === 'rail-slope' && typeof displayLayer === 'number' && l === displayLayer + 1);
+
+      const isVisible = isUnderground ? true : l >= 1;
+      tile.mesh.visible = isVisible;
+
+      if (isVisible) {
+        this.applyMeshGhost(tile.mesh, !isTarget);
+      }
+    }
+  }
+
+  private applyLayerSlicingForTiles(
+    positions: Iterable<{ x: number; z: number; layer: GridLayer }>,
+    displayLayer: GridLayer | 'all'
+  ): void {
+    const activeTool = this.uiManager.getActiveTool();
+    const processed = new Set<TileData>();
+    for (const pos of positions) {
+      const coords = [
+        { x: pos.x, z: pos.z },
+        { x: pos.x - 1, z: pos.z },
+        { x: pos.x + 1, z: pos.z },
+        { x: pos.x, z: pos.z - 1 },
+        { x: pos.x, z: pos.z + 1 }
+      ];
+      for (const c of coords) {
+        const tile = this.worldMap.getTile(c.x, c.z, pos.layer);
+        if (tile && !processed.has(tile)) {
+          processed.add(tile);
+          this.applyLayerSlicingToTile(tile, displayLayer, activeTool);
+        }
+      }
+    }
+    this.visualEffectManager.applyLayerVisibility(displayLayer);
+    this.applyCullingLayerFilters(displayLayer);
+  }
+
   private applyLayerSlicing(displayLayer: GridLayer | 'all'): void {
     const isUnderground = displayLayer !== 'all' && displayLayer < 0;
     const isAll = displayLayer === 'all';
@@ -624,41 +690,7 @@ export class GameApp {
 
     const activeTool = this.uiManager.getActiveTool();
     for (const tile of this.worldMap.getAllTiles()) {
-      if (!tile.mesh) continue;
-      const l = tile.layer ?? 1;
-
-      if (isAll) {
-        // All 表示: 地上階層（1F以上）をすべて通常表示
-        const isVisible = l >= 1;
-        tile.mesh.visible = isVisible;
-        if (isVisible) {
-          this.applyMeshGhost(tile.mesh, false);
-        }
-      } else {
-        const isSurfaceTile =
-          tile.type === 'road' ||
-          tile.type === 'residence' ||
-          tile.type === 'commercial' ||
-          tile.type === 'industrial' ||
-          tile.type === 'nature' ||
-          tile.type === 'farmland' ||
-          tile.type === 'level_crossing';
-        const cell = this.gridManager.getCell(tile.x, 1, tile.z);
-        const surfaceElev = cell ? Math.max(1, cell.elevation) : 1;
-
-        const isTarget = (l === displayLayer) ||
-          (displayLayer === 1 && isSurfaceTile && l === surfaceElev) ||
-          (tile.type === 'rail_slope' && (l === displayLayer || l + 1 === displayLayer)) ||
-          (tile.type === 'rail_slope_underground' && (l === displayLayer || displayLayer === -1)) ||
-          (activeTool === 'rail-slope' && typeof displayLayer === 'number' && l === displayLayer + 1);
-
-        const isVisible = isUnderground ? true : l >= 1;
-        tile.mesh.visible = isVisible;
-
-        if (isVisible) {
-          this.applyMeshGhost(tile.mesh, !isTarget);
-        }
-      }
+      this.applyLayerSlicingToTile(tile, displayLayer, activeTool);
     }
     this.visualEffectManager.applyLayerVisibility(displayLayer);
     this.applyCullingLayerFilters(displayLayer);
@@ -673,7 +705,7 @@ export class GameApp {
     if (this.cameraManager.viewMode === 'cab_view' || this.cameraManager.viewMode === 'chase_view') {
       const camPos = this.cameraManager.perspectiveCamera.position;
       const DETAIL_RADIUS_SQ = 45 * 45;
-      for (const t of this.worldMap.getAllTiles()) {
+      for (const t of this.worldMap.getBuildingTiles()) {
         if (!t.mesh?.userData?.buildingLod) continue;
         const dSq = (t.x * WorldMap.TILE_SIZE - camPos.x) ** 2 + (t.z * WorldMap.TILE_SIZE - camPos.z) ** 2;
         BuildingBakery.applyTier(t.mesh, dSq < DETAIL_RADIUS_SQ ? 'detail' : 'simple');
@@ -682,7 +714,7 @@ export class GameApp {
     }
     const current = BuildingBakery.getTier(), tiles = this.cameraManager.getShortSideTiles();
     let next = (current === 'detail' && tiles > GameApp.LOD_SIMPLE_TILES) ? 'simple' : (current === 'simple' && tiles < GameApp.LOD_DETAIL_TILES) ? 'detail' : current;
-    if (BuildingBakery.setTier(next)) for (const t of this.worldMap.getAllTiles()) if (t.mesh) BuildingBakery.applyTier(t.mesh, next);
+    if (BuildingBakery.setTier(next)) for (const t of this.worldMap.getBuildingTiles()) if (t.mesh) BuildingBakery.applyTier(t.mesh, next);
   }
 
   private toggleInfiniteFunds(): void {

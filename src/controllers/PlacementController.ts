@@ -115,7 +115,7 @@ export interface PlacementControllerDependencies {
   uiManager: UIManager;
   inputController: InputController;
   getFleetController?: () => FleetController | null;
-  onPlacementExecuted?: () => void;
+  onPlacementExecuted?: (affectedPositions: Array<{ x: number; z: number; layer: GridLayer }>) => void;
   onCargoYardVisualUpdate?: (x: number, z: number, layer: GridLayer) => void;
   undoManager?: UndoManager;
 }
@@ -133,7 +133,7 @@ export class PlacementController {
   private uiManager: UIManager;
   private inputController: InputController;
   private getFleetController?: () => FleetController | null;
-  private onPlacementExecuted?: () => void;
+  private onPlacementExecuted?: (affectedPositions: Array<{ x: number; z: number; layer: GridLayer }>) => void;
   private onCargoYardVisualUpdate?: (x: number, z: number, layer: GridLayer) => void;
   private undoManager?: UndoManager;
 
@@ -1497,8 +1497,14 @@ export class PlacementController {
    * PendingItem が影響を及ぼす全タイル座標を算出する（シーサスクロッシング2x2やスロープ4マス等に対応）
    */
   private getItemTargetPositions(item: PendingItem): Array<{ x: number; z: number; layer: GridLayer }> {
-    const layer = (item.layer ?? this.worldMap.activeLayer) as GridLayer;
+    let layer = (item.layer ?? this.worldMap.activeLayer) as GridLayer;
     const tool = item.tool;
+    const cell = this.gridManager.getCell(item.x, 1, item.z);
+    const surfaceElevation = cell ? cell.elevation : 1;
+    const isSurfaceTool = tool === 'road' || tool === 'nature' || tool.startsWith('building-');
+    if (isSurfaceTool && layer < surfaceElevation) {
+      layer = surfaceElevation as GridLayer;
+    }
     const positions: Array<{ x: number; z: number; layer: GridLayer }> = [];
 
     if (tool === 'rail-slope' || tool === 'rail-slope-underground') {
@@ -1761,28 +1767,35 @@ export class PlacementController {
       }
     }
 
+    const affectedPositions: Array<{ x: number; z: number; layer: GridLayer }> = [];
+    const recordedKeys = new Set<string>();
+
+    for (const item of successfullyPlacedItems) {
+      const targetPosList = this.getItemTargetPositions(item);
+      for (const pos of targetPosList) {
+        const key = `${pos.x},${pos.z},${pos.layer}`;
+        if (!recordedKeys.has(key)) {
+          recordedKeys.add(key);
+          affectedPositions.push(pos);
+        }
+      }
+    }
+
     // Undo履歴の記録（本設置が確定してワールドデータと資金が実際に変更された時点でのみ記録）
-    if (successfullyPlacedItems.length > 0 && this.undoManager) {
+    if (affectedPositions.length > 0 && this.undoManager) {
       const netCost = total - refund;
       const tileSnapshots: TileSnapshot[] = [];
-      const recordedKeys = new Set<string>();
 
-      for (const item of successfullyPlacedItems) {
-        const targetPosList = this.getItemTargetPositions(item);
-        for (const pos of targetPosList) {
-          const key = `${pos.x},${pos.z},${pos.layer}`;
-          if (!recordedKeys.has(key)) {
-            recordedKeys.add(key);
-            const afterTile = this.worldMap.getTile(pos.x, pos.z, pos.layer);
-            tileSnapshots.push({
-              x: pos.x,
-              z: pos.z,
-              layer: pos.layer,
-              before: beforeSnapshots.get(key) ?? null,
-              after: cloneTileSnapshot(afterTile)
-            });
-          }
-        }
+      for (const pos of affectedPositions) {
+        const key = `${pos.x},${pos.z},${pos.layer}`;
+        const afterTile = this.worldMap.getTile(pos.x, pos.z, pos.layer);
+        tileSnapshots.push({
+          x: pos.x,
+          z: pos.z,
+          layer: pos.layer,
+          before: beforeSnapshots.get(key) ?? null,
+          after: cloneTileSnapshot(afterTile)
+        });
       }
 
       if (tileSnapshots.length > 0) {
@@ -1799,7 +1812,7 @@ export class PlacementController {
     this.updateRotationHint(this.uiManager.getActiveTool());
 
     if (this.onPlacementExecuted) {
-      this.onPlacementExecuted();
+      this.onPlacementExecuted(affectedPositions);
     }
   }
 

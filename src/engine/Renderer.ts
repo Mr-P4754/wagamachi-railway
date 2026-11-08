@@ -74,8 +74,9 @@ export class EngineRenderer {
 
     this.container.appendChild(this.renderer.domElement);
 
-    // 4. Ground plane (ぴったり64マスの境界サイズ: 64 * 2.0 = 128)
-    const groundGeo = new THREE.PlaneGeometry(128, 128);
+    // 4. Ground plane (デフォルト256マスの境界サイズ: 256 * 2.0 = 512)
+    const defaultWorldSize = this.currentGridSize * 2.0;
+    const groundGeo = new THREE.PlaneGeometry(defaultWorldSize, defaultWorldSize);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0x86b96e, // Natural rich grass
       roughness: 0.85,
@@ -102,7 +103,7 @@ export class EngineRenderer {
       roughness: 0.9,
       metalness: 0.1
     });
-    this.undergroundFloorMesh = new THREE.Mesh(new THREE.PlaneGeometry(128, 128), undergroundMat);
+    this.undergroundFloorMesh = new THREE.Mesh(new THREE.PlaneGeometry(defaultWorldSize, defaultWorldSize), undergroundMat);
     this.undergroundFloorMesh.rotation.x = -Math.PI / 2;
     this.undergroundFloorMesh.position.y = -3.01;
     this.undergroundFloorMesh.receiveShadow = true;
@@ -110,7 +111,7 @@ export class EngineRenderer {
     this.scene.add(this.undergroundFloorMesh);
 
     // 5. Grid helper (soft modern grid)
-    this.gridHelper = new THREE.GridHelper(128, 64, 0x0284c7, 0x94a3b8);
+    this.gridHelper = new THREE.GridHelper(defaultWorldSize, this.currentGridSize, 0x0284c7, 0x94a3b8);
     this.gridHelper.position.y = 0.01;
     const gridMat = this.gridHelper.material as THREE.Material;
     gridMat.opacity = 0.28;
@@ -370,7 +371,12 @@ export class EngineRenderer {
     return this.currentTimeOfDay;
   }
 
+  private currentGridSize: number = 256;
+
   public updateGroundAndGridSize(size: number) {
+    if (this.currentGridSize === size) return;
+    this.currentGridSize = size;
+
     const worldSize = size * 2.0; // 1マス = 2.0
     this.groundMesh.geometry.dispose();
     this.groundMesh.geometry = new THREE.PlaneGeometry(worldSize, worldSize);
@@ -378,10 +384,18 @@ export class EngineRenderer {
     this.undergroundFloorMesh.geometry.dispose();
     this.undergroundFloorMesh.geometry = new THREE.PlaneGeometry(worldSize, worldSize);
 
+    const wasVisible = this.gridHelper.visible;
+    const prevY = this.gridHelper.position.y;
     this.scene.remove(this.gridHelper);
     this.gridHelper.geometry.dispose();
+    if (Array.isArray(this.gridHelper.material)) {
+      this.gridHelper.material.forEach(m => m.dispose());
+    } else {
+      this.gridHelper.material.dispose();
+    }
     this.gridHelper = new THREE.GridHelper(worldSize, size, 0x0284c7, 0x94a3b8);
-    this.gridHelper.position.y = 0.01;
+    this.gridHelper.position.y = prevY;
+    this.gridHelper.visible = wasVisible;
     const gridMat = this.gridHelper.material as THREE.Material;
     gridMat.opacity = 0.28;
     gridMat.transparent = true;
